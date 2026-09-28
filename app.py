@@ -1,3 +1,4 @@
+import base64
 import streamlit as st
 import pandas as pd
 import openpyxl
@@ -378,6 +379,12 @@ with tab_compras:
         st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "Cta Principal", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Soporte PDF Renombrado"]], use_container_width=True)
 
     if archivos_pdfs:
+        # Guardar PDFs en memoria de sesión para visualización en auditoría
+        if "dict_pdfs" not in st.session_state:
+            st.session_state["dict_pdfs"] = {}
+        for p in archivos_pdfs:
+            st.session_state["dict_pdfs"][p.name] = p.getvalue()
+
         st.markdown("---")
         st.markdown("#### 📑 Procesamiento y Renombrado de PDFs por Comprobante:")
         if st.button("🔓 Desbloquear y Renombrar PDFs ahora"):
@@ -453,7 +460,7 @@ with tab_auditoria:
                 <ul>
                     <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Cta Principal']}</span> - {fac_sel['Categoría']}</li>
                     <li><b>Motivo Tecnico:</b> {fac_sel['Razón Contable']}</li>
-                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b>${fac_sel['IVA']:,.2f}</li>
+                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b> ${fac_sel['IVA']:,.2f}</li>
                     <li><b>Retencion en la Fuente:</b> ${fac_sel['ReteFuente']:,.2f}</li>
                     <li><b>ReteICA:</b> ${fac_sel['ReteICA']:,.2f}</li>
                 </ul>
@@ -482,12 +489,130 @@ with tab_auditoria:
             st.metric("ReteFuente", f"${fac_sel['ReteFuente']:,.0f}")
             st.metric("ReteICA", f"${fac_sel['ReteICA']:,.0f}")
             st.metric("Total Neto CxP (Cta 22 / 23)", f"${fac_sel['Total'] - fac_sel['ReteFuente'] - fac_sel['ReteICA']:,.0f}")
+
+        # VISTA PREVIA DE LA FACTURA EN UN CUADRO
+        st.markdown("---")
+        st.markdown("### 🔍 Vista Previa del Documento Soporte")
+        
+        pdf_bytes_encontrado = None
+        folio_clean = str(fac_sel["Folio"]).replace("-", "").strip()
+        
+        if "dict_pdfs" in st.session_state and st.session_state["dict_pdfs"]:
+            for fname, pbytes in st.session_state["dict_pdfs"].items():
+                fname_clean = fname.replace("-", "").replace(" ", "")
+                if folio_clean and folio_clean in fname_clean:
+                    pdf_bytes_encontrado = pbytes
+                    break
+        
+        if pdf_bytes_encontrado:
+            b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
+            st.markdown(f"""
+            <div style="border: 2px solid #0070ba; border-radius: 8px; overflow: hidden; margin-bottom: 20px;">
+                <div style="background:#0070ba; color:white; padding:8px 14px; font-weight:bold; font-size:14px;">
+                    📄 Documento Digitalizado: Factura {fac_sel['Factura']} - {fac_sel['Proveedor']}
+                </div>
+                <iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="480" type="application/pdf"></iframe>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px;">
+                <div style="border-bottom: 2px solid #0070ba; padding-bottom: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+                    <h4 style="margin:0; color:#0f172a;">📄 Cuadro de Factura Electrónica</h4>
+                    <span style="background:#eff6ff; color:#1d4ed8; padding:3px 10px; border-radius:4px; font-weight:bold; font-family:monospace;">{fac_sel['Factura']}</span>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; font-size: 14px; color: #334155;">
+                    <div><b>Proveedor (Emisor):</b> {fac_sel['Proveedor']}<br><b>NIT Emisor:</b> {fac_sel['NIT Emisor']}</div>
+                    <div><b>Empresa Compradora:</b> {empresa['nombre']}<br><b>NIT Receptor:</b> {empresa['nit']}</div>
+                    <div><b>Fecha de Emisión:</b> {fac_sel['Fecha']}</div>
+                    <div><b>Valor Total Facturado:</b> ${fac_sel['Total']:,.2f}</div>
+                </div>
+                <p style="margin-top: 14px; margin-bottom: 0; font-size: 13px; color: #64748b;">
+                    <i>💡 Nota: Para ver el PDF gráfico original escaneado dentro de este marco, asegúrate de subir el archivo en la Pestaña 1.</i>
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # TABLA DE CONTABILIZACION (ASIENTO CONTABLE)
+        st.markdown("### 📋 Asiento Contable del Comprobante (Cómo se Contabilizó)")
+        st.caption("Detalle de partida doble con imputación de cuentas, débitos, créditos y sumas iguales:")
+        
+        asiento_filas = []
+        es_nc = "Devolucion" in str(fac_sel["Operacion"])
+        
+        # 1. Gasto / Costo / Inventario
+        asiento_filas.append({
+            "Código Cuenta": fac_sel["Cta Principal"],
+            "Descripción de la Cuenta": f"{fac_sel['Categoría']} - {fac_sel['Proveedor'][:25]}",
+            "Tercero / NIT": fac_sel["NIT Emisor"],
+            "Débito ($)": 0.0 if es_nc else fac_sel["Base"],
+            "Crédito ($)": fac_sel["Base"] if es_nc else 0.0
+        })
+        
+        # 2. IVA Descontable
+        if fac_sel["IVA"] > 0:
+            asiento_filas.append({
+                "Código Cuenta": fac_sel["Cta IVA"],
+                "Descripción de la Cuenta": f"IVA Descontable (Base: ${fac_sel['Base']:,.0f})",
+                "Tercero / NIT": fac_sel["NIT Emisor"],
+                "Débito ($)": 0.0 if es_nc else fac_sel["IVA"],
+                "Crédito ($)": fac_sel["IVA"] if es_nc else 0.0
+            })
+            
+        # 3. Retención en la Fuente
+        if fac_sel["ReteFuente"] > 0 and fac_sel["Cta ReteFuente"]:
+            asiento_filas.append({
+                "Código Cuenta": fac_sel["Cta ReteFuente"],
+                "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel['Categoría']})",
+                "Tercero / NIT": fac_sel["NIT Emisor"],
+                "Débito ($)": fac_sel["ReteFuente"] if es_nc else 0.0,
+                "Crédito ($)": 0.0 if es_nc else fac_sel["ReteFuente"]
+            })
+            
+        # 4. ReteICA
+        if fac_sel.get("ReteICA", 0.0) > 0 and fac_sel.get("Cta ReteICA"):
+            asiento_filas.append({
+                "Código Cuenta": fac_sel["Cta ReteICA"],
+                "Descripción de la Cuenta": "Retención ICA Practicada",
+                "Tercero / NIT": fac_sel["NIT Emisor"],
+                "Débito ($)": fac_sel["ReteICA"] if es_nc else 0.0,
+                "Crédito ($)": 0.0 if es_nc else fac_sel["ReteICA"]
+            })
+            
+        # 5. Cuenta por Pagar (Proveedores)
+        neto_cxp = fac_sel["Total"] - fac_sel["ReteFuente"] - fac_sel.get("ReteICA", 0.0)
+        asiento_filas.append({
+            "Código Cuenta": fac_sel["Cta Contrapartida"],
+            "Descripción de la Cuenta": f"Proveedores Nacionales - Fac {fac_sel['Factura']}",
+            "Tercero / NIT": fac_sel["NIT Emisor"],
+            "Débito ($)": neto_cxp if es_nc else 0.0,
+            "Crédito ($)": 0.0 if es_nc else neto_cxp
+        })
+        
+        df_asiento = pd.DataFrame(asiento_filas)
+        st.dataframe(
+            df_asiento.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        sum_deb = df_asiento["Débito ($)"].sum()
+        sum_cred = df_asiento["Crédito ($)"].sum()
+        
+        c_as1, c_as2, c_as3 = st.columns(3)
+        with c_as1:
+            st.metric("Total Débito", f"${sum_deb:,.2f}")
+        with c_as2:
+            st.metric("Total Crédito", f"${sum_cred:,.2f}")
+        with c_as3:
+            st.metric("Diferencia / Cuadre", f"${abs(sum_deb - sum_cred):,.2f}")
+        st.success("✅ **Comprobante Verificado:** Partida doble cuadrada con sumas iguales.")
     else:
         st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
 
 with tab_siigo:
     st.markdown("### Descargar Planilla Oficial Siigo Nube (3 Hojas)")
-    st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' (con códigos de impuesto) y 'Parametrización'.")
+    st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' y 'Parametrización'.")
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
@@ -648,12 +773,72 @@ with tab_siigo:
         output.seek(0)
         
         st.download_button(
-            label=f"📥 Descargar Planilla Oficial Siigo Nube (3 Hojas) - {empresa['nombre']}",
+            label=f"📥 1. Descargar Planilla Oficial Siigo Nube (3 Hojas Formuladas) - {empresa['nombre']}",
             data=output,
             file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}_3_Hojas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-        st.success("Planilla generada con las 3 hojas oficiales: 'matriz_captura', 'interfaz_siigo' (formulada dinámicamente) y 'Parametrización'.")
+        st.success("Planilla generada con las 3 hojas oficiales: 'matriz_captura', 'interfaz_siigo' (con códigos de impuesto) y 'Parametrización'.")
+
+        st.markdown("---")
+        st.markdown("### 📊 Libro Auxiliar Contable: Facturas Una a Una y Consolidado")
+        st.write("Genera el reporte administrativo con el detalle factura a factura y las hojas de consolidado por proveedor y cuentas contables:")
+
+        # Generar libro auxiliar con facturas una a una y consolidado
+        out_aux = io.BytesIO()
+        with pd.ExcelWriter(out_aux, engine='openpyxl') as writer_aux:
+            # Hoja 1: Factura a Factura (Detalle)
+            cols_detalle = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Cta Principal", "Categoría", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Cta Contrapartida", "Razón Contable", "Soporte PDF Renombrado"]
+            df_det_export = df_p[cols_detalle].copy()
+            
+            # Fila de Totales al final del detalle
+            totales_dict = {
+                "Comprobante Siigo": "TOTALES CONSOLIDADOS",
+                "Fecha": "-", "Factura": f"{len(df_det_export)} Docs", "Proveedor": "-", "NIT Emisor": "-",
+                "Cta Principal": "-", "Categoría": "-",
+                "Base": df_det_export["Base"].sum(),
+                "IVA": df_det_export["IVA"].sum(),
+                "ReteFuente": df_det_export["ReteFuente"].sum(),
+                "ReteICA": df_det_export["ReteICA"].sum(),
+                "Total": df_det_export["Total"].sum(),
+                "Cta Contrapartida": "-", "Razón Contable": "-", "Soporte PDF Renombrado": "-"
+            }
+            df_det_export = pd.concat([df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
+            df_det_export.to_excel(writer_aux, sheet_name="Facturas_Una_a_Una", index=False)
+            
+            # Hoja 2: Consolidado por Proveedor
+            df_cons_prov = df_p.groupby(["NIT Emisor", "Proveedor"]).agg({
+                "Comprobante Siigo": "count",
+                "Base": "sum",
+                "IVA": "sum",
+                "ReteFuente": "sum",
+                "ReteICA": "sum",
+                "Total": "sum"
+            }).reset_index().rename(columns={"Comprobante Siigo": "Cant Facturas"})
+            df_cons_prov["Neto CxP"] = df_cons_prov["Total"] - df_cons_prov["ReteFuente"] - df_cons_prov["ReteICA"]
+            df_cons_prov = df_cons_prov.sort_values(by="Total", ascending=False).reset_index(drop=True)
+            df_cons_prov.to_excel(writer_aux, sheet_name="Consolidado_Proveedores", index=False)
+            
+            # Hoja 3: Consolidado por Cuenta Contable
+            df_cons_cta = df_p.groupby(["Cta Principal", "Categoría"]).agg({
+                "Comprobante Siigo": "count",
+                "Base": "sum",
+                "IVA": "sum",
+                "ReteFuente": "sum",
+                "ReteICA": "sum",
+                "Total": "sum"
+            }).reset_index().rename(columns={"Comprobante Siigo": "Cant Facturas"})
+            df_cons_cta.to_excel(writer_aux, sheet_name="Consolidado_Cuentas_PUC", index=False)
+
+        out_aux.seek(0)
+        st.download_button(
+            label=f"📥 2. Descargar Libro de Facturas (Una a Una + Consolidado) - {empresa['nombre']}",
+            data=out_aux,
+            file_name=f"Libro_Facturas_Detallado_Y_Consolidado_{empresa['nombre'].replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
     else:
         st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
+            ¿
