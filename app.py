@@ -4,6 +4,7 @@ import openpyxl
 import io
 import zipfile
 import re
+import datetime
 from pypdf import PdfReader, PdfWriter
 
 st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
@@ -219,33 +220,47 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
     t_comp = 17 if es_nc else 10
     op = "Devolucion Compra" if es_nc else "Compra"
     
+    # 1. Agentes Aduaneros e Importaciones
     if any(k in nombre for k in AGENTES_ADUANEROS):
-        return t_comp, op, "146505", "22050501", f"Importacion / Transito - {nombre_emisor[:25]}", round(valor_base * 0.04, 2) if valor_base >= 210000 else 0.0, "Importacion (1465)", "Honorarios Agenciamiento vs Terceros"
+        rfte = round(valor_base * 0.04, 2) if valor_base >= 210000 or "EURO SHIPPING" in nombre or "DHL" in nombre else 0.0
+        rica = round(valor_base * 0.00966, 2) if valor_base >= 210000 and "BUENAVENTURA" not in nombre and "PORTUARIA" not in nombre else 0.0
+        return t_comp, op, "146505", "22050501", f"Importacion / Transito - {nombre_emisor[:25]}", rfte, rica, "23652503", "24081501", "23680505", "Importacion (1465)", "Honorarios Agenciamiento vs Terceros"
         
-    repuestos_kw = ["FERROMENDEZ", "TORNILLOLOCO", "CAUCHOS", "ASIMFER", "MAFLEXCOL", "EMPRECOL", "BATTS ZONE", "MECANIZAR", "HIDRAHULICAS", "BAMACOLGROUP"]
+    # 2. Repuestos / Mantenimiento
+    repuestos_kw = ["FERROMENDEZ", "TORNILLOLOCO", "CAUCHOS", "ASIMFER", "MAFLEXCOL", "EMPRECOL", "BATTS ZONE", "MECANIZAR", "HIDRAHULICAS", "ELECTRICOS", "ILUMINACION", "BAMACOLGROUP"]
     if any(k in nombre for k in repuestos_kw):
+        rfte = round(valor_base * 0.025, 2) if valor_base >= 1047000 else 0.0
+        rica = round(valor_base * 0.01104, 2) if valor_base >= 1414000 else 0.0
         if valor_base >= 500000:
-            return t_comp, op, "14350101", "22050501", f"Repuestos / Inventario - {nombre_emisor[:25]}", round(valor_base * 0.025, 2) if valor_base >= 1414000 else 0.0, "Inventario", "Compra repuestos mayores a 500k"
+            return t_comp, op, "14350101", "22050501", f"Repuestos / Inventario - {nombre_emisor[:25]}", rfte, rica, "23654001", "24081001", "23680501", "Inventario", "Compra repuestos mayores a 500k"
         else:
-            return t_comp, op, "61800101", "23359501", f"Mantenimiento menor - {nombre_emisor[:25]}", 0.0, "Costo Mantenimiento", "Repuestos menores a 500k"
+            return t_comp, op, "61800101", "23359501", f"Mantenimiento menor - {nombre_emisor[:25]}", 0.0, 0.0, "23654001", "24081001", "23680501", "Costo Mantenimiento", "Repuestos menores a 500k"
             
+    # 3. Hoteles / Viajes
     if any(k in nombre for k in ["HOTEL", "ESTELAR", "GENOVA", "VITTAPARK"]):
-        return t_comp, op, "51550501", "23359501", f"Alojamiento / Viaje - {nombre_emisor[:25]}", round(valor_base * 0.035, 2) if valor_base >= 210000 else 0.0, "Gasto Viaje", "Hospedaje de personal"
+        rfte = round(valor_base * 0.035, 2) if valor_base >= 210000 else 0.0
+        rica = round(valor_base * 0.00966, 2) if valor_base >= 210000 else 0.0
+        return t_comp, op, "51550501", "23359501", f"Alojamiento / Viaje - {nombre_emisor[:25]}", rfte, rica, "23652501", "24081501", "23680505", "Gasto Viaje", "Hospedaje de personal"
         
+    # 4. Software Siigo
     if "SIIGO" in nombre:
-        return t_comp, op, "51352001", "23359501", f"Software Siigo - {nombre_emisor[:25]}", 0.0, "Software", "Autorretenedor de renta"
+        return t_comp, op, "51352001", "23359501", f"Software Siigo - {nombre_emisor[:25]}", 0.0, 0.0, "", "24081501", "", "Software", "Autorretenedor de renta"
         
-    if "PANAMERICANA" in nombre:
-        return t_comp, op, "51953001", "23359501", f"Papeleria - {nombre_emisor[:25]}", 0.0, "Gastos Papeleria", "Utiles de oficina"
+    # 5. Papelería
+    if any(k in nombre for k in ["PANAMERICANA", "LIBRERIA"]):
+        return t_comp, op, "51953001", "23359501", f"Papeleria - {nombre_emisor[:25]}", 0.0, 0.0, "", "24081001", "", "Gastos Papeleria", "Utiles de oficina"
         
+    # 6. Compras y Gastos Generales
     if valor_base >= 500000:
-        return t_comp, op, "14350101", "22050501", f"Compra mercancias - {nombre_emisor[:25]}", round(valor_base * 0.025, 2) if valor_base >= 1414000 else 0.0, "Mercancia", "Compra general > 500k"
+        rfte = round(valor_base * 0.025, 2) if valor_base >= 1047000 else 0.0
+        rica = round(valor_base * 0.01104, 2) if valor_base >= 1414000 else 0.0
+        return t_comp, op, "14350101", "22050501", f"Compra mercancias - {nombre_emisor[:25]}", rfte, rica, "23654001", "24081001", "23680501", "Mercancia", "Compra general > 500k"
     else:
-        return t_comp, op, "51959501", "23359501", f"Gastos generales - {nombre_emisor[:25]}", 0.0, "Gasto General", "Compra menor general"
+        return t_comp, op, "51959501", "23359501", f"Gastos generales - {nombre_emisor[:25]}", 0.0, 0.0, "", "24081001", "", "Gasto General", "Compra menor general"
 
 with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
-    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el token de acceso, y los PDFs para desbloquear y renombrar automáticamente por comprobante.")
+    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs para desbloquear y renombrar automáticamente por comprobante.")
     
     col_u1, col_u2 = st.columns(2)
     with col_u1:
@@ -255,21 +270,48 @@ with tab_compras:
         
     if archivo_excel is not None:
         df_dian = pd.read_excel(archivo_excel)
-        st.success(f"Reporte procesado: **{len(df_dian)} facturas identificadas**.")
+        
+        # Identificar columna de fecha y ordenar cronológicamente de Enero a la fecha actual
+        col_fecha = None
+        for col_cand in ["Fecha Emisión", "Fecha Emision", "Fecha", "Fecha de Emisión"]:
+            if col_cand in df_dian.columns:
+                col_fecha = col_cand
+                break
+        if col_fecha is None:
+            col_fecha = df_dian.columns
+            
+        df_dian["_fecha_dt"] = pd.to_datetime(df_dian[col_fecha], dayfirst=True, errors="coerce")
+        df_dian = df_dian.sort_values(by="_fecha_dt", ascending=True).reset_index(drop=True)
+        
+        st.success(f"Reporte procesado y ordenado cronológicamente (Enero a la fecha): **{len(df_dian)} facturas identificadas**.")
         
         filas = []
         for idx, r in df_dian.iterrows():
             tipo_doc = r.get("Tipo de documento") or r.get("Tipo documento") or "Factura electrónica"
             folio = str(r.get("Folio") or r.get("Factura") or r.get("Factura Num") or f"Doc_{idx+1}").strip()
-            prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
-            fecha = str(r.get("Fecha Emisión") or r.get("Fecha") or "S/F").split()[0]
+            if folio.endswith(".0"):
+                folio = folio[:-2]
+            prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) and str(r.get("Prefijo")) != "nan" else ""
+            
+            # Fecha formateada DD/MM/AAAA
+            f_dt = r["_fecha_dt"]
+            if pd.notna(f_dt):
+                fecha_str = f"{f_dt.day:02d}/{f_dt.month:02d}/{f_dt.year}"
+            else:
+                fecha_str = str(r.get(col_fecha, "S/F")).split()[0]
+                
             nit_e = str(r.get("NIT Emisor") or r.get("NIT") or "").strip()
+            if nit_e.endswith(".0"):
+                nit_e = nit_e[:-2]
             nom_e = str(r.get("Nombre Emisor") or r.get("Proveedor (Emisor)") or r.get("Proveedor") or "Proveedor").strip()
-            iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
-            tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
+            
+            try: iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
+            except: iva = 0.0
+            try: tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
+            except: tot = 0.0
             base = round(tot - iva, 2)
             
-            t_comp, op, cta_p, cta_c, desc, rfte, cat, razon = clasificar_factura(nit_e, nom_e, base, tipo_doc)
+            t_comp, op, cta_p, cta_c, desc, rfte, rica, cta_rfte, cta_iva, cta_rica, cat, razon = clasificar_factura(nit_e, nom_e, base, tipo_doc)
             consecutivo = 680 + idx
             
             nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
@@ -280,17 +322,26 @@ with tab_compras:
                 "Tipo Comp": t_comp,
                 "Consecutivo": consecutivo,
                 "Comprobante Siigo": f"Comp {t_comp}-{consecutivo}",
-                "Fecha": fecha,
+                "Fecha": fecha_str,
+                "Prefijo": prefijo,
+                "Folio": folio,
                 "Factura": f"{prefijo}-{folio}" if prefijo else folio,
                 "Proveedor": nom_e,
                 "NIT Emisor": nit_e,
-                "Concepto / Cta": cta_p,
+                "Descripcion": desc,
+                "Operacion": op,
+                "Cta Principal": cta_p,
                 "Categoría": cat,
                 "Base": base,
                 "IVA": iva,
                 "ReteFuente": rfte,
-                "Total": tot,
+                "ReteICA": rica,
+                "ReteIVA": 0.0,
                 "Cta Contrapartida": cta_c,
+                "Cta IVA": cta_iva,
+                "Cta ReteFuente": cta_rfte,
+                "Cta ReteICA": cta_rica,
+                "Total": tot,
                 "Razón Contable": razon,
                 "Soporte PDF Renombrado": nombre_pdf_esperado
             })
@@ -298,8 +349,8 @@ with tab_compras:
         df_proc = pd.DataFrame(filas)
         st.session_state["df_procesado"] = df_proc
         
-        st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes:")
-        st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Total", "Soporte PDF Renombrado"]], use_container_width=True)
+        st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
+        st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "Cta Principal", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Soporte PDF Renombrado"]], use_container_width=True)
 
     if archivos_pdfs:
         st.markdown("---")
@@ -329,7 +380,7 @@ with tab_compras:
                         nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_file.name}"
                         if "df_procesado" in st.session_state:
                             for _, r_mat in st.session_state["df_procesado"].iterrows():
-                                fac_num = str(r_mat["Factura"]).replace("-", "")
+                                fac_num = str(r_mat["Folio"]).replace("-", "").strip()
                                 if fac_num and fac_num in texto_pdf.replace("-", "").replace(" ", ""):
                                     nombre_final = r_mat["Soporte PDF Renombrado"]
                                     break
@@ -357,7 +408,7 @@ with tab_auditoria:
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
-        opciones_fac = [f"[{r['Comprobante Siigo']}] {r['Factura']} - {r['Proveedor']} (${r['Total']:,.0f})" for _, r in df_p.iterrows()]
+        opciones_fac = [f"[{r['Comprobante Siigo']}] {r['Fecha']} - {r['Factura']} - {r['Proveedor']} (${r['Total']:,.0f})" for _, r in df_p.iterrows()]
         seleccion = st.selectbox("Selecciona una factura para auditar:", opciones_fac)
         
         comp_sel = seleccion.split("]")[0].replace("[", "")
@@ -375,10 +426,11 @@ with tab_auditoria:
                 <hr>
                 <h5>Trazabilidad de la Contabilizacion:</h5>
                 <ul>
-                    <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Concepto / Cta']}</span> - {fac_sel['Categoría']}</li>
+                    <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Cta Principal']}</span> - {fac_sel['Categoría']}</li>
                     <li><b>Motivo Tecnico:</b> {fac_sel['Razón Contable']}</li>
                     <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b>${fac_sel['IVA']:,.2f}</li>
                     <li><b>Retencion en la Fuente:</b> ${fac_sel['ReteFuente']:,.2f}</li>
+                    <li><b>ReteICA:</b> ${fac_sel['ReteICA']:,.2f}</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
@@ -403,29 +455,182 @@ with tab_auditoria:
             st.metric("Base Gravable", f"${fac_sel['Base']:,.0f}")
             st.metric("IVA Liquidado", f"${fac_sel['IVA']:,.0f}")
             st.metric("ReteFuente", f"${fac_sel['ReteFuente']:,.0f}")
-            st.metric("Total a Pagar (Cta 22 / 23)", f"${fac_sel['Total'] - fac_sel['ReteFuente']:,.0f}")
+            st.metric("ReteICA", f"${fac_sel['ReteICA']:,.0f}")
+            st.metric("Total Neto CxP (Cta 22 / 23)", f"${fac_sel['Total'] - fac_sel['ReteFuente'] - fac_sel['ReteICA']:,.0f}")
     else:
         st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
 
 with tab_siigo:
-    st.markdown("### Descargar Planilla de Importacion Oficial para Siigo Nube")
+    st.markdown("### Descargar Planilla Oficial Siigo Nube (3 Hojas)")
+    st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' y 'Parametrización'.")
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_siigo = df_p[["Tipo Comp", "Consecutivo", "Fecha", "NIT Emisor", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Cta Contrapartida"]].copy()
-            df_siigo.columns = ["Tipo Comp", "Consecutivo", "Fecha", "NIT", "Factura Num", "Descripcion", "Cta Principal", "Valor Base", "IVA", "ReteFuente", "Cta Contrapartida"]
-            df_siigo.to_excel(writer, sheet_name="matriz_captura", index=False)
+        
+        # Generar archivo Excel con las 3 hojas completas
+        wb = openpyxl.Workbook()
+        
+        # 1. Hoja matriz_captura
+        ws_matriz = wb.active
+        ws_matriz.title = "matriz_captura"
+        headers_matriz = [
+            "Tipo Comp", "Consecutivo", "Fecha (DD/MM/AAAA)", "NIT", "Prefijo", "Factura Num",
+            "Descripcion", "Operacion", "Cta Principal", "Valor Base", "IVA", "ReteFuente",
+            "ReteICA", "ReteIVA", "Cta Contrapartida"
+        ]
+        ws_matriz.append(headers_matriz)
+        
+        # 2. Hoja interfaz_siigo
+        ws_interfaz = wb.create_sheet(title="interfaz_siigo")
+        headers_interfaz = [
+            "Tipo de comprobante", "Consecutivo comprobante", "Fecha de elaboración", "Sigla moneda",
+            "Tasa de cambio", "Código cuenta contable", "Identificación tercero", "Sucursal",
+            "Código producto", "Código de bodega", "Acción", "Cantidad producto", "Prefijo",
+            "Consecutivo", "No. cuota", "Fecha vencimiento", "Código impuesto", "Código grupo activo fijo",
+            "Código activo fijo", "Descripción", "Código centro/subcentro de costos", "Débito",
+            "Crédito", "Observaciones", "Base gravable libro compras/ventas", "Base exenta libro compras/ventas", "Mes de cierre"
+        ]
+        ws_interfaz.append(headers_interfaz)
+        
+        fila_r = 2
+        for _, item in df_p.iterrows():
+            t_comp = item["Tipo Comp"]
+            cons = item["Consecutivo"]
+            f_str = item["Fecha"]
+            nit = item["NIT Emisor"]
+            pref = item["Prefijo"]
+            fac_num = item["Folio"]
+            desc = item["Descripcion"]
+            op = item["Operacion"]
+            cta_p = item["Cta Principal"]
+            base = item["Base"]
+            iva = item["IVA"]
+            rfte = item["ReteFuente"]
+            rica = item.get("ReteICA", 0.0)
+            riva = item.get("ReteIVA", 0.0)
+            cta_c = item["Cta Contrapartida"]
+            cta_iva = item.get("Cta IVA", "24081001")
+            cta_rfte = item.get("Cta ReteFuente", "23654001")
+            cta_rica = item.get("Cta ReteICA", "23680501")
             
+            ws_matriz.append([
+                t_comp, cons, f_str, nit, pref, fac_num,
+                desc, op, cta_p, base, iva, rfte, rica, riva, cta_c
+            ])
+            
+            r = fila_r
+            # Línea 1: Base Imponible
+            ws_interfaz.append([
+                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                f"=matriz_captura!I{r}", f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "", "", "", "",
+                f"=matriz_captura!G{r}", "",
+                f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r})',
+                f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r}, 0)',
+                "", f"=matriz_captura!J{r}", 0.0, ""
+            ])
+            
+            # Línea 2: IVA
+            if iva > 0:
+                cod_imp_iva = 1 if cta_iva == "24081001" else ""
+                ws_interfaz.append([
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                    cta_iva, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                    cod_imp_iva, "", "", f'="IVA Base: " & matriz_captura!J{r}', "",
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!K{r})',
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!K{r}, 0)',
+                    "", f"=matriz_captura!J{r}", 0.0, ""
+                ])
+                
+            # Línea 3: ReteFuente
+            if rfte > 0 and cta_rfte:
+                ws_interfaz.append([
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                    cta_rfte, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                    "", "", "", f'="ReteFuente Base: " & matriz_captura!J{r}', "",
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!L{r}, 0)',
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!L{r})',
+                    "", f"=matriz_captura!J{r}", 0.0, ""
+                ])
+                
+            # Línea 4: ReteICA
+            if rica > 0 and cta_rica:
+                ws_interfaz.append([
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                    cta_rica, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                    "", "", "", f'="ReteICA Base: " & matriz_captura!J{r}', "",
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!M{r}, 0)',
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!M{r})',
+                    "", f"=matriz_captura!J{r}", 0.0, ""
+                ])
+                
+            # Línea 5: Cuenta por Pagar (Contrapartida)
+            formula_deb = f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r} + matriz_captura!K{r} - matriz_captura!L{r} - matriz_captura!M{r} - matriz_captura!N{r}, 0)'
+            formula_cred = f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r} + matriz_captura!K{r} - matriz_captura!L{r} - matriz_captura!M{r} - matriz_captura!N{r})'
+            ws_interfaz.append([
+                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                f"=matriz_captura!O{r}", f"=matriz_captura!D{r}", 0, "", "", "", "",
+                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", 1, f"=matriz_captura!C{r}",
+                "", "", "", f'="Fac " & matriz_captura!E{r} & "-" & matriz_captura!F{r}', "",
+                formula_deb, formula_cred, "", 0.0, 0.0, ""
+            ])
+            fila_r += 1
+            
+        # 3. Hoja Parametrización
+        ws_params = wb.create_sheet(title="Parametrización")
+        ws_params.append(["Tipo Comprobante", "", "Impuesto", "Siigo_ID", "Tarifa", "Venta", "Compra", "Dev_Venta", "Dev_Compra"])
+        comprobantes = [
+            "1 - Ajustes contables", "2 - Depreciación", "3 - Costeo", "4 - Diferidos", "5 - Legalización de viaticos",
+            "6 - Legalización de Caja menores", "7 - Obligaciones financieras", "8 - Nómina", "998 - Cierre año",
+            "999 - Saldos iniciales", "992 - Comprobante de nómina", "993 - Comprobante de nómina provisión y seguridad social",
+            "994 - Comprobante liquidación de contrato", "995 - Comprobante liquidación de primas", "996 - Comprobante liquidación de cesantías",
+            "997 - Comprobante desembolso nómina", "9 - Recibo de Caja", "10 - Factura de Compra", "11 - Comprobante de Egreso",
+            "12 - Factura de Venta", "13 - Nota Credito", "14 - Nota de Contabilidad", "15 - Documento soporte electronico",
+            "777 - Ajustes contables de cartera", "9901 - Traslado de dinero", "16 - FACTURAS DE COMPRA (2)", "17 - NOTA CREDITO DE COMPRA"
+        ]
+        impuestos = [
+            ("IVA 19%", 1, 0.19, "24080601", "24081001", "24082001", "24081002"),
+            ("IVA Servicios 19%", "", 0.19, "24080601", "24081501", "24082001", "24082001"),
+            ("IVA 5%", 2, 0.05, "24080602", "24081003", "24082002", "24081004"),
+            ("Retefuente 11%", 3, 0.11, "13551509", "23651501", "13551510", "23651502"),
+            ("Retefuente 10%", 4, 0.1, "13551507", "23652001", "13551508", "23652002"),
+            ("Retefuente 6%", 5, 0.06, "13551505", "23652501", "13551506", "23652502"),
+            ("Retefuente 4%", 6, 0.04, "13551503", "23652503", "13551504", "23652504"),
+            ("Retefuente 3.5%", 18, 0.035, "13551513", "23654004", "13551514", "23654005"),
+            ("Retefuente 2.5%", 7, 0.025, "13551501", "23654001", "13551502", "23654002"),
+            ("Retefuente Combustibles 0.1%", 23, 0.001, "13551599", "23654006", "13551599", "23654006"),
+            ("ReteICA 11.04", 8, 0.01104, "13551801", "23680501", "13551802", "23680502"),
+            ("ReteICA 13.8", 9, 0.0138, "13551803", "23680503", "13551804", "23680504"),
+            ("ReteICA 9.66", 10, 0.00966, "13551805", "23680505", "13551806", "23680506"),
+            ("ReteICA 8", 11, 0.008, "13551807", "23680507", "13551808", "23680508"),
+            ("ReteICA 7", 12, 0.007, "13551809", "23680509", "13551810", "23680510"),
+            ("ReteICA 6.9", 13, 0.0069, "13551811", "23680511", "13551812", "23680512"),
+            ("ReteICA 4.14", 14, 0.00414, "13551813", "23680513", "13551814", "23680514"),
+            ("ReteIVA 15%", 15, 0.15, "13551701", "23670101", "13551702", "23670102")
+        ]
+        max_len = max(len(comprobantes), len(impuestos))
+        for idx_row in range(max_len):
+            c_val = comprobantes[idx_row] if idx_row < len(comprobantes) else ""
+            if idx_row < len(impuestos):
+                imp = impuestos[idx_row]
+                ws_params.append([c_val, "", imp[0], imp, imp, imp, imp[4], imp[5], imp[6]])
+            else:
+                ws_params.append([c_val, "", "", "", "", "", "", "", ""])
+                
+        output = io.BytesIO()
+        wb.save(output)
+        output[c_val, "", "", "", "", "", "", "", ""])
+                
+        output = io.BytesIO()
+        wb.save(output)
         output.seek(0)
+        
         st.download_button(
-            label=f"Descargar Planilla Siigo ({empresa['nombre']})",
+            label=f"📥 Descargar Planilla Oficial Siigo Nube (3 Hojas) - {empresa['nombre']}",
             data=output,
-            file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}.xlsx",
+            file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}_3_Hojas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-        st.success("Estructura validada para cargar directamente en Siigo Nube.")
+        st.success("Planilla generada con las 3 hojas oficiales: 'matriz_captura', 'interfaz_siigo' (formulada dinámicamente) y 'Parametrización'.")
     else:
         st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
