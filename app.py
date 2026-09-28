@@ -1,0 +1,331 @@
+import streamlit as st
+import pandas as pd
+import openpyxl
+import io
+import zipfile
+import re
+from pypdf import PdfReader, PdfWriter
+
+st.set_page_config(page_title="Sistema ERP & Auditoría Contable DIAN", layout="wide", page_icon="🏢")
+
+# Estilos visuales tipo Siigo / World Office
+st.markdown("""
+<style>
+    .main { background-color: #f8fafc; }
+    .stButton>button { background-color: #0070ba; color: white; border-radius: 6px; font-weight: 600; }
+    .card-box { background: white; padding: 22px; border-radius: 10px; border: 1px solid #e2e8f0; box-shadow: 0 2px 5px rgba(0,0,0,0.04); margin-bottom: 18px; }
+    .card-box:hover { border-color: #0070ba; }
+    .audit-card { background: #ffffff; padding: 22px; border-left: 5px solid #0070ba; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
+    .badge-active { background-color: #dcfce7; color: #15803d; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+    .badge-next { background-color: #f1f5f9; color: #64748b; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+    .tag-propio { background-color: #dcfce7; color: #15803d; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
+
+# 1. ESTADOS DE SESIÓN (LOGIN, EMPRESA, PROCESO)
+if "autenticado" not in st.session_state:
+    st.session_state["autenticado"] = False
+if "empresa_activa" not in st.session_state:
+    st.session_state["empresa_activa"] = None
+if "proceso_activo" not in st.session_state:
+    st.session_state["proceso_activo"] = None
+
+# PANTALLA 1: LOGIN
+if not st.session_state["autenticado"]:
+    col1, col2, col3 = st.columns()
+    with col2:
+        st.markdown("<h2 style='text-align: center; color: #0f172a;'>Portal ERP & Auditoría Contable</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #64748b;'>Plataforma unificada para gestión contable y DIAN (Siigo / World Office)</p>", unsafe_allow_html=True)
+        
+        with st.form("login_form"):
+            usuario = st.text_input("Usuario o Correo Electrónico", value="deibydaza2014@gmail.com")
+            password = st.text_input("Contraseña", type="password", value="123456")
+            submit = st.form_submit_button("Ingresar al Ecosistema")
+            
+            if submit:
+                if usuario and password:
+                    st.session_state["autenticado"] = True
+                    st.rerun()
+                else:
+                    st.error("Ingresa usuario y contraseña.")
+    st.stop()
+
+# PANTALLA 2: SELECTOR DE EMPRESAS
+EMPRESAS_DISPONIBLES = [
+    {"nombre": "INDUMAQ ER SAS", "nit": "901.346.412-5", "actividad": "Comercio y Reparación de Maquinaria / Importaciones", "regimen": "Responsable de IVA"},
+    {"nombre": "ASMINCOL S.A.S.", "nit": "900.467.519-1", "actividad": "Servicios Mineros y Construcción", "regimen": "Responsable de IVA"},
+    {"nombre": "CONSTRUDISEÑO CT SAS", "nit": "900.524.356-8", "actividad": "Construcción y Obras Civiles", "regimen": "Responsable de IVA"},
+    {"nombre": "SCG TRANSPORTES", "nit": "901.700.731-8", "actividad": "Transporte de Carga y Logística", "regimen": "Responsable de IVA"},
+    {"nombre": "OPJ SAS", "nit": "901.425.101-3", "actividad": "Servicios Generales y Operaciones", "regimen": "Responsable de IVA"}
+]
+
+if not st.session_state["empresa_activa"]:
+    st.title("🏢 Selección de Empresa")
+    st.caption("Selecciona la entidad sobre la cual vas a trabajar:")
+    
+    c1, c2 = st.columns(2)
+    for i, emp in enumerate(EMPRESAS_DISPONIBLES):
+        col = c1 if i % 2 == 0 else c2
+        with col:
+            st.markdown(f"""
+            <div class="card-box">
+                <h3 style="margin-top:0; color:#0f172a;">{emp['nombre']}</h3>
+                <p style="margin:2px 0; color:#475569;"><b>NIT:</b> {emp['nit']} | <b>Régimen:</b> {emp['regimen']}</p>
+                <p style="margin:2px 0 14px 0; color:#64748b; font-size:14px;">{emp['actividad']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button(f"Ingresar a {emp['nombre']}", key=f"btn_emp_{i}"):
+                st.session_state["empresa_activa"] = emp
+                st.session_state["proceso_activo"] = None
+                st.rerun()
+    st.stop()
+
+empresa = st.session_state["empresa_activa"]
+
+# PANTALLA 3: MENÚ DE PROCESOS OPERATIVOS
+PROCESOS_SISTEMA = [
+    {
+        "id": "facturacion",
+        "icono": "📥",
+        "titulo": "Facturas de Compra, Venta y Devoluciones",
+        "desc": "Carga de reportes DIAN/Token, desbloqueo automático de facturas, auditoría contable y generación de la plantilla de importación para Siigo Nube.",
+        "estado": "ACTIVO",
+        "badge": "badge-active"
+    },
+    {
+        "id": "nomina",
+        "icono": "👥",
+        "titulo": "Gestión Laboral y Nómina Electrónica",
+        "desc": "Cálculo de liquidación de nómina, provisiones de prestaciones sociales, seguridad social y emisión de soportes electrónicos DIAN.",
+        "estado": "PRÓXIMAMENTE",
+        "badge": "badge-next"
+    },
+    {
+        "id": "conciliacion",
+        "icono": "🏦",
+        "titulo": "Tesorería y Conciliación Bancaria",
+        "desc": "Cruce automatizado de extractos bancarios (Bancolombia, Davivienda) contra libros auxiliares y control de partidas conciliatorias.",
+        "estado": "PRÓXIMAMENTE",
+        "badge": "badge-next"
+    },
+    {
+        "id": "notas",
+        "icono": "📑",
+        "titulo": "Notas de Contabilidad y Cierre Fiscal",
+        "desc": "Comprobantes de ajuste, amortizaciones de intangibles (NIC 38), depreciaciones y conciliación fiscal NIIF vs. DIAN.",
+        "estado": "PRÓXIMAMENTE",
+        "badge": "badge-next"
+    }
+]
+
+if not st.session_state["proceso_activo"]:
+    col_t1, col_t2 = st.columns()
+    with col_t1:
+        st.subheader(f"🏢 {empresa['nombre']} — Panel de Procesos")
+        st.caption(f"NIT: {empresa['nit']} | Selecciona el módulo de trabajo que deseas ejecutar:")
+    with col_t2:
+        if st.button("⬅️ Cambiar de Empresa"):
+            st.session_state["empresa_activa"] = None
+            st.session_state["proceso_activo"] = None
+            st.rerun()
+
+    st.markdown("---")
+    
+    cp1, cp2 = st.columns(2)
+    for idx, proc in enumerate(PROCESOS_SISTEMA):
+        col_p = cp1 if idx % 2 == 0 else cp2
+        with col_p:
+            st.markdown(f"""
+            <div class="card-box">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3 style="margin:0; color:#0f172a;">{proc['icono']} {proc['titulo']}</h3>
+                    <span class="{proc['badge']}">{proc['estado']}</span>
+                </div>
+                <p style="margin:12px 0 16px 0; color:#475569; font-size:14px; line-height:1.5;">{proc['desc']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            if proc["estado"] == "ACTIVO":
+                if st.button(f"Abrir Módulo de Facturación", key=f"btn_proc_{idx}"):
+                    st.session_state["proceso_activo"] = proc["id"]
+                    st.rerun()
+            else:
+                st.button(f"Módulo en Construcción ({proc['estado']})", key=f"btn_proc_{idx}", disabled=True)
+    st.stop()
+
+# PANTALLA 4: FACTURACIÓN, AUDITORÍA Y SIIGO
+col_nav1, col_nav2 = st.columns()
+with col_nav1:
+    st.subheader(f"📥 {empresa['nombre']} | Facturación, Auditoría & Siigo")
+    st.caption(f"NIT: {empresa['nit']} | Módulo Activo: Facturas de Compra, Venta y Devoluciones")
+with col_nav2:
+    if st.button("⬅️ Volver a Procesos"):
+        st.session_state["proceso_activo"] = None
+        st.rerun()
+
+st.markdown("---")
+
+tab_compras, tab_auditoria, tab_siigo = st.tabs([
+    "📂 1. Cargar Documentos y Desbloquear",
+    "🔍 2. Auditoría y Trazabilidad Fiscal",
+    "📊 3. Exportar Planilla Oficial a Siigo"
+])
+
+AGENTES_ADUANEROS = ["DHL", "ADUANA", "EURO SHIPPING", "PORTUARIA", "ALMACENADORA", "CARGO", "TRADE GLOBAL", "TERMINAL", "BUENAVENTURA"]
+
+def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
+    nombre = str(nombre_emisor).upper()
+    es_nc = "CRÉDITO" in str(tipo_doc).upper() or "CREDITO" in str(tipo_doc).upper()
+    t_comp = 17 if es_nc else 10
+    op = "Devolucion Compra" if es_nc else "Compra"
+    
+    if any(k in nombre for k in AGENTES_ADUANEROS):
+        return t_comp, op, "146505", "22050501", f"Importación / Tránsito - {nombre_emisor[:25]}", round(valor_base * 0.04, 2) if valor_base >= 210000 else 0.0, "Importación (1465)", "Honorarios Agenciamiento vs Terceros"
+        
+    repuestos_kw = ["FERROMENDEZ", "TORNILLOLOCO", "CAUCHOS", "ASIMFER", "MAFLEXCOL", "EMPRECOL", "BATTS ZONE", "MECANIZAR", "HIDRAHULICAS", "BAMACOLGROUP"]
+    if any(k in nombre for k in repuestos_kw):
+        if valor_base >= 500000:
+            return t_comp, op, "14350101", "22050501", f"Repuestos / Inventario - {nombre_emisor[:25]}", round(valor_base * 0.025, 2) if valor_base >= 1414000 else 0.0, "Inventario", "Compra repuestos mayores a 500k"
+        else:
+            return t_comp, op, "61800101", "23359501", f"Mantenimiento menor - {nombre_emisor[:25]}", 0.0, "Costo Mantenimiento", "Repuestos menores a 500k"
+            
+    if any(k in nombre for k in ["HOTEL", "ESTELAR", "GENOVA", "VITTAPARK"]):
+        return t_comp, op, "51550501", "23359501", f"Alojamiento / Viaje - {nombre_emisor[:25]}", round(valor_base * 0.035, 2) if valor_base >= 210000 else 0.0, "Gasto Viaje", "Hospedaje de personal"
+        
+    if "SIIGO" in nombre:
+        return t_comp, op, "51352001", "23359501", f"Software Siigo - {nombre_emisor[:25]}", 0.0, "Software", "Autorretenedor de renta"
+        
+    if "PANAMERICANA" in nombre:
+        return t_comp, op, "51953001", "23359501", f"Papelería - {nombre_emisor[:25]}", 0.0, "Gastos Papelería", "Útiles de oficina"
+        
+    if valor_base >= 500000:
+        return t_comp, op, "14350101", "22050501", f"Compra mercancías - {nombre_emisor[:25]}", round(valor_base * 0.025, 2) if valor_base >= 1414000 else 0.0, "Mercancía", "Compra general > 500k"
+    else:
+        return t_comp, op, "51959501", "23359501", f"Gastos generales - {nombre_emisor[:25]}", 0.0, "Gasto General", "Compra menor general"
+
+with tab_compras:
+    st.markdown("### 1. Insumos DIAN y Facturas en PDF")
+    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el token de acceso, y los PDFs para desbloquear.")
+    
+    col_u1, col_u2 = st.columns(2)
+    with col_u1:
+        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
+    with col_u2:
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo automático)", type=["pdf"], accept_multiple_files=True)
+        
+    if archivo_excel is not None:
+        df_dian = pd.read_excel(archivo_excel)
+        st.success(f"Reporte procesado: **{len(df_dian)} facturas identificadas**.")
+        
+        filas = []
+        for idx, r in df_dian.iterrows():
+            tipo_doc = r.get("Tipo de documento", "Factura electrónica")
+            folio = str(r.get("Folio", f"Doc_{idx+1}")).strip()
+            prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
+            fecha = str(r.get("Fecha Emisión", "S/F")).split()[0]
+            nit_e = str(r.get("NIT Emisor", "")).strip()
+            nom_e = str(r.get("Nombre Emisor", "Proveedor")).strip()
+            iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
+            tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
+            base = round(tot - iva, 2)
+            
+            t_comp, op, cta_p, cta_c, desc, rfte, cat, razon = clasificar_factura(nit_e, nom_e, base, tipo_doc)
+            
+            filas.append({
+                "N°": idx + 1,
+                "Tipo Comp": t_comp,
+                "Consecutivo": 680 + idx,
+                "Fecha": fecha,
+                "Factura": f"{prefijo}-{folio}" if prefijo else folio,
+                "Proveedor": nom_e,
+                "NIT Emisor": nit_e,
+                "Concepto / Cta": cta_p,
+                "Categoría": cat,
+                "Base": base,
+                "IVA": iva,
+                "ReteFuente": rfte,
+                "Total": tot,
+                "Cta Contrapartida": cta_c,
+                "Razón Contable": razon
+            })
+            
+        df_proc = pd.DataFrame(filas)
+        st.session_state["df_procesado"] = df_proc
+        st.dataframe(df_proc[["N°", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Total"]], use_container_width=True)
+
+with tab_auditoria:
+    st.markdown("### 🔍 Módulo de Auditoría Contable y Trazabilidad")
+    st.caption("Inspección de cuentas, deducciones y separación de gastos por cuenta de terceros.")
+    
+    if "df_procesado" in st.session_state:
+        df_p = st.session_state["df_procesado"]
+        opciones_fac = [f"[{r['N°']}] {r['Factura']} — {r['Proveedor']} (${r['Total']:,.0f})" for _, r in df_p.iterrows()]
+        seleccion = st.selectbox("Selecciona una factura para auditar:", opciones_fac)
+        
+        num_sel = int(seleccion.split("]")[0].replace("[", ""))
+        fac_sel = df_p[df_p["N°"] == num_sel].iloc[0]
+        es_aduanero = any(k in fac_sel["Proveedor"].upper() for k in AGENTES_ADUANEROS)
+        
+        col_a1, col_a2 = st.columns()
+        with col_a1:
+            st.markdown(f"""
+            <div class="audit-card">
+                <h4>Detalle del Documento: {fac_sel['Factura']}</h4>
+                <p><b>Proveedor / Emisor:</b> {fac_sel['Proveedor']} (NIT: {fac_sel['NIT Emisor']})</p>
+                <p><b>Fecha de Emisión:</b> {fac_sel['Fecha']} | <b>Total:</b> ${fac_sel['Total']:,.2f}</p>
+                <hr>
+                <h5>Trazabilidad de la Contabilización:</h5>
+                <ul>
+                    <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Concepto / Cta']}</span> — {fac_sel['Categoría']}</li>
+                    <li><b>Motivo Técnico:</b> {fac_sel['Razón Contable']}</li>
+                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} \vert{} <b>IVA:</b>${fac_sel['IVA']:,.2f}</li>
+                    <li><b>Retención en la Fuente:</b> ${fac_sel['ReteFuente']:,.2f}</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if es_aduanero:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("""
+                <div style="background:#fef3c7; padding:15px; border-radius:8px; border-left:5px solid #d97706;">
+                    <h5 style="color:#92400e; margin-top:0;">⚠️ Alerta de Importación / Agenciamiento Aduanero</h5>
+                    <p style="color:#78350f; font-size:14px; margin-bottom:5px;">
+                    En este documento intervienen <b>gastos por cuenta de terceros</b> y <b>honorarios propios del agente</b>:
+                    </p>
+                    <ul style="color:#78350f; font-size:14px;">
+                        <li><b>Ingresos Propios del Agente (Honorarios / Comisión):</b> Gravados con IVA 19%, sujetos a ReteFuente de Servicios (4%) u Honorarios (11%).</li>
+                        <li><b>Pagos por Cuenta de Terceros (Tributos / Fletes / Bodegaje):</b> Imputables directamente al costo de importación (Cuenta 146505). No llevan IVA del agente ni retención en la fuente sobre el intermediario.</li>
+                    </ul>
+                </div>
+                """, unsafe_allow_html=True)
+                
+        with col_a2:
+            st.markdown("#### Resumen Financiero")
+            st.metric("Base Gravable", f"${fac_sel['Base']:,.0f}")
+            st.metric("IVA Liquidado", f"${fac_sel['IVA']:,.0f}")
+            st.metric("ReteFuente", f"${fac_sel['ReteFuente']:,.0f}")
+            st.metric("Total a Pagar (Cta 22 / 23)", f"${fac_sel['Total'] - fac_sel['ReteFuente']:,.0f}")
+    else:
+        st.info("Carga el archivo Excel en la Pestaña 1 para habilitar la auditoría.")
+
+with tab_siigo:
+    st.markdown("### 📥 Descargar Planilla de Importación Oficial para Siigo Nube")
+    
+    if "df_procesado" in st.session_state:
+        df_p = st.session_state["df_procesado"]
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_siigo = df_p[["Tipo Comp", "Consecutivo", "Fecha", "NIT Emisor", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Cta Contrapartida"]].copy()
+            df_siigo.columns = ["Tipo Comp", "Consecutivo", "Fecha", "NIT", "Factura Num", "Descripcion", "Cta Principal", "Valor Base", "IVA", "ReteFuente", "Cta Contrapartida"]
+            df_siigo.to_excel(writer, sheet_name="matriz_captura", index=False)
+            
+        output.seek(0)
+        st.download_button(
+            label=f"⬇️ Descargar Planilla Siigo ({empresa['nombre']})",
+            data=output,
+            file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+        st.success("✅ Estructura validada para cargar directamente en Siigo Nube.")
+    else:
+        st.info("Primero procesa los documentos en la Pestaña 1 para habilitar la descarga.")
