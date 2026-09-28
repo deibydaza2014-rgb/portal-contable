@@ -212,6 +212,32 @@ tab_compras, tab_auditoria, tab_siigo = st.tabs([
     "3. Exportar Planilla Oficial a Siigo"
 ])
 
+CODIGOS_IMPUESTO_SIIGO = {
+    '24081001': 1,   # IVA 19% compras bienes
+    '24081003': 2,   # IVA 5% compras bienes
+    '24080601': 1,   # IVA 19% ventas
+    '24080602': 2,   # IVA 5% ventas
+    '23651501': 3,   # Retefuente 11%
+    '23652001': 4,   # Retefuente 10%
+    '23652501': 5,   # Retefuente 6%
+    '23652503': 6,   # Retefuente 4% (Servicios / Agenciamiento)
+    '23654001': 7,   # Retefuente 2.5% (Compras generales / Repuestos)
+    '23654004': 18,  # Retefuente 3.5% (Alojamiento / Hoteles)
+    '23653502': 19,  # Retefuente 7%
+    '23657001': 20,  # Retefuente 2%
+    '23652505': 21,  # Retefuente 1%
+    '23654006': 23,  # Retefuente Combustibles 0.1%
+    '23680501': 8,   # ReteICA 11.04
+    '23680503': 9,   # ReteICA 13.8
+    '23680505': 10,  # ReteICA 9.66
+    '23680507': 11,  # ReteICA 8
+    '23680509': 12,  # ReteICA 7
+    '23680511': 13,  # ReteICA 6.9
+    '23680513': 14,  # ReteICA 4.14
+    '23670101': 15,  # ReteIVA 15%
+    '24950103': 16   # Impoconsumo 8%
+}
+
 AGENTES_ADUANEROS = ["DHL", "ADUANA", "EURO SHIPPING", "PORTUARIA", "ALMACENADORA", "CARGO", "TRADE GLOBAL", "TERMINAL", "BUENAVENTURA"]
 
 def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
@@ -240,7 +266,7 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
     if any(k in nombre for k in ["HOTEL", "ESTELAR", "GENOVA", "VITTAPARK"]):
         rfte = round(valor_base * 0.035, 2) if valor_base >= 210000 else 0.0
         rica = round(valor_base * 0.00966, 2) if valor_base >= 210000 else 0.0
-        return t_comp, op, "51550501", "23359501", f"Alojamiento / Viaje - {nombre_emisor[:25]}", rfte, rica, "23652501", "24081501", "23680505", "Gasto Viaje", "Hospedaje de personal"
+        return t_comp, op, "51550501", "23359501", f"Alojamiento / Viaje - {nombre_emisor[:25]}", rfte, rica, "23654004", "24081501", "23680505", "Gasto Viaje", "Hospedaje de personal"
         
     # 4. Software Siigo
     if "SIIGO" in nombre:
@@ -461,7 +487,7 @@ with tab_auditoria:
 
 with tab_siigo:
     st.markdown("### Descargar Planilla Oficial Siigo Nube (3 Hojas)")
-    st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' y 'Parametrización'.")
+    st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' (con códigos de impuesto) y 'Parametrización'.")
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
@@ -530,7 +556,7 @@ with tab_siigo:
             
             # Línea 2: IVA
             if iva > 0:
-                cod_imp_iva = 1 if cta_iva == "24081001" else ""
+                cod_imp_iva = CODIGOS_IMPUESTO_SIIGO.get(str(cta_iva).strip(), "")
                 ws_interfaz.append([
                     f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
                     cta_iva, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
@@ -542,10 +568,11 @@ with tab_siigo:
                 
             # Línea 3: ReteFuente
             if rfte > 0 and cta_rfte:
+                cod_imp_rfte = CODIGOS_IMPUESTO_SIIGO.get(str(cta_rfte).strip(), "")
                 ws_interfaz.append([
                     f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
                     cta_rfte, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
-                    "", "", "", f'="ReteFuente Base: " & matriz_captura!J{r}', "",
+                    cod_imp_rfte, "", "", f'="ReteFuente Base: " & matriz_captura!J{r}', "",
                     f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!L{r}, 0)',
                     f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!L{r})',
                     "", f"=matriz_captura!J{r}", 0.0, ""
@@ -553,10 +580,11 @@ with tab_siigo:
                 
             # Línea 4: ReteICA
             if rica > 0 and cta_rica:
+                cod_imp_rica = CODIGOS_IMPUESTO_SIIGO.get(str(cta_rica).strip(), "")
                 ws_interfaz.append([
                     f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
                     cta_rica, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
-                    "", "", "", f'="ReteICA Base: " & matriz_captura!J{r}', "",
+                    cod_imp_rica, "", "", f'="ReteICA Base: " & matriz_captura!J{r}', "",
                     f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!M{r}, 0)',
                     f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!M{r})',
                     "", f"=matriz_captura!J{r}", 0.0, ""
