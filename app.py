@@ -610,8 +610,8 @@ with tab_siigo:
         for idx_row in range(max_len):
             c_val = comprobantes[idx_row] if idx_row < len(comprobantes) else ""
             if idx_row < len(impuestos):
-                imp = impuestos[idx_row]
-                ws_params.append([c_val, "", imp[0], imp, imp, imp, imp, imp[5], imp[6]])
+                imp = list(impuestos[idx_row])
+                ws_params.append([c_val, ""] + imp)
             else:
                 ws_params.append([c_val, "", "", "", "", "", "", "", ""])
                 
