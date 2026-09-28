@@ -696,7 +696,7 @@ with tab_auditoria:
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
             
             # Encabezado visual y botón de descarga directa
-            col_doc1, col_doc2 = st.columns()
+            col_doc1, col_doc2 = st.columns(2)
             with col_doc1:
                 st.markdown(f"""
                 <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px;">
