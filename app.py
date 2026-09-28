@@ -129,7 +129,7 @@ PROCESOS_SISTEMA = [
         "id": "facturacion",
         "icono": "Facturas",
         "titulo": "Facturas de Compra, Venta y Devoluciones",
-        "desc": "Carga de reportes DIAN/Token, desbloqueo y renombrado de facturas por comprobante, auditoria contable y plantilla Siigo.",
+        "desc": "Carga de reportes DIAN/Token, separacion y renombrado de facturas compiladas por comprobante, auditoria contable y plantilla Siigo.",
         "estado": "ACTIVO",
         "badge": "badge-active"
     },
@@ -206,7 +206,7 @@ with col_nav2:
 st.markdown("---")
 
 tab_compras, tab_auditoria, tab_siigo = st.tabs([
-    "1. Cargar Documentos, Desbloquear y Renombrar PDFs",
+    "1. Cargar Excel, Desglosar y Renombrar PDFs",
     "2. Auditoria y Trazabilidad Fiscal",
     "3. Exportar Planilla Oficial a Siigo"
 ])
@@ -244,115 +244,215 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
         return t_comp, op, "51959501", "23359501", f"Gastos generales - {nombre_emisor[:25]}", 0.0, "Gasto General", "Compra menor general"
 
 with tab_compras:
-    st.markdown("### 1. Insumos DIAN y Facturas en PDF")
-    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el token de acceso, y los PDFs para desbloquear y renombrar automáticamente por comprobante.")
+    st.markdown("### 1. Insumos DIAN y Facturas en PDF (Compilado o Individuales)")
+    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o matriz Siigo, y el archivo **PDF compilado** (o los PDFs individuales) para que el sistema lo **desglose, separe y renombre comprobante por comprobante**.")
     
     col_u1, col_u2 = st.columns(2)
     with col_u1:
-        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
+        archivo_excel = st.file_uploader("1. Reporte Excel (DIAN prueba.xlsx o Matriz Siigo)", type=["xlsx", "xls"])
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo y renombrado)", type=["pdf"], accept_multiple_files=True)
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (Sube el PDF compilado o sueltas)", type=["pdf"], accept_multiple_files=True)
         
     if archivo_excel is not None:
-        df_dian = pd.read_excel(archivo_excel)
-        st.success(f"Reporte procesado: **{len(df_dian)} facturas identificadas**.")
-        
-        filas = []
-        for idx, r in df_dian.iterrows():
-            tipo_doc = r.get("Tipo de documento", "Factura electrónica")
-            folio = str(r.get("Folio", f"Doc_{idx+1}")).strip()
-            prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
-            fecha = str(r.get("Fecha Emisión", "S/F")).split()[0]
-            nit_e = str(r.get("NIT Emisor", "")).strip()
-            nom_e = str(r.get("Nombre Emisor", "Proveedor")).strip()
-            iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
-            tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
-            base = round(tot - iva, 2)
+        try:
+            df_dian = pd.read_excel(archivo_excel)
+        except Exception as e:
+            df_dian = pd.DataFrame()
+            st.error(f"Error al leer el archivo Excel: {e}")
             
-            t_comp, op, cta_p, cta_c, desc, rfte, cat, razon = clasificar_factura(nit_e, nom_e, base, tipo_doc)
-            consecutivo = 680 + idx
+        if not df_dian.empty:
+            st.success(f"Reporte cargado con exito: **{len(df_dian)} registros identificados**.")
             
-            # Nombre estandarizado del PDF vinculado al comprobante
-            nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
-            nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
+            filas = []
+            for idx, r in df_dian.iterrows():
+                tipo_doc = r.get("Tipo de documento", r.get("Operacion", "Factura electrónica"))
+                folio = str(r.get("Folio", r.get("Factura Num", f"{idx+1}"))).strip()
+                prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
+                if prefijo == "nan": prefijo = ""
+                fecha = str(r.get("Fecha Emisión", r.get("Fecha (DD/MM/AAAA)", r.get("Fecha", "S/F")))).split()[0]
+                nit_e = str(r.get("NIT Emisor", r.get("NIT", ""))).strip().split("-")[0].replace(".", "")
+                nom_e = str(r.get("Nombre Emisor", r.get("Descripcion", "Proveedor"))).strip()
+                
+                tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
+                iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
+                base_col = float(r.get("Valor Base", 0.0)) if pd.notna(r.get("Valor Base")) else 0.0
+                base = base_col if base_col > 0 else round(tot - iva, 2)
+                if tot == 0.0 and base > 0:
+                    tot = base + iva
+                
+                t_comp_exist = r.get("Tipo Comp", None)
+                consec_exist = r.get("Consecutivo", None)
+                
+                t_comp, op, cta_p, cta_c, desc, rfte, cat, razon = clasificar_factura(nit_e, nom_e, base, tipo_doc)
+                
+                t_comp_final = int(t_comp_exist) if pd.notna(t_comp_exist) else t_comp
+                consecutivo_final = int(consec_exist) if pd.notna(consec_exist) else (680 + idx)
+                
+                nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
+                nombre_pdf_esperado = f"Comp_{t_comp_final}-{consecutivo_final}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
+                
+                filas.append({
+                    "N°": idx + 1,
+                    "Tipo Comp": t_comp_final,
+                    "Consecutivo": consecutivo_final,
+                    "Comprobante Siigo": f"Comp {t_comp_final}-{consecutivo_final}",
+                    "Fecha": fecha,
+                    "Factura": f"{prefijo}-{folio}" if prefijo else folio,
+                    "Folio": folio,
+                    "Prefijo": prefijo,
+                    "Proveedor": nom_e,
+                    "NIT Emisor": nit_e,
+                    "Concepto / Cta": cta_p,
+                    "Categoría": cat,
+                    "Base": base,
+                    "IVA": iva,
+                    "ReteFuente": rfte,
+                    "Total": tot,
+                    "Cta Contrapartida": cta_c,
+                    "Razón Contable": razon,
+                    "Soporte PDF Renombrado": nombre_pdf_esperado
+                })
+                
+            df_proc = pd.DataFrame(filas)
+            st.session_state["df_procesado"] = df_proc
             
-            filas.append({
-                "N°": idx + 1,
-                "Tipo Comp": t_comp,
-                "Consecutivo": consecutivo,
-                "Comprobante Siigo": f"Comp {t_comp}-{consecutivo}",
-                "Fecha": fecha,
-                "Factura": f"{prefijo}-{folio}" if prefijo else folio,
-                "Proveedor": nom_e,
-                "NIT Emisor": nit_e,
-                "Concepto / Cta": cta_p,
-                "Categoría": cat,
-                "Base": base,
-                "IVA": iva,
-                "ReteFuente": rfte,
-                "Total": tot,
-                "Cta Contrapartida": cta_c,
-                "Razón Contable": razon,
-                "Soporte PDF Renombrado": nombre_pdf_esperado
-            })
-            
-        df_proc = pd.DataFrame(filas)
-        st.session_state["df_procesado"] = df_proc
-        
-        st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes:")
-        st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Total", "Soporte PDF Renombrado"]], use_container_width=True)
+            st.markdown("#### Matriz Contable Vinculada a Comprobantes:")
+            st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Total", "Soporte PDF Renombrado"]], use_container_width=True)
 
-    # Procesar y renombrar PDFs con el nombre de cada comprobante
+    # Procesar, Separar y Renombrar PDFs
     if archivos_pdfs:
         st.markdown("---")
-        st.markdown("#### 📑 Procesamiento y Renombrado de PDFs por Comprobante:")
-        if st.button("🔓 Desbloquear y Renombrar PDFs ahora"):
-            buffer_zip = io.BytesIO()
-            exitosos = 0
-            nit_limpio = "901346412"
-            
-            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                for idx_pdf, pdf_file in enumerate(archivos_pdfs):
+        st.markdown("#### ✂️ Motor de Desglose, Separación y Renombrado de PDFs")
+        
+        modo_corte = st.radio(
+            "Selecciona el método de corte y separación:",
+            [
+                "🔍 Modo Inteligente (Escanea y busca el número de factura/prefijo en cada hoja del PDF compilado)",
+                "📑 Modo Secuencial (1 Factura por hoja en el mismo orden del Excel)",
+                "📁 Modo Archivos Sueltos (Ya tienes múltiples PDFs individuales y deseas renombrarlos por comprobante)"
+            ]
+        )
+        
+        if st.button("🚀 Ejecutar Separación y Guardado por Comprobante"):
+            if "df_procesado" not in st.session_state:
+                st.warning("Primero debes subir el archivo Excel para saber los números de comprobante.")
+            else:
+                df_proc = st.session_state["df_procesado"]
+                buffer_zip = io.BytesIO()
+                nit_limpio = "901346412"
+                contrasenas = [nit_limpio, f"{nit_limpio}5", f"{nit_limpio}-5", ""]
+                
+                # Leer todos los PDFs subidos y sus páginas
+                total_paginas = []
+                for pdf_file in archivos_pdfs:
                     try:
                         reader = PdfReader(pdf_file)
                         if reader.is_encrypted:
-                            for pwd in [nit_limpio, f"{nit_limpio}5", f"{nit_limpio}-5", ""]:
+                            for pwd in contrasenas:
                                 try:
                                     if reader.decrypt(pwd) > 0:
                                         break
                                 except:
                                     pass
-                        writer = PdfWriter()
-                        texto_pdf = ""
-                        for page in reader.pages:
-                            writer.add_page(page)
-                            texto_pdf += page.extract_text() + "\n"
+                        for p in reader.pages:
+                            txt = p.extract_text() or ""
+                            total_paginas.append((p, txt))
+                    except Exception as e:
+                        st.error(f"Error abriendo {pdf_file.name}: {e}")
                         
-                        # Buscar correspondencia con el comprobante en la matriz
-                        nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_file.name}"
-                        if "df_procesado" in st.session_state:
-                            for _, r_mat in st.session_state["df_procesado"].iterrows():
-                                fac_num = str(r_mat["Factura"]).replace("-", "")
-                                if fac_num and fac_num in texto_pdf.replace("-", "").replace(" ", ""):
-                                    nombre_final = r_mat["Soporte PDF Renombrado"]
+                st.info(f"Se cargaron un total de **{len(total_paginas)} páginas de facturas** para procesar.")
+                
+                facturas_asignadas = {}
+                
+                if "Modo Secuencial" in modo_corte:
+                    for idx_f, row in df_proc.iterrows():
+                        if idx_f < len(total_paginas):
+                            facturas_asignadas[idx_f] = [total_paginas[idx_f][0]]
+                            
+                elif "Modo Archivos Sueltos" in modo_corte:
+                    for idx_pdf, pdf_file in enumerate(archivos_pdfs):
+                        try:
+                            pdf_file.seek(0)
+                            r_single = PdfReader(pdf_file)
+                            if r_single.is_encrypted:
+                                for pwd in contrasenas:
+                                    try:
+                                        if r_single.decrypt(pwd) > 0: break
+                                    except: pass
+                            txt_single = "".join([p.extract_text() or "" for p in r_single.pages])
+                            txt_clean = re.sub(r'[^a-zA-Z0-9]', '', txt_single.upper())
+                            
+                            matched_idx = idx_pdf if idx_pdf < len(df_proc) else None
+                            for idx_f, row in df_proc.iterrows():
+                                fac_num = re.sub(r'[^a-zA-Z0-9]', '', f"{row['Prefijo']}{row['Folio']}".upper())
+                                if fac_num and len(fac_num) >= 4 and fac_num in txt_clean:
+                                    matched_idx = idx_f
+                                    break
+                            if matched_idx is not None:
+                                facturas_asignadas[matched_idx] = list(r_single.pages)
+                        except Exception as e:
+                            st.error(f"Error procesando {pdf_file.name}: {e}")
+                            
+                else:
+                    # Modo Inteligente: Analizar hoja por hoja
+                    inv_actual = 0
+                    for p_obj, p_txt in total_paginas:
+                        clean_txt = re.sub(r'[^a-zA-Z0-9]', '', p_txt.upper())
+                        
+                        match_encontrado = None
+                        for idx_f, row in df_proc.iterrows():
+                            num_compuesto = re.sub(r'[^a-zA-Z0-9]', '', f"{row['Prefijo']}{row['Folio']}".upper())
+                            num_solo = re.sub(r'[^a-zA-Z0-9]', '', str(row['Folio']).upper())
+                            nit_prov = str(row['NIT Emisor']).replace(".", "")
+                            
+                            if num_compuesto and len(num_compuesto) >= 4 and num_compuesto in clean_txt:
+                                match_encontrado = idx_f
+                                break
+                            elif num_solo and len(num_solo) >= 4 and num_solo in clean_txt:
+                                if nit_prov and nit_prov in clean_txt:
+                                    match_encontrado = idx_f
+                                    break
+                                elif len(num_solo) >= 6:
+                                    match_encontrado = idx_f
                                     break
                                     
-                        out_pdf = io.BytesIO()
-                        writer.write(out_pdf)
-                        zf.writestr(nombre_final, out_pdf.getvalue())
-                        exitosos += 1
-                    except Exception as e:
-                        st.error(f"Error con {pdf_file.name}: {e}")
+                        if match_encontrado is not None:
+                            inv_actual = match_encontrado
+                            if inv_actual not in facturas_asignadas:
+                                facturas_asignadas[inv_actual] = []
+                            facturas_asignadas[inv_actual].append(p_obj)
+                        else:
+                            if inv_actual not in facturas_asignadas:
+                                facturas_asignadas[inv_actual] = []
+                            facturas_asignadas[inv_actual].append(p_obj)
+                            
+                # Empacar en ZIP con el nombre exacto del comprobante contable
+                with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for inv_idx, paginas in facturas_asignadas.items():
+                        if inv_idx < len(df_proc):
+                            info_row = df_proc.iloc[inv_idx]
+                            nombre_archivo = info_row["Soporte PDF Renombrado"]
+                        else:
+                            nombre_archivo = f"Comprobante_Adicional_{inv_idx+1}.pdf"
+                            
+                        w_out = PdfWriter()
+                        for p in paginas:
+                            w_out.add_page(p)
+                            
+                        pdf_stream = io.BytesIO()
+                        w_out.write(pdf_stream)
+                        zf.writestr(nombre_archivo, pdf_stream.getvalue())
                         
-            st.success(f"¡{exitosos} PDFs desbloqueados y renombrados con el nombre del comprobante correspondiente!")
-            buffer_zip.seek(0)
-            st.download_button(
-                label="📥 Descargar Paquete de Facturas Renombradas por Comprobante (.ZIP)",
-                data=buffer_zip,
-                file_name="Facturas_INDUMAQ_Organizadas_Por_Comprobante.zip",
-                mime="application/zip",
-                use_container_width=True
-            )
+                st.success(f"🎉 ¡Proceso completado! Se generaron **{len(facturas_asignadas)} archivos de factura individuales** nombrados con su respectivo comprobante contable.")
+                
+                buffer_zip.seek(0)
+                st.download_button(
+                    label="📥 Descargar Paquete Completo de Facturas Separadas y Renombradas (.ZIP)",
+                    data=buffer_zip,
+                    file_name="Facturas_INDUMAQ_Separadas_Por_Comprobante.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
 
 with tab_auditoria:
     st.markdown("### Modulo de Auditoria Contable y Trazabilidad")
