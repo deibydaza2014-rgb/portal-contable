@@ -287,13 +287,13 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
 
 with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
-    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs para desbloquear y renombrar automáticamente por comprobante.")
+    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs (o un PDF consolidado) para desbloquear, separar y renombrar automáticamente por comprobante.")
     
     col_u1, col_u2 = st.columns(2)
     with col_u1:
         archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo y renombrado)", type=["pdf"], accept_multiple_files=True)
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (pueden ser individuales o un PDF consolidado)", type=["pdf"], accept_multiple_files=True)
         
     if archivo_excel is not None:
         df_dian = pd.read_excel(archivo_excel)
@@ -379,20 +379,34 @@ with tab_compras:
         st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "Cta Principal", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Soporte PDF Renombrado"]], use_container_width=True)
 
     if archivos_pdfs:
-        # Guardar PDFs en memoria de sesión para visualización en auditoría
-        if "dict_pdfs" not in st.session_state:
-            st.session_state["dict_pdfs"] = {}
-        for p in archivos_pdfs:
-            st.session_state["dict_pdfs"][p.name] = p.getvalue()
-
         st.markdown("---")
-        st.markdown("#### 📑 Procesamiento y Renombrado de PDFs por Comprobante:")
-        if st.button("🔓 Desbloquear y Renombrar PDFs ahora"):
+        st.markdown("#### 📑 Procesamiento, Separación y Renombrado de PDFs por Comprobante:")
+        st.caption("Si subes un PDF consolidado con todas las facturas juntas, el sistema lo divide automáticamente en PDFs individuales con el nombre de cada comprobante y consecutivo.")
+
+        col_cfg1, col_cfg2 = st.columns(2)
+        with col_cfg1:
+            modo_sep = st.radio(
+                "Tipo de procesamiento para PDFs:",
+                [
+                    "Detección inteligente (Divide el PDF consolidado por factura o 1 página por comprobante)",
+                    "Separar estrictamente 1 página por factura (cronológico Enero - Actual)",
+                    "Mantener archivos tal como vienen (solo desbloquear y renombrar)"
+                ]
+            )
+        with col_cfg2:
+            st.info("💡 **Separador Activo:** Cada factura quedará guardada como un archivo individual nombrado `Comp_10-XXX_Factura_Proveedor.pdf` listo para descargar en un archivo .ZIP y visible en la pestaña de auditoría.")
+
+        if st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora"):
             buffer_zip = io.BytesIO()
-            exitosos = 0
+            total_generados = 0
             nit_limpio = "901346412"
             
+            if "dict_pdfs" not in st.session_state:
+                st.session_state["dict_pdfs"] = {}
+
             with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                df_ref = st.session_state.get("df_procesado", pd.DataFrame())
+
                 for idx_pdf, pdf_file in enumerate(archivos_pdfs):
                     try:
                         reader = PdfReader(pdf_file)
@@ -403,33 +417,131 @@ with tab_compras:
                                         break
                                 except:
                                     pass
-                        writer = PdfWriter()
-                        texto_pdf = ""
-                        for page in reader.pages:
-                            writer.add_page(page)
-                            texto_pdf += page.extract_text() + "\n"
                         
-                        nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_file.name}"
-                        if "df_procesado" in st.session_state:
-                            for _, r_mat in st.session_state["df_procesado"].iterrows():
-                                fac_num = str(r_mat["Folio"]).replace("-", "").strip()
-                                if fac_num and fac_num in texto_pdf.replace("-", "").replace(" ", ""):
-                                    nombre_final = r_mat["Soporte PDF Renombrado"]
-                                    break
+                        num_pags = len(reader.pages)
+
+                        # Caso 1: Archivo de una sola página o modo sin separación
+                        if num_pags == 1 or "Mantener archivos" in modo_sep:
+                            writer = PdfWriter()
+                            texto_pdf = ""
+                            for page in reader.pages:
+                                writer.add_page(page)
+                                try: texto_pdf += page.extract_text() + "\n"
+                                except: pass
+                            
+                            nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_file.name}"
+                            if not df_ref.empty:
+                                for _, r_mat in df_ref.iterrows():
+                                    fac_num = str(r_mat["Folio"]).replace("-", "").strip()
+                                    if fac_num and fac_num in texto_pdf.replace("-", "").replace(" ", ""):
+                                        nombre_final = r_mat["Soporte PDF Renombrado"]
+                                        break
+                                        
+                            out_pdf = io.BytesIO()
+                            writer.write(out_pdf)
+                            pdf_bytes = out_pdf.getvalue()
+                            zf.writestr(nombre_final, pdf_bytes)
+                            st.session_state["dict_pdfs"][nombre_final] = pdf_bytes
+                            total_generados += 1
+
+                        # Caso 2: PDF Consolidado Multi-Página a Separar
+                        else:
+                            st.write(f"Procesando PDF consolidado **{pdf_file.name}** ({num_pags} páginas)...")
+                            
+                            # 2.A: Si es división estricta 1 página por factura cronológica
+                            if "Separar estrictamente 1 página" in modo_sep or df_ref.empty:
+                                for p_idx in range(num_pags):
+                                    pw = PdfWriter()
+                                    pw.add_page(reader.pages[p_idx])
+                                    out_p = io.BytesIO()
+                                    pw.write(out_p)
+                                    p_bytes = out_p.getvalue()
                                     
-                        out_pdf = io.BytesIO()
-                        writer.write(out_pdf)
-                        zf.writestr(nombre_final, out_pdf.getvalue())
-                        exitosos += 1
+                                    if p_idx < len(df_ref):
+                                        nom_doc = df_ref.iloc[p_idx]["Soporte PDF Renombrado"]
+                                    else:
+                                        nom_doc = f"Comprobante_Extra_Pag_{p_idx+1}.pdf"
+                                        
+                                    zf.writestr(nom_doc, p_bytes)
+                                    st.session_state["dict_pdfs"][nom_doc] = p_bytes
+                                    total_generados += 1
+
+                            # 2.B: Detección inteligente por contenido o secuencia
+                            else:
+                                page_matches = []
+                                matched_facturas = set()
+                                
+                                for p_idx in range(num_pags):
+                                    try: txt_p = reader.pages[p_idx].extract_text() or ""
+                                    except: txt_p = ""
+                                    txt_clean = txt_p.replace("-", "").replace(" ", "").upper()
+                                    
+                                    m_row = None
+                                    for _, r_cand in df_ref.iterrows():
+                                        fol_cand = str(r_cand["Folio"]).replace("-", "").strip().upper()
+                                        num_cand = str(r_cand["Factura"]).replace("-", "").strip().upper()
+                                        if (len(fol_cand) >= 3 and fol_cand in txt_clean) or (len(num_cand) >= 3 and num_cand in txt_clean):
+                                            m_row = r_cand
+                                            break
+                                    page_matches.append(m_row)
+                                    if m_row is not None:
+                                        matched_facturas.add(m_row["Comprobante Siigo"])
+
+                                # Si se encontraron coincidencias por texto
+                                if len(matched_facturas) > 0:
+                                    curr_row = None
+                                    curr_writer = None
+                                    for p_idx in range(num_pags):
+                                        r_page = page_matches[p_idx]
+                                        if r_page is not None and (curr_row is None or r_page["Comprobante Siigo"] != curr_row["Comprobante Siigo"]):
+                                            if curr_writer is not None and curr_row is not None:
+                                                out_c = io.BytesIO()
+                                                curr_writer.write(out_c)
+                                                c_bytes = out_c.getvalue()
+                                                zf.writestr(curr_row["Soporte PDF Renombrado"], c_bytes)
+                                                st.session_state["dict_pdfs"][curr_row["Soporte PDF Renombrado"]] = c_bytes
+                                                total_generados += 1
+                                            curr_row = r_page
+                                            curr_writer = PdfWriter()
+                                            curr_writer.add_page(reader.pages[p_idx])
+                                        else:
+                                            if curr_writer is None:
+                                                curr_row = df_ref.iloc[0] if len(df_ref) > 0 else None
+                                                curr_writer = PdfWriter()
+                                            curr_writer.add_page(reader.pages[p_idx])
+
+                                    if curr_writer is not None and curr_row is not None:
+                                        out_c = io.BytesIO()
+                                        curr_writer.write(out_c)
+                                        c_bytes = out_c.getvalue()
+                                        zf.writestr(curr_row["Soporte PDF Renombrado"], c_bytes)
+                                        st.session_state["dict_pdfs"][curr_row["Soporte PDF Renombrado"]] = c_bytes
+                                        total_generados += 1
+                                else:
+                                    # Si no hubo capa de texto (PDF escaneado), se separa página a página en orden cronológico
+                                    for p_idx in range(num_pags):
+                                        pw = PdfWriter()
+                                        pw.add_page(reader.pages[p_idx])
+                                        out_p = io.BytesIO()
+                                        pw.write(out_p)
+                                        p_bytes = out_p.getvalue()
+                                        if p_idx < len(df_ref):
+                                            nom_doc = df_ref.iloc[p_idx]["Soporte PDF Renombrado"]
+                                        else:
+                                            nom_doc = f"Comprobante_Extra_Pag_{p_idx+1}.pdf"
+                                        zf.writestr(nom_doc, p_bytes)
+                                        st.session_state["dict_pdfs"][nom_doc] = p_bytes
+                                        total_generados += 1
+
                     except Exception as e:
-                        st.error(f"Error con {pdf_file.name}: {e}")
-                        
-            st.success(f"¡{exitosos} PDFs desbloqueados y renombrados con el nombre del comprobante correspondiente!")
+                        st.error(f"Error procesando {pdf_file.name}: {e}")
+
+            st.success(f"¡Éxito! Se generaron y desbloquearon **{total_generados} facturas individuales en PDF**, nombradas exactamente con su comprobante y consecutivo (`Comp_10-XXX_...pdf`).")
             buffer_zip.seek(0)
             st.download_button(
-                label="📥 Descargar Paquete de Facturas Renombradas por Comprobante (.ZIP)",
+                label="📥 Descargar Paquete Completo de Facturas Separadas (.ZIP)",
                 data=buffer_zip,
-                file_name="Facturas_INDUMAQ_Organizadas_Por_Comprobante.zip",
+                file_name=f"Facturas_{empresa['nombre'].replace(' ', '_')}_Separadas_Por_Comprobante.zip",
                 mime="application/zip",
                 use_container_width=True
             )
@@ -496,13 +608,17 @@ with tab_auditoria:
         
         pdf_bytes_encontrado = None
         folio_clean = str(fac_sel["Folio"]).replace("-", "").strip()
+        pdf_esperado = str(fac_sel["Soporte PDF Renombrado"])
         
         if "dict_pdfs" in st.session_state and st.session_state["dict_pdfs"]:
-            for fname, pbytes in st.session_state["dict_pdfs"].items():
-                fname_clean = fname.replace("-", "").replace(" ", "")
-                if folio_clean and folio_clean in fname_clean:
-                    pdf_bytes_encontrado = pbytes
-                    break
+            if pdf_esperado in st.session_state["dict_pdfs"]:
+                pdf_bytes_encontrado = st.session_state["dict_pdfs"][pdf_esperado]
+            else:
+                for fname, pbytes in st.session_state["dict_pdfs"].items():
+                    fname_clean = fname.replace("-", "").replace(" ", "")
+                    if folio_clean and folio_clean in fname_clean:
+                        pdf_bytes_encontrado = pbytes
+                        break
         
         if pdf_bytes_encontrado:
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
@@ -528,7 +644,7 @@ with tab_auditoria:
                     <div><b>Valor Total Facturado:</b> ${fac_sel['Total']:,.2f}</div>
                 </div>
                 <p style="margin-top: 14px; margin-bottom: 0; font-size: 13px; color: #64748b;">
-                    <i>💡 Nota: Para ver el PDF gráfico original escaneado dentro de este marco, asegúrate de subir el archivo en la Pestaña 1.</i>
+                    <i>💡 Nota: Al pulsar "Desbloquear, Separar y Renombrar PDFs" en la Pestaña 1, el PDF individual correspondiente se mostrará en este marco.</i>
                 </p>
             </div>
             """, unsafe_allow_html=True)
@@ -785,14 +901,11 @@ with tab_siigo:
         st.markdown("### 📊 Libro Auxiliar Contable: Facturas Una a Una y Consolidado")
         st.write("Genera el reporte administrativo con el detalle factura a factura y las hojas de consolidado por proveedor y cuentas contables:")
 
-        # Generar libro auxiliar con facturas una a una y consolidado
         out_aux = io.BytesIO()
         with pd.ExcelWriter(out_aux, engine='openpyxl') as writer_aux:
-            # Hoja 1: Factura a Factura (Detalle)
             cols_detalle = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Cta Principal", "Categoría", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Cta Contrapartida", "Razón Contable", "Soporte PDF Renombrado"]
             df_det_export = df_p[cols_detalle].copy()
             
-            # Fila de Totales al final del detalle
             totales_dict = {
                 "Comprobante Siigo": "TOTALES CONSOLIDADOS",
                 "Fecha": "-", "Factura": f"{len(df_det_export)} Docs", "Proveedor": "-", "NIT Emisor": "-",
@@ -807,7 +920,6 @@ with tab_siigo:
             df_det_export = pd.concat([df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
             df_det_export.to_excel(writer_aux, sheet_name="Facturas_Una_a_Una", index=False)
             
-            # Hoja 2: Consolidado por Proveedor
             df_cons_prov = df_p.groupby(["NIT Emisor", "Proveedor"]).agg({
                 "Comprobante Siigo": "count",
                 "Base": "sum",
@@ -820,7 +932,6 @@ with tab_siigo:
             df_cons_prov = df_cons_prov.sort_values(by="Total", ascending=False).reset_index(drop=True)
             df_cons_prov.to_excel(writer_aux, sheet_name="Consolidado_Proveedores", index=False)
             
-            # Hoja 3: Consolidado por Cuenta Contable
             df_cons_cta = df_p.groupby(["Cta Principal", "Categoría"]).agg({
                 "Comprobante Siigo": "count",
                 "Base": "sum",
