@@ -8,17 +8,17 @@ from pypdf import PdfReader, PdfWriter
 
 st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
 
-# Estilos visuales tipo Siigo / World Office
+# Estilos visuales profesionales
 st.markdown("""
 <style>
     .main { background-color: #f8fafc; }
     .stButton>button { background-color: #0070ba; color: white; border-radius: 6px; font-weight: 600; }
     .card-box { background: white; padding: 22px; border-radius: 10px; border: 1px solid #e2e8f0; box-shadow: 0 2px 5px rgba(0,0,0,0.04); margin-bottom: 18px; }
-    .card-box:hover { border-color: #0070ba; }
     .audit-card { background: #ffffff; padding: 22px; border-left: 5px solid #0070ba; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
     .badge-active { background-color: #dcfce7; color: #15803d; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }
     .badge-next { background-color: #f1f5f9; color: #64748b; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }
     .tag-propio { background-color: #dcfce7; color: #15803d; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
+    .tag-comp { background-color: #eff6ff; color: #1d4ed8; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-family: monospace; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -52,11 +52,46 @@ if not st.session_state["autenticado"]:
 
 # PANTALLA 2: SELECTOR DE EMPRESAS
 EMPRESAS_DISPONIBLES = [
-    {"nombre": "INDUMAQ ER SAS", "nit": "901.346.412-5", "actividad": "Comercio y Reparacion de Maquinaria / Importaciones", "regimen": "Responsable de IVA"},
-    {"nombre": "ASMINCOL S.A.S.", "nit": "900.467.519-1", "actividad": "Servicios Mineros y Construccion", "regimen": "Responsable de IVA"},
-    {"nombre": "CONSTRUDISENO CT SAS", "nit": "900.524.356-8", "actividad": "Construccion y Obras Civiles", "regimen": "Responsable de IVA"},
-    {"nombre": "SCG TRANSPORTES", "nit": "901.700.731-8", "actividad": "Transporte de Carga y Logistica", "regimen": "Responsable de IVA"},
-    {"nombre": "OPJ SAS", "nit": "901.425.101-3", "actividad": "Servicios Generales y Operaciones", "regimen": "Responsable de IVA"}
+    {
+        "nombre": "INDUMAQ ER SAS",
+        "nit": "901.346.412-5",
+        "actividad": "Comercio y Reparacion de Maquinaria / Importaciones",
+        "regimen": "Responsable de IVA",
+        "estado": "ACTIVA",
+        "badge": "badge-active"
+    },
+    {
+        "nombre": "ASMINCOL S.A.S.",
+        "nit": "900.467.519-1",
+        "actividad": "Servicios Mineros y Construccion",
+        "regimen": "Responsable de IVA",
+        "estado": "PROXIMAMENTE",
+        "badge": "badge-next"
+    },
+    {
+        "nombre": "CONSTRUDISENO CT SAS",
+        "nit": "900.524.356-8",
+        "actividad": "Construccion y Obras Civiles",
+        "regimen": "Responsable de IVA",
+        "estado": "PROXIMAMENTE",
+        "badge": "badge-next"
+    },
+    {
+        "nombre": "SCG TRANSPORTES",
+        "nit": "901.700.731-8",
+        "actividad": "Transporte de Carga y Logistica",
+        "regimen": "Responsable de IVA",
+        "estado": "PROXIMAMENTE",
+        "badge": "badge-next"
+    },
+    {
+        "nombre": "OPJ SAS",
+        "nit": "901.425.101-3",
+        "actividad": "Servicios Generales y Operaciones",
+        "regimen": "Responsable de IVA",
+        "estado": "PROXIMAMENTE",
+        "badge": "badge-next"
+    }
 ]
 
 if not st.session_state["empresa_activa"]:
@@ -69,15 +104,21 @@ if not st.session_state["empresa_activa"]:
         with col:
             st.markdown(f"""
             <div class="card-box">
-                <h3 style="margin-top:0; color:#0f172a;">{emp['nombre']}</h3>
-                <p style="margin:2px 0; color:#475569;"><b>NIT:</b> {emp['nit']} - <b>Regimen:</b> {emp['regimen']}</p>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3 style="margin:0; color:#0f172a;">🏢 {emp['nombre']}</h3>
+                    <span class="{emp['badge']}">{emp['estado']}</span>
+                </div>
+                <p style="margin:8px 0 2px 0; color:#475569;"><b>NIT:</b> {emp['nit']} - <b>Regimen:</b> {emp['regimen']}</p>
                 <p style="margin:2px 0 14px 0; color:#64748b; font-size:14px;">{emp['actividad']}</p>
             </div>
             """, unsafe_allow_html=True)
-            if st.button(f"Ingresar a {emp['nombre']}", key=f"btn_emp_{i}"):
-                st.session_state["empresa_activa"] = emp
-                st.session_state["proceso_activo"] = None
-                st.rerun()
+            if emp["estado"] == "ACTIVA":
+                if st.button(f"Ingresar a {emp['nombre']}", key=f"btn_emp_{i}"):
+                    st.session_state["empresa_activa"] = emp
+                    st.session_state["proceso_activo"] = None
+                    st.rerun()
+            else:
+                st.button(f"Pendiente Datos / Parametrizacion ({emp['estado']})", key=f"btn_emp_{i}", disabled=True)
     st.stop()
 
 empresa = st.session_state["empresa_activa"]
@@ -88,7 +129,7 @@ PROCESOS_SISTEMA = [
         "id": "facturacion",
         "icono": "Facturas",
         "titulo": "Facturas de Compra, Venta y Devoluciones",
-        "desc": "Carga de reportes DIAN/Token, desbloqueo automatico de facturas, auditoria contable y generacion de la plantilla de importacion para Siigo Nube.",
+        "desc": "Carga de reportes DIAN/Token, desbloqueo y renombrado de facturas por comprobante, auditoria contable y plantilla Siigo.",
         "estado": "ACTIVO",
         "badge": "badge-active"
     },
@@ -152,7 +193,7 @@ if not st.session_state["proceso_activo"]:
                 st.button(f"Modulo en Construccion ({proc['estado']})", key=f"btn_proc_{idx}", disabled=True)
     st.stop()
 
-# PANTALLA 4: PROCESO ACTIVO
+# PANTALLA 4: FACTURACION, AUDITORIA Y SIIGO
 col_nav1, col_nav2 = st.columns(2)
 with col_nav1:
     st.subheader(f"{empresa['nombre']} - Facturacion, Auditoria y Siigo")
@@ -165,7 +206,7 @@ with col_nav2:
 st.markdown("---")
 
 tab_compras, tab_auditoria, tab_siigo = st.tabs([
-    "1. Cargar Documentos y Desbloquear",
+    "1. Cargar Documentos, Desbloquear y Renombrar PDFs",
     "2. Auditoria y Trazabilidad Fiscal",
     "3. Exportar Planilla Oficial a Siigo"
 ])
@@ -204,13 +245,13 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
 
 with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
-    st.write("Sube el archivo Excel de la DIAN (prueba.xlsx) o el token de acceso, y los PDFs para desbloquear.")
+    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el token de acceso, y los PDFs para desbloquear y renombrar automáticamente por comprobante.")
     
     col_u1, col_u2 = st.columns(2)
     with col_u1:
         archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo automatico)", type=["pdf"], accept_multiple_files=True)
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo y renombrado)", type=["pdf"], accept_multiple_files=True)
         
     if archivo_excel is not None:
         df_dian = pd.read_excel(archivo_excel)
@@ -229,11 +270,17 @@ with tab_compras:
             base = round(tot - iva, 2)
             
             t_comp, op, cta_p, cta_c, desc, rfte, cat, razon = clasificar_factura(nit_e, nom_e, base, tipo_doc)
+            consecutivo = 680 + idx
+            
+            # Nombre estandarizado del PDF vinculado al comprobante
+            nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
+            nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
             
             filas.append({
                 "N°": idx + 1,
                 "Tipo Comp": t_comp,
-                "Consecutivo": 680 + idx,
+                "Consecutivo": consecutivo,
+                "Comprobante Siigo": f"Comp {t_comp}-{consecutivo}",
                 "Fecha": fecha,
                 "Factura": f"{prefijo}-{folio}" if prefijo else folio,
                 "Proveedor": nom_e,
@@ -245,12 +292,67 @@ with tab_compras:
                 "ReteFuente": rfte,
                 "Total": tot,
                 "Cta Contrapartida": cta_c,
-                "Razón Contable": razon
+                "Razón Contable": razon,
+                "Soporte PDF Renombrado": nombre_pdf_esperado
             })
             
         df_proc = pd.DataFrame(filas)
         st.session_state["df_procesado"] = df_proc
-        st.dataframe(df_proc[["N°", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Total"]], use_container_width=True)
+        
+        st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes:")
+        st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Total", "Soporte PDF Renombrado"]], use_container_width=True)
+
+    # Procesar y renombrar PDFs con el nombre de cada comprobante
+    if archivos_pdfs:
+        st.markdown("---")
+        st.markdown("#### 📑 Procesamiento y Renombrado de PDFs por Comprobante:")
+        if st.button("🔓 Desbloquear y Renombrar PDFs ahora"):
+            buffer_zip = io.BytesIO()
+            exitosos = 0
+            nit_limpio = "901346412"
+            
+            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                for idx_pdf, pdf_file in enumerate(archivos_pdfs):
+                    try:
+                        reader = PdfReader(pdf_file)
+                        if reader.is_encrypted:
+                            for pwd in [nit_limpio, f"{nit_limpio}5", f"{nit_limpio}-5", ""]:
+                                try:
+                                    if reader.decrypt(pwd) > 0:
+                                        break
+                                except:
+                                    pass
+                        writer = PdfWriter()
+                        texto_pdf = ""
+                        for page in reader.pages:
+                            writer.add_page(page)
+                            texto_pdf += page.extract_text() + "\n"
+                        
+                        # Buscar correspondencia con el comprobante en la matriz
+                        nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_file.name}"
+                        if "df_procesado" in st.session_state:
+                            for _, r_mat in st.session_state["df_procesado"].iterrows():
+                                fac_num = str(r_mat["Factura"]).replace("-", "")
+                                if fac_num and fac_num in texto_pdf.replace("-", "").replace(" ", ""):
+                                    nombre_final = r_mat["Soporte PDF Renombrado"]
+                                    break
+                                    
+                        out_pdf = io.BytesIO()
+                        writer.write(out_pdf)
+                        zf.writestr(nombre_final, out_pdf.getvalue())
+                        exitosos += 1
+                    except Exception as e:
+                        st.error(f"Error con {pdf_file.name}: {e}")
+                        
+            st.success(f"¡{exitosos} PDFs desbloqueados y renombrados con el nombre del comprobante correspondiente!")
+            buffer_zip.seek(0)
+            st.download_button(
+                label="📥 Descargar Paquete de Facturas Renombradas por Comprobante (.ZIP)",
+                data=buffer_zip,
+                file_name="Facturas_INDUMAQ_Organizadas_Por_Comprobante.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
 
 with tab_auditoria:
     st.markdown("### Modulo de Auditoria Contable y Trazabilidad")
@@ -258,26 +360,27 @@ with tab_auditoria:
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
-        opciones_fac = [f"[{r['N°']}] {r['Factura']} - {r['Proveedor']} (${r['Total']:,.0f})" for _, r in df_p.iterrows()]
+        opciones_fac = [f"[{r['Comprobante Siigo']}] {r['Factura']} - {r['Proveedor']} (${r['Total']:,.0f})" for _, r in df_p.iterrows()]
         seleccion = st.selectbox("Selecciona una factura para auditar:", opciones_fac)
         
-        num_sel = int(seleccion.split("]")[0].replace("[", ""))
-        fac_sel = df_p[df_p["N°"] == num_sel].iloc[0]
+        comp_sel = seleccion.split("]")[0].replace("[", "")
+        fac_sel = df_p[df_p["Comprobante Siigo"] == comp_sel].iloc[0]
         es_aduanero = any(k in fac_sel["Proveedor"].upper() for k in AGENTES_ADUANEROS)
         
         col_a1, col_a2 = st.columns(2)
         with col_a1:
             st.markdown(f"""
             <div class="audit-card">
-                <h4>Detalle del Documento: {fac_sel['Factura']}</h4>
-                <p><b>Proveedor / Emisor:</b> {fac_sel['Proveedor']} (NIT: {fac_sel['NIT Emisor']})</p>
+                <h4>Detalle del Comprobante: {fac_sel['Comprobante Siigo']}</h4>
+                <p><b>Soporte PDF Vinculado:</b> <span class="tag-comp">{fac_sel['Soporte PDF Renombrado']}</span></p>
+                <p><b>Factura:</b> {fac_sel['Factura']} - <b>Proveedor:</b> {fac_sel['Proveedor']} (NIT: {fac_sel['NIT Emisor']})</p>
                 <p><b>Fecha de Emision:</b> {fac_sel['Fecha']} - <b>Total:</b> ${fac_sel['Total']:,.2f}</p>
                 <hr>
                 <h5>Trazabilidad de la Contabilizacion:</h5>
                 <ul>
                     <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Concepto / Cta']}</span> - {fac_sel['Categoría']}</li>
                     <li><b>Motivo Tecnico:</b> {fac_sel['Razón Contable']}</li>
-                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b> ${fac_sel['IVA']:,.2f}</li>
+                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b>${fac_sel['IVA']:,.2f}</li>
                     <li><b>Retencion en la Fuente:</b> ${fac_sel['ReteFuente']:,.2f}</li>
                 </ul>
             </div>
