@@ -3,16 +3,16 @@ import pandas as pd
 import openpyxl
 import io
 import time
+from datetime import datetime
 import zipfile
 import re
 from pypdf import PdfReader, PdfWriter
 
-st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="Sistema ERP y Auditoría Contable DIAN", layout="wide", page_icon="🏢")
 
-# TEMPORIZADOR DE INACTIVIDAD (30 MINUTOS = 1800 SEG)
+# 1. TEMPORIZADOR DE INACTIVIDAD (30 MINUTOS = 1800 SEG)
 TIEMPO_MAX_INACTIVIDAD = 30 * 60
 
-# Script inactividad navegador
 st.markdown("""
 <script>
 let tiempoLimite = 30 * 60 * 1000;
@@ -37,28 +37,28 @@ EMPRESAS_DISPONIBLES = [
     {
         "nombre": "INDUMAQ ER SAS",
         "nit": "901.346.412-5",
-        "actividad": "Comercio y Reparacion de Maquinaria / Importaciones",
+        "actividad": "Comercio y Reparación de Maquinaria / Importaciones",
         "regimen": "Responsable de IVA",
         "estado": "ACTIVA"
     },
     {
         "nombre": "ASMINCOL S.A.S.",
         "nit": "900.467.519-1",
-        "actividad": "Servicios Mineros y Construccion",
+        "actividad": "Servicios Mineros y Construcción",
         "regimen": "Responsable de IVA",
         "estado": "PROXIMAMENTE"
     },
     {
         "nombre": "CONSTRUDISENO CT SAS",
         "nit": "900.524.356-8",
-        "actividad": "Construccion y Obras Civiles",
+        "actividad": "Construcción y Obras Civiles",
         "regimen": "Responsable de IVA",
         "estado": "PROXIMAMENTE"
     },
     {
         "nombre": "SCG TRANSPORTES",
         "nit": "901.700.731-8",
-        "actividad": "Transporte de Carga y Logistica",
+        "actividad": "Transporte de Carga y Logística",
         "regimen": "Responsable de IVA",
         "estado": "PROXIMAMENTE"
     },
@@ -71,7 +71,7 @@ EMPRESAS_DISPONIBLES = [
     }
 ]
 
-# Inicializacion de variables de sesion
+# Inicialización de variables de sesión
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
 if "empresa_activa" not in st.session_state:
@@ -81,7 +81,7 @@ if "proceso_activo" not in st.session_state:
 if "ultima_actividad" not in st.session_state:
     st.session_state["ultima_actividad"] = time.time()
 
-# Alerta de sesion expirada por URL
+# Alerta si expiró por inactividad
 if st.query_params.get("sesion_expirada") == "1":
     st.session_state["autenticado"] = False
     st.session_state["empresa_activa"] = None
@@ -102,7 +102,6 @@ if st.session_state["autenticado"]:
     else:
         st.session_state["ultima_actividad"] = ahora
 else:
-    # Si recargo la pagina (F5) y estaba autenticado dentro de los 30 min
     if st.query_params.get("auth") == "1":
         t_param = int(st.query_params.get("t", 0))
         if ahora - t_param < TIEMPO_MAX_INACTIVIDAD:
@@ -118,7 +117,7 @@ else:
             if proc_param:
                 st.session_state["proceso_activo"] = proc_param
 
-# PANTALLA 1: LOGIN
+# PANTALLA 1: LOGIN (Línea con spec explícito para evitar TypeError)
 if not st.session_state["autenticado"]:
     col1, col2, col3 = st.columns()
     with col2:
@@ -141,7 +140,7 @@ if not st.session_state["autenticado"]:
                     st.error("Ingresa usuario y contraseña.")
     st.stop()
 
-# Barra superior con boton para Cerrar Sesion manual
+# Barra superior con botón para Cerrar Sesión manual
 col_top_l, col_top_r = st.columns()
 with col_top_r:
     if st.button("🚪 Cerrar Sesión"):
@@ -259,7 +258,7 @@ st.markdown("---")
 tab_compras, tab_auditoria, tab_siigo = st.tabs([
     "1. Cargar Excel, Desglosar y Renombrar PDFs",
     "2. Auditoría y Trazabilidad Fiscal",
-    "3. Exportar Planilla Oficial a Siigo"
+    "3. Exportar Planilla Oficial a Siigo (3 Hojas)"
 ])
 
 AGENTES_ADUANEROS = ["DHL", "ADUANA", "EURO SHIPPING", "PORTUARIA", "ALMACENADORA", "CARGO", "TRADE GLOBAL", "TERMINAL", "BUENAVENTURA"]
@@ -278,43 +277,126 @@ def safe_read_pdf(file_obj):
         raise ValueError("El archivo se leyó vacío (0 bytes).")
     return PdfReader(io.BytesIO(data))
 
-def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
+def parse_fecha(fecha_val):
+    """Interpreta fechas en formatos colombianos DD/MM/AAAA o AAAA-MM-DD"""
+    if pd.isna(fecha_val):
+        return None
+    try:
+        if isinstance(fecha_val, datetime):
+            return fecha_val
+        s = str(fecha_val).split()[0].replace("-", "/").strip()
+        partes = s.split("/")
+        if len(partes) == 3:
+            if len(partes[0]) == 4:
+                return datetime(int(partes[0]), int(partes), int(partes))
+            elif len(partes) == 4:
+                return datetime(int(partes), int(partes), int(partes[0]))
+        return pd.to_datetime(fecha_val, dayfirst=True).to_pydatetime()
+    except:
+        return None
+
+def get_parametros_tributarios_fecha(dt_obj, uvt_val=52374):
+    """
+    Aplica las variaciones históricas del año 2026:
+    1. 1 Ene - 7 May 2026: Decreto 0572 de 2025 (Compras 10 UVT, Servicios 2 UVT)
+    2. 8 May - 30 Jun 2026: Suspensión Consejo de Estado / Comunicado DIAN 070 (Decreto 1625: Compras 27 UVT, Servicios 4 UVT)
+    3. 1 Jul 2026 en adelante: Reactivación Decreto 0572 (Compras 10 UVT, Servicios 2 UVT)
+    """
+    if dt_obj and datetime(2026, 5, 8) <= dt_obj <= datetime(2026, 6, 30):
+        uvt_compras = 27
+        uvt_servicios = 4
+        norma_desc = "Decreto 1625/2016 (Suspensión Consejo de Estado 8 May - 30 Jun)"
+        badge_norma = "Suspensión C.E. (27 UVT)"
+    else:
+        uvt_compras = 10
+        uvt_servicios = 2
+        if dt_obj and dt_obj >= datetime(2026, 7, 1):
+            norma_desc = "Decreto 0572/2025 Reactivado (1 Jul en adelante)"
+            badge_norma = "D.0572 Reactivado (10 UVT)"
+        else:
+            norma_desc = "Decreto 0572/2025 Vigente (1 Ene - 7 May)"
+            badge_norma = "Decreto 0572 (10 UVT)"
+            
+    tope_compras = uvt_compras * uvt_val
+    tope_servicios = uvt_servicios * uvt_val
+    return uvt_compras, tope_compras, uvt_servicios, tope_servicios, norma_desc, badge_norma
+
+def clasificar_factura_completa(nit_emisor, nombre_emisor, valor_base, tipo_doc, dt_obj, uvt_val=52374):
+    """Clasifica contablemente según PUC, fecha de emisión y régimen tributario vigente en esa fecha"""
     nombre = str(nombre_emisor).upper()
     es_nc = "CREDITO" in str(tipo_doc).upper() or "CRÉDITO" in str(tipo_doc).upper()
-    t_comp = 17 if es_nc else 10
     op = "Devolucion Compra" if es_nc else "Compra"
     
+    u_comp, tope_comp, u_serv, tope_serv, norma_desc, badge_norma = get_parametros_tributarios_fecha(dt_obj, uvt_val)
+    
+    # 1. Agenciamiento Aduanero, Fletes e Importaciones (Cuenta 146505)
     if any(k in nombre for k in AGENTES_ADUANEROS):
-        return t_comp, op, "146505", "22050501", f"Importación / Tránsito - {nombre_emisor[:25]}", round(valor_base * 0.04, 2) if valor_base >= 210000 else 0.0, "Importación (1465)", "Honorarios Agenciamiento vs Terceros"
+        rfte = round(valor_base * 0.04, 2) if valor_base >= tope_servicios else 0.0
+        return op, "146505", "22050501", f"Importación / Tránsito - {nombre_emisor[:25]}", rfte, "Importación (1465)", f"Agenciamiento / Tránsito ({norma_desc}, Base: {u_serv} UVT = ${tope_servicios:,.0f})", badge_norma
         
+    # 2. Repuestos y Mantenimiento de Maquinaria
     repuestos_kw = ["FERROMENDEZ", "TORNILLOLOCO", "CAUCHOS", "ASIMFER", "MAFLEXCOL", "EMPRECOL", "BATTS ZONE", "MECANIZAR", "HIDRAHULICAS", "BAMACOLGROUP"]
     if any(k in nombre for k in repuestos_kw):
-        if valor_base >= 500000:
-            return t_comp, op, "14350101", "22050501", f"Repuestos / Inventario - {nombre_emisor[:25]}", round(valor_base * 0.025, 2) if valor_base >= 1414000 else 0.0, "Inventario", "Compra repuestos mayores a 500k"
+        if valor_base >= tope_comp:
+            rfte = round(valor_base * 0.025, 2)
+            return op, "14350101", "22050501", f"Repuestos / Inventario - {nombre_emisor[:25]}", rfte, "Inventario", f"Repuestos >= {u_comp} UVT ({norma_desc})", badge_norma
         else:
-            return t_comp, op, "61800101", "23359501", f"Mantenimiento menor - {nombre_emisor[:25]}", 0.0, "Costo Mantenimiento", "Repuestos menores a 500k"
+            return op, "61800101", "23359501", f"Mantenimiento menor - {nombre_emisor[:25]}", 0.0, "Costo Mantenimiento", f"Repuestos menores a {u_comp} UVT (${tope_comp:,.0f}) sin retención", badge_norma
             
+    # 3. Hoteles y Hospedajes
     if any(k in nombre for k in ["HOTEL", "ESTELAR", "GENOVA", "VITTAPARK"]):
-        return t_comp, op, "51550501", "23359501", f"Alojamiento / Viaje - {nombre_emisor[:25]}", round(valor_base * 0.035, 2) if valor_base >= 210000 else 0.0, "Gasto Viaje", "Hospedaje de personal"
+        rfte = round(valor_base * 0.035, 2) if valor_base >= tope_servicios else 0.0
+        return op, "51550501", "23359501", f"Alojamiento / Viaje - {nombre_emisor[:25]}", rfte, "Gasto Viaje", f"Hospedaje de personal (ReteFuente 3.5%, base {u_serv} UVT)", badge_norma
         
+    # 4. Suscripciones y Software (Autorretenedores)
     if "SIIGO" in nombre:
-        return t_comp, op, "51352001", "23359501", f"Software Siigo - {nombre_emisor[:25]}", 0.0, "Software", "Autorretenedor de renta"
+        return op, "51352001", "23359501", f"Software Siigo - {nombre_emisor[:25]}", 0.0, "Software", "Autorretenedor de renta (Sin ReteFuente)", badge_norma
         
+    # 5. Papelería y Útiles
     if "PANAMERICANA" in nombre:
-        return t_comp, op, "51953001", "23359501", f"Papelería - {nombre_emisor[:25]}", 0.0, "Gastos Papelería", "Útiles de oficina"
+        return op, "51953001", "23359501", f"Papelería - {nombre_emisor[:25]}", 0.0, "Gastos Papelería", "Útiles de oficina sin retención", badge_norma
         
-    if valor_base >= 500000:
-        return t_comp, op, "14350101", "22050501", f"Compra mercancías - {nombre_emisor[:25]}", round(valor_base * 0.025, 2) if valor_base >= 1414000 else 0.0, "Mercancía", "Compra general > 500k"
+    # 6. Compras Generales
+    if valor_base >= tope_comp:
+        rfte = round(valor_base * 0.025, 2)
+        return op, "14350101", "22050501", f"Compra mercancías - {nombre_emisor[:25]}", rfte, "Mercancía", f"Compra general >= {u_comp} UVT (${tope_comp:,.0f})", badge_norma
     else:
-        return t_comp, op, "51959501", "23359501", f"Gastos generales - {nombre_emisor[:25]}", 0.0, "Gasto General", "Compra menor general"
+        return op, "51959501", "23359501", f"Gastos generales - {nombre_emisor[:25]}", 0.0, "Gasto General", f"Compra menor general < {u_comp} UVT", badge_norma
 
 with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF (Compilado o Individuales)")
-    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o matriz Siigo, y el archivo **PDF compilado** para desglose y renombrado automático por comprobante.")
+    
+    # PARAMETRIZACION DE CONSECUTIVOS Y REGIMEN TEMPORAL TRIBUTARIO
+    with st.expander("⚙️ **Configuración de Comprobantes, Consecutivos y Marco Tributario 2026**", expanded=True):
+        st.markdown("##### 1. Numeración de Comprobantes:")
+        col_c1, col_c2, col_c3 = st.columns(3)
+        with col_c1:
+            st.markdown("**1er Semestre (1 Ene - 30 Jun)**")
+            t_comp_sem1 = st.number_input("Tipo Comprobante (Ene-Jun):", min_value=1, max_value=99, value=16, step=1)
+            consec_ini_sem1 = st.number_input("Consecutivo Inicial (Ene-Jun):", min_value=1, value=1, step=1)
+        with col_c2:
+            st.markdown("**2do Semestre (1 Jul en adelante)**")
+            t_comp_sem2 = st.number_input("Tipo Comprobante (Jul en adelante):", min_value=1, max_value=99, value=10, step=1)
+            consec_ini_sem2 = st.number_input("Consecutivo Inicial (Jul en adelante):", min_value=1, value=791, step=1)
+        with col_c3:
+            st.markdown("**Notas Crédito / Devoluciones**")
+            t_comp_nc = st.number_input("Tipo Comprobante Devolución:", min_value=1, max_value=99, value=17, step=1)
+            consec_ini_nc = st.number_input("Consecutivo Inicial NC:", min_value=1, value=1, step=1)
+
+        st.markdown("---")
+        st.markdown("##### 2. Marco Tributario 2026 Integrado (UVT: $52.374):")
+        st.info("""
+        **Reglas temporales aplicadas automáticamente según la fecha de cada factura:**
+        * **1 Ene - 7 May 2026:** Decreto 0572/2025 ➔ Compras base **10 UVT ($523.740)** | Servicios base **2 UVT ($104.748)**.
+        * **8 May - 30 Jun 2026:** Suspensión Consejo de Estado / Comunicado DIAN 070 ➔ Regreso a Decreto 1625: Compras base **27 UVT ($1.414.098)** | Servicios base **4 UVT ($209.496)**.
+        * **1 Jul 2026 en adelante:** Reactivación Decreto 0572 ➔ Compras base **10 UVT ($523.740)** | Servicios base **2 UVT ($104.748)**.
+        """)
+
+    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o matriz de compras, y el archivo **PDF compilado** para desglose y renombrado automático por comprobante.")
     
     col_u1, col_u2 = st.columns(2)
     with col_u1:
-        archivo_excel = st.file_uploader("1. Reporte Excel (DIAN prueba.xlsx o Matriz Siigo)", type=["xlsx", "xls"])
+        archivo_excel = st.file_uploader("1. Reporte Excel (DIAN prueba.xlsx o Matriz)", type=["xlsx", "xls"])
     with col_u2:
         archivos_pdfs = st.file_uploader("2. Facturas en PDF (Sube el PDF compilado o sueltas)", type=["pdf"], accept_multiple_files=True)
         
@@ -328,13 +410,20 @@ with tab_compras:
         if not df_dian.empty:
             st.success(f"Reporte cargado con éxito: **{len(df_dian)} registros identificados**.")
             
+            c_sem1 = int(consec_ini_sem1)
+            c_sem2 = int(consec_ini_sem2)
+            c_nc = int(consec_ini_nc)
+            
             filas = []
             for idx, r in df_dian.iterrows():
                 tipo_doc = r.get("Tipo de documento", r.get("Operacion", "Factura electrónica"))
                 folio = str(r.get("Folio", r.get("Factura Num", f"{idx+1}"))).strip()
                 prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
                 if prefijo.lower() == "nan": prefijo = ""
-                fecha = str(r.get("Fecha Emisión", r.get("Fecha (DD/MM/AAAA)", r.get("Fecha", "S/F")))).split()[0]
+                fecha_str = str(r.get("Fecha Emisión", r.get("Fecha (DD/MM/AAAA)", r.get("Fecha", "01/01/2026")))).split()[0]
+                dt_obj = parse_fecha(fecha_str)
+                fecha_formateada = dt_obj.strftime("%d/%m/%Y") if dt_obj else fecha_str
+                
                 nit_e = str(r.get("NIT Emisor", r.get("NIT", ""))).strip().split("-")[0].replace(".", "")
                 nom_e = str(r.get("Nombre Emisor", r.get("Descripcion", "Proveedor"))).strip()
                 
@@ -345,13 +434,24 @@ with tab_compras:
                 if tot == 0.0 and base > 0:
                     tot = base + iva
                 
-                t_comp_exist = r.get("Tipo Comp", None)
-                consec_exist = r.get("Consecutivo", None)
+                op, cta_p, cta_c, desc, rfte, cat, razon, badge_norma = clasificar_factura_completa(
+                    nit_e, nom_e, base, tipo_doc, dt_obj
+                )
                 
-                t_comp, op, cta_p, cta_c, desc, rfte, cat, razon = clasificar_factura(nit_e, nom_e, base, tipo_doc)
-                
-                t_comp_final = int(t_comp_exist) if pd.notna(t_comp_exist) else t_comp
-                consecutivo_final = int(consec_exist) if pd.notna(consec_exist) else (680 + idx)
+                es_devolucion = op == "Devolucion Compra"
+                if es_devolucion:
+                    t_comp_final = int(t_comp_nc)
+                    consecutivo_final = c_nc
+                    c_nc += 1
+                else:
+                    if dt_obj and dt_obj <= datetime(2026, 6, 30):
+                        t_comp_final = int(t_comp_sem1)
+                        consecutivo_final = c_sem1
+                        c_sem1 += 1
+                    else:
+                        t_comp_final = int(t_comp_sem2)
+                        consecutivo_final = c_sem2
+                        c_sem2 += 1
                 
                 nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
                 nombre_pdf_esperado = f"Comp_{t_comp_final}-{consecutivo_final}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
@@ -361,28 +461,35 @@ with tab_compras:
                     "Tipo Comp": t_comp_final,
                     "Consecutivo": consecutivo_final,
                     "Comprobante Siigo": f"Comp {t_comp_final}-{consecutivo_final}",
-                    "Fecha": fecha,
+                    "Fecha (DD/MM/AAAA)": fecha_formateada,
                     "Factura": f"{prefijo}-{folio}" if prefijo else folio,
                     "Folio": folio,
                     "Prefijo": prefijo,
                     "Proveedor": nom_e,
+                    "NIT": nit_e,
                     "NIT Emisor": nit_e,
-                    "Concepto / Cta": cta_p,
+                    "Descripcion": desc,
+                    "Operacion": op,
+                    "Cta Principal": cta_p,
                     "Categoría": cat,
+                    "Valor Base": base,
                     "Base": base,
                     "IVA": iva,
                     "ReteFuente": rfte,
+                    "ReteICA": 0.0,
+                    "ReteIVA": 0.0,
                     "Total": tot,
                     "Cta Contrapartida": cta_c,
                     "Razón Contable": razon,
+                    "Norma Aplicada": badge_norma,
                     "Soporte PDF Renombrado": nombre_pdf_esperado
                 })
                 
             df_proc = pd.DataFrame(filas)
             st.session_state["df_procesado"] = df_proc
             
-            st.markdown("#### Matriz Contable Vinculada a Comprobantes:")
-            st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Total", "Soporte PDF Renombrado"]], use_container_width=True)
+            st.markdown("#### Matriz Contable Generada según Fechas, Consecutivos y Marco Tributario:")
+            st.dataframe(df_proc[["Comprobante Siigo", "Fecha (DD/MM/AAAA)", "Factura", "Proveedor", "Cta Principal", "Valor Base", "IVA", "ReteFuente", "Total", "Norma Aplicada", "Soporte PDF Renombrado"]], use_container_width=True)
 
     # Procesar, Separar y Renombrar PDFs
     if archivos_pdfs:
@@ -463,7 +570,7 @@ with tab_compras:
                             for idx_f, row in df_proc.iterrows():
                                 num_compuesto = re.sub(r'[^a-zA-Z0-9]', '', f"{row['Prefijo']}{row['Folio']}".upper())
                                 num_solo = re.sub(r'[^a-zA-Z0-9]', '', str(row['Folio']).upper())
-                                nit_prov = str(row['NIT Emisor']).replace(".", "")
+                                nit_prov = str(row['NIT']).replace(".", "")
                                 
                                 if num_compuesto and len(num_compuesto) >= 4 and num_compuesto in clean_txt:
                                     match_encontrado = idx_f
@@ -532,11 +639,12 @@ with tab_auditoria:
             with st.container(border=True):
                 st.subheader(f"Comprobante: {fac_sel['Comprobante Siigo']}")
                 st.write(f"**Soporte PDF Vinculado:** `{fac_sel['Soporte PDF Renombrado']}`")
-                st.write(f"**Factura:** {fac_sel['Factura']} — **Proveedor:** {fac_sel['Proveedor']} (NIT: {fac_sel['NIT Emisor']})")
-                st.write(f"**Fecha de Emisión:** {fac_sel['Fecha']} | **Total:** ${fac_sel['Total']:,.2f}")
+                st.write(f"**Factura:** {fac_sel['Factura']} — **Proveedor:** {fac_sel['Proveedor']} (NIT: {fac_sel['NIT']})")
+                st.write(f"**Fecha de Emisión:** {fac_sel['Fecha (DD/MM/AAAA)']} | **Total:** ${fac_sel['Total']:,.2f}")
+                st.write(f"**Marco Tributario Aplicado:** `{fac_sel['Norma Aplicada']}`")
                 st.markdown("---")
-                st.info(f"**Cuenta Asignada:** {fac_sel['Concepto / Cta']} ({fac_sel['Categoría']})\n\n**Motivo Técnico:** {fac_sel['Razón Contable']}")
-                st.write(f"• **Base Gravable:** ${fac_sel['Base']:,.2f}")
+                st.info(f"**Cuenta Asignada:** {fac_sel['Cta Principal']} ({fac_sel['Categoría']})\n\n**Motivo Técnico:** {fac_sel['Razón Contable']}")
+                st.write(f"• **Base Gravable:** ${fac_sel['Valor Base']:,.2f}")
                 st.write(f"• **IVA Liquidado:** ${fac_sel['IVA']:,.2f}")
                 st.write(f"• **Retención en la Fuente:** ${fac_sel['ReteFuente']:,.2f}")
                 
@@ -551,7 +659,7 @@ with tab_auditoria:
         with col_a2:
             with st.container(border=True):
                 st.subheader("Resumen Financiero")
-                st.metric("Base Gravable", f"${fac_sel['Base']:,.0f}")
+                st.metric("Base Gravable", f"${fac_sel['Valor Base']:,.0f}")
                 st.metric("IVA Liquidado", f"${fac_sel['IVA']:,.0f}")
                 st.metric("ReteFuente", f"${fac_sel['ReteFuente']:,.0f}")
                 st.metric("Total Neto a Pagar", f"${fac_sel['Total'] - fac_sel['ReteFuente']:,.0f}")
@@ -559,24 +667,90 @@ with tab_auditoria:
         st.info("Carga el archivo Excel en la Pestaña 1 para habilitar la auditoría.")
 
 with tab_siigo:
-    st.markdown("### Descargar Planilla de Importación Oficial para Siigo Nube")
+    st.markdown("### Exportar Libro Oficial de Importación Siigo Nube (3 Hojas Completas)")
+    st.write("Genera el libro Excel estructurado con **matriz_captura**, **interfaz_siigo** (27 columnas oficiales) y **Parametrización**.")
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
+        
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_siigo = df_p[["Tipo Comp", "Consecutivo", "Fecha", "NIT Emisor", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Cta Contrapartida"]].copy()
-            df_siigo.columns = ["Tipo Comp", "Consecutivo", "Fecha", "NIT", "Factura Num", "Descripcion", "Cta Principal", "Valor Base", "IVA", "ReteFuente", "Cta Contrapartida"]
-            df_siigo.to_excel(writer, sheet_name="matriz_captura", index=False)
+            # 1. Hoja matriz_captura
+            cols_captura = ["Tipo Comp", "Consecutivo", "Fecha (DD/MM/AAAA)", "NIT", "Prefijo", "Factura Num", "Descripcion", "Operacion", "Cta Principal", "Valor Base", "IVA", "ReteFuente", "ReteICA", "ReteIVA", "Cta Contrapartida"]
+            df_matriz_exp = df_p.copy()
+            df_matriz_exp["Factura Num"] = df_matriz_exp["Folio"]
+            df_matriz_exp = df_matriz_exp[[c for c in cols_captura if c in df_matriz_exp.columns]]
+            df_matriz_exp.to_excel(writer, sheet_name="matriz_captura", index=False)
+            
+            # 2. Hoja interfaz_siigo (27 columnas estándar Siigo)
+            filas_interfaz = []
+            for _, r in df_p.iterrows():
+                es_nc = r.get("Operacion") == "Devolucion Compra"
+                val_base = float(r.get("Valor Base", 0.0))
+                debito = 0.0 if es_nc else val_base
+                credito = val_base if es_nc else 0.0
+                
+                filas_interfaz.append({
+                    "Tipo de comprobante": r.get("Tipo Comp"),
+                    "Consecutivo comprobante": r.get("Consecutivo"),
+                    "Fecha de elaboración": r.get("Fecha (DD/MM/AAAA)"),
+                    "Sigla moneda": "COP",
+                    "Tasa de cambio": 1,
+                    "Código cuenta contable": str(r.get("Cta Principal")),
+                    "Identificación tercero": str(r.get("NIT")),
+                    "Sucursal": 0,
+                    "Código producto": "",
+                    "Código de bodega": "",
+                    "Acción": "",
+                    "Cantidad producto": "",
+                    "Prefijo": r.get("Prefijo", ""),
+                    "Consecutivo": r.get("Folio", ""),
+                    "No. cuota": 1,
+                    "Fecha vencimiento": r.get("Fecha (DD/MM/AAAA)"),
+                    "Código impuesto": "",
+                    "Código grupo activo fijo": "",
+                    "Código activo fijo": "",
+                    "Descripción": r.get("Descripcion"),
+                    "Código centro/subcentro de costos": "",
+                    "Débito": debito,
+                    "Crédito": credito,
+                    "Observaciones": f"Factura {r.get('Prefijo','')}{r.get('Folio','')}",
+                    "Base gravable libro compras/ventas": val_base,
+                    "Base exenta libro compras/ventas": 0.0,
+                    "Mes de cierre": ""
+                })
+            df_interfaz = pd.DataFrame(filas_interfaz)
+            df_interfaz.to_excel(writer, sheet_name="interfaz_siigo", index=False)
+            
+            # 3. Hoja Parametrización
+            data_puc = [
+                {"Cuenta": "146505", "Nombre": "Inventarios en Tránsito / Costos Importación", "Naturaleza": "Débito", "Uso": "DHL, Euro Shipping, Agencias Aduaneras, Puertos"},
+                {"Cuenta": "14350101", "Nombre": "Mercancías / Repuestos Mayores a Base UVT", "Naturaleza": "Débito", "Uso": "Inventario repuestos (Base según periodo de emisión)"},
+                {"Cuenta": "61800101", "Nombre": "Costos Mantenimiento / Menores a Base UVT", "Naturaleza": "Débito", "Uso": "Consumo y mantenimiento directo de maquinaria"},
+                {"Cuenta": "51550501", "Nombre": "Gastos de Viaje y Alojamiento", "Naturaleza": "Débito", "Uso": "Hospedaje y hoteles de operarios / personal (3.5%)"},
+                {"Cuenta": "51352001", "Nombre": "Suscripciones y Software", "Naturaleza": "Débito", "Uso": "Plataforma Siigo y software contable (Autorretenedor)"},
+                {"Cuenta": "51953001", "Nombre": "Útiles, Papelería y Fotocopias", "Naturaleza": "Débito", "Uso": "Gastos de papelería de oficina"},
+                {"Cuenta": "51959501", "Nombre": "Gastos Generales Diversos", "Naturaleza": "Débito", "Uso": "Compras menores y gastos varios"},
+                {"Cuenta": "24080101", "Nombre": "Impuesto a las Ventas (IVA) Descontable 19%", "Naturaleza": "Débito", "Uso": "IVA pagado en compras y servicios gravados"},
+                {"Cuenta": "23654001", "Nombre": "ReteFuente Compras Declarantes (2.5%)", "Naturaleza": "Crédito", "Uso": "10 UVT ($523.740) / 27 UVT ($1.414.098 en suspensión 8 May-30 Jun)"},
+                {"Cuenta": "23652501", "Nombre": "ReteFuente Servicios General (4.0%)", "Naturaleza": "Crédito", "Uso": "2 UVT ($104.748) / 4 UVT ($209.496 en suspensión 8 May-30 Jun)"},
+                {"Cuenta": "22050501", "Nombre": "Proveedores Nacionales", "Naturaleza": "Crédito", "Uso": "Contrapartida de compras y materias primas"},
+                {"Cuenta": "23359501", "Nombre": "Costos y Gastos por Pagar", "Naturaleza": "Crédito", "Uso": "Contrapartida de servicios y gastos operativos"}
+            ]
+            df_puc = pd.DataFrame(data_puc)
+            df_puc.to_excel(writer, sheet_name="Parametrización", index=False)
             
         output.seek(0)
         st.download_button(
-            label=f"Descargar Planilla Siigo ({empresa['nombre']})",
+            label=f"📥 Descargar Plantilla Siigo Completa (3 Hojas: matriz, interfaz y parametrización)",
             data=output,
-            file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}.xlsx",
+            file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}_Completa.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-        st.success("Estructura validada para cargar directamente en Siigo Nube.")
+        
+        st.markdown("---")
+        st.subheader("Vista Previa de la Hoja 'interfaz_siigo' (Para Importación en Siigo):")
+        st.dataframe(df_interfaz.head(10), use_container_width=True)
     else:
         st.info("Primero procesa los documentos en la Pestaña 1 para habilitar la descarga.")
