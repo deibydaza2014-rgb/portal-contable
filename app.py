@@ -380,21 +380,25 @@ with tab_compras:
 
     if archivos_pdfs:
         st.markdown("---")
-        st.markdown("#### 📑 Procesamiento, Separación y Renombrado de PDFs por Comprobante:")
-        st.caption("Si subes un PDF consolidado con todas las facturas juntas, el sistema lo divide automáticamente en PDFs individuales con el nombre de cada comprobante y consecutivo.")
+        st.markdown("#### 📑 Procesamiento, Separación y Renombrado de PDFs Multi-Página:")
+        st.caption("Identifica y une facturas completas de 2 o más hojas a partir de un PDF consolidado, asignando a cada una su comprobante y consecutivo oficial.")
+
+        patron_pag = re.compile(r'(?:P[ÁAáa]G(?:INA|\.)?|HOJA|PAGE)\s*(\d+)\s*(?:DE|\/|OF)\s*(\d+)', re.IGNORECASE)
 
         col_cfg1, col_cfg2 = st.columns(2)
         with col_cfg1:
             modo_sep = st.radio(
-                "Tipo de procesamiento para PDFs:",
+                "Configuración de reconocimiento de facturas:",
                 [
-                    "Detección inteligente (Divide el PDF consolidado por factura o 1 página por comprobante)",
-                    "Separar estrictamente 1 página por factura (cronológico Enero - Actual)",
-                    "Mantener archivos tal como vienen (solo desbloquear y renombrar)"
+                    "🔍 Detección Inteligente (Reconoce facturas completas de 2 o más hojas por 'Página 1 de 2', CUFE y Número)",
+                    "📄 Agrupación fija de 2 páginas por factura (cada factura tiene 2 hojas)",
+                    "📄 Agrupación fija de 3 páginas por factura (cada factura tiene 3 hojas)",
+                    "📑 Separar 1 página por factura (facturas de 1 sola hoja)",
+                    "📂 Mantener archivos individuales (sin separar páginas)"
                 ]
             )
         with col_cfg2:
-            st.info("💡 **Separador Activo:** Cada factura quedará guardada como un archivo individual nombrado `Comp_10-XXX_Factura_Proveedor.pdf` listo para descargar en un archivo .ZIP y visible en la pestaña de auditoría.")
+            st.info("💡 **Garantía de Factura Completa:** El motor inteligente detecta dónde empieza cada factura (Prefijo, Folio, NIT y marcadores de paginación). Todas las páginas de una misma factura se unen en un solo archivo PDF completo nombrado `Comp_10-XXX_Factura_Proveedor.pdf`.")
 
         if st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora"):
             buffer_zip = io.BytesIO()
@@ -421,7 +425,7 @@ with tab_compras:
                         num_pags = len(reader.pages)
 
                         # Caso 1: Archivo de una sola página o modo sin separación
-                        if num_pags == 1 or "Mantener archivos" in modo_sep:
+                        if num_pags == 1 or "Mantener archivos individuales" in modo_sep:
                             writer = PdfWriter()
                             texto_pdf = ""
                             for page in reader.pages:
@@ -444,99 +448,166 @@ with tab_compras:
                             st.session_state["dict_pdfs"][nombre_final] = pdf_bytes
                             total_generados += 1
 
-                        # Caso 2: PDF Consolidado Multi-Página a Separar
-                        else:
-                            st.write(f"Procesando PDF consolidado **{pdf_file.name}** ({num_pags} páginas)...")
-                            
-                            # 2.A: Si es división estricta 1 página por factura cronológica
-                            if "Separar estrictamente 1 página" in modo_sep or df_ref.empty:
-                                for p_idx in range(num_pags):
-                                    pw = PdfWriter()
-                                    pw.add_page(reader.pages[p_idx])
-                                    out_p = io.BytesIO()
-                                    pw.write(out_p)
-                                    p_bytes = out_p.getvalue()
-                                    
-                                    if p_idx < len(df_ref):
-                                        nom_doc = df_ref.iloc[p_idx]["Soporte PDF Renombrado"]
-                                    else:
-                                        nom_doc = f"Comprobante_Extra_Pag_{p_idx+1}.pdf"
-                                        
-                                    zf.writestr(nom_doc, p_bytes)
-                                    st.session_state["dict_pdfs"][nom_doc] = p_bytes
-                                    total_generados += 1
-
-                            # 2.B: Detección inteligente por contenido o secuencia
-                            else:
-                                page_matches = []
-                                matched_facturas = set()
+                        # Caso 2: Agrupación fija de 2 páginas por factura
+                        elif "Agrupación fija de 2 páginas" in modo_sep:
+                            st.write(f"Agrupando PDF **{pdf_file.name}** en bloques de **2 páginas por factura** ({num_pags} páginas totales)...")
+                            inv_idx = 0
+                            for p_start in range(0, num_pags, 2):
+                                pw = PdfWriter()
+                                pw.add_page(reader.pages[p_start])
+                                if p_start + 1 < num_pags:
+                                    pw.add_page(reader.pages[p_start + 1])
                                 
-                                for p_idx in range(num_pags):
-                                    try: txt_p = reader.pages[p_idx].extract_text() or ""
-                                    except: txt_p = ""
-                                    txt_clean = txt_p.replace("-", "").replace(" ", "").upper()
+                                out_p = io.BytesIO()
+                                pw.write(out_p)
+                                p_bytes = out_p.getvalue()
+                                
+                                if inv_idx < len(df_ref):
+                                    nom_doc = df_ref.iloc[inv_idx]["Soporte PDF Renombrado"]
+                                else:
+                                    nom_doc = f"Comprobante_Extra_{inv_idx+1}.pdf"
                                     
-                                    m_row = None
-                                    for _, r_cand in df_ref.iterrows():
-                                        fol_cand = str(r_cand["Folio"]).replace("-", "").strip().upper()
-                                        num_cand = str(r_cand["Factura"]).replace("-", "").strip().upper()
-                                        if (len(fol_cand) >= 3 and fol_cand in txt_clean) or (len(num_cand) >= 3 and num_cand in txt_clean):
-                                            m_row = r_cand
-                                            break
-                                    page_matches.append(m_row)
-                                    if m_row is not None:
-                                        matched_facturas.add(m_row["Comprobante Siigo"])
+                                zf.writestr(nom_doc, p_bytes)
+                                st.session_state["dict_pdfs"][nom_doc] = p_bytes
+                                total_generados += 1
+                                inv_idx += 1
 
-                                # Si se encontraron coincidencias por texto
-                                if len(matched_facturas) > 0:
-                                    curr_row = None
-                                    curr_writer = None
-                                    for p_idx in range(num_pags):
-                                        r_page = page_matches[p_idx]
-                                        if r_page is not None and (curr_row is None or r_page["Comprobante Siigo"] != curr_row["Comprobante Siigo"]):
-                                            if curr_writer is not None and curr_row is not None:
-                                                out_c = io.BytesIO()
-                                                curr_writer.write(out_c)
-                                                c_bytes = out_c.getvalue()
-                                                zf.writestr(curr_row["Soporte PDF Renombrado"], c_bytes)
-                                                st.session_state["dict_pdfs"][curr_row["Soporte PDF Renombrado"]] = c_bytes
-                                                total_generados += 1
-                                            curr_row = r_page
-                                            curr_writer = PdfWriter()
-                                            curr_writer.add_page(reader.pages[p_idx])
-                                        else:
-                                            if curr_writer is None:
-                                                curr_row = df_ref.iloc[0] if len(df_ref) > 0 else None
-                                                curr_writer = PdfWriter()
-                                            curr_writer.add_page(reader.pages[p_idx])
+                        # Caso 3: Agrupación fija de 3 páginas por factura
+                        elif "Agrupación fija de 3 páginas" in modo_sep:
+                            st.write(f"Agrupando PDF **{pdf_file.name}** en bloques de **3 páginas por factura** ({num_pags} páginas totales)...")
+                            inv_idx = 0
+                            for p_start in range(0, num_pags, 3):
+                                pw = PdfWriter()
+                                for offset in range(3):
+                                    if p_start + offset < num_pags:
+                                        pw.add_page(reader.pages[p_start + offset])
+                                
+                                out_p = io.BytesIO()
+                                pw.write(out_p)
+                                p_bytes = out_p.getvalue()
+                                
+                                if inv_idx < len(df_ref):
+                                    nom_doc = df_ref.iloc[inv_idx]["Soporte PDF Renombrado"]
+                                else:
+                                    nom_doc = f"Comprobante_Extra_{inv_idx+1}.pdf"
+                                    
+                                zf.writestr(nom_doc, p_bytes)
+                                st.session_state["dict_pdfs"][nom_doc] = p_bytes
+                                total_generados += 1
+                                inv_idx += 1
 
-                                    if curr_writer is not None and curr_row is not None:
+                        # Caso 4: Separar estrictamente 1 página por factura
+                        elif "Separar 1 página por factura" in modo_sep or df_ref.empty:
+                            for p_idx in range(num_pags):
+                                pw = PdfWriter()
+                                pw.add_page(reader.pages[p_idx])
+                                out_p = io.BytesIO()
+                                pw.write(out_p)
+                                p_bytes = out_p.getvalue()
+                                
+                                if p_idx < len(df_ref):
+                                    nom_doc = df_ref.iloc[p_idx]["Soporte PDF Renombrado"]
+                                else:
+                                    nom_doc = f"Comprobante_Extra_Pag_{p_idx+1}.pdf"
+                                    
+                                zf.writestr(nom_doc, p_bytes)
+                                st.session_state["dict_pdfs"][nom_doc] = p_bytes
+                                total_generados += 1
+
+                        # Caso 5: Detección Inteligente Multihidráulica / DIAN (2 o más hojas por factura)
+                        else:
+                            st.write(f"Analizando estructura multi-página del PDF consolidado **{pdf_file.name}** ({num_pags} páginas)...")
+                            
+                            facturas_generadas = []
+                            curr_writer = None
+                            curr_inv_row = None
+                            paginas_del_comprobante = 0
+                            
+                            def buscar_coincidencia_factura(texto_pagina):
+                                t_clean = texto_pagina.replace("-", "").replace(" ", "").upper()
+                                for _, r_cand in df_ref.iterrows():
+                                    fol_cand = str(r_cand["Folio"]).replace("-", "").strip().upper()
+                                    pref_cand = str(r_cand["Prefijo"]).replace("-", "").strip().upper()
+                                    fac_cand = str(r_cand["Factura"]).replace("-", "").strip().upper()
+                                    nit_cand = str(r_cand["NIT Emisor"]).replace("-", "").strip().upper()
+                                    
+                                    # 1. Coincidencia estricta Prefijo + Folio (ej. CBO2015647 o FTGI351)
+                                    if pref_cand and fol_cand and (pref_cand + fol_cand) in t_clean:
+                                        return r_cand
+                                    # 2. Factura completa
+                                    if fac_cand and len(fac_cand) >= 4 and fac_cand in t_clean:
+                                        return r_cand
+                                    # 3. NIT Proveedor + Folio juntos
+                                    if nit_cand and fol_cand and len(fol_cand) >= 3 and (nit_cand in t_clean and fol_cand in t_clean):
+                                        return r_cand
+                                    # 4. Folio largo (>= 4 dígitos)
+                                    if fol_cand and len(fol_cand) >= 4 and fol_cand in t_clean:
+                                        return r_cand
+                                return None
+
+                            for p_idx in range(num_pags):
+                                try: txt_p = reader.pages[p_idx].extract_text() or ""
+                                except: txt_p = ""
+                                
+                                # Comprobar indicador explícito "Página X de Y"
+                                m_pag = patron_pag.search(txt_p)
+                                cur_p, tot_p = (int(m_pag.group(1)), int(m_pag.group(2))) if m_pag else (None, None)
+                                
+                                # Buscar si en esta página arranca una factura identificada
+                                inv_encontrada = buscar_coincidencia_factura(txt_p)
+                                
+                                # Criterio de inicio de nueva factura
+                                es_inicio_nueva_factura = False
+                                if cur_p == 1:
+                                    es_inicio_nueva_factura = True
+                                elif cur_p is not None and cur_p > 1:
+                                    es_inicio_nueva_factura = False # Es hoja 2 o 3 de la factura actual
+                                elif inv_encontrada is not None:
+                                    if curr_inv_row is None or inv_encontrada["Comprobante Siigo"] != curr_inv_row["Comprobante Siigo"]:
+                                        es_inicio_nueva_factura = True
+                                elif curr_inv_row is None:
+                                    es_inicio_nueva_factura = True
+
+                                if es_inicio_nueva_factura:
+                                    # Guardar la factura anterior que ya se completó con todas sus hojas
+                                    if curr_writer is not None and curr_inv_row is not None:
                                         out_c = io.BytesIO()
                                         curr_writer.write(out_c)
                                         c_bytes = out_c.getvalue()
-                                        zf.writestr(curr_row["Soporte PDF Renombrado"], c_bytes)
-                                        st.session_state["dict_pdfs"][curr_row["Soporte PDF Renombrado"]] = c_bytes
+                                        doc_nombre = curr_inv_row["Soporte PDF Renombrado"]
+                                        zf.writestr(doc_nombre, c_bytes)
+                                        st.session_state["dict_pdfs"][doc_nombre] = c_bytes
                                         total_generados += 1
+                                        facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
+
+                                    # Iniciar nueva factura
+                                    curr_inv_row = inv_encontrada if inv_encontrada is not None else (df_ref.iloc[len(facturas_generadas)] if len(facturas_generadas) < len(df_ref) else None)
+                                    curr_writer = PdfWriter()
+                                    curr_writer.add_page(reader.pages[p_idx])
+                                    paginas_del_comprobante = 1
                                 else:
-                                    # Si no hubo capa de texto (PDF escaneado), se separa página a página en orden cronológico
-                                    for p_idx in range(num_pags):
-                                        pw = PdfWriter()
-                                        pw.add_page(reader.pages[p_idx])
-                                        out_p = io.BytesIO()
-                                        pw.write(out_p)
-                                        p_bytes = out_p.getvalue()
-                                        if p_idx < len(df_ref):
-                                            nom_doc = df_ref.iloc[p_idx]["Soporte PDF Renombrado"]
-                                        else:
-                                            nom_doc = f"Comprobante_Extra_Pag_{p_idx+1}.pdf"
-                                        zf.writestr(nom_doc, p_bytes)
-                                        st.session_state["dict_pdfs"][nom_doc] = p_bytes
-                                        total_generados += 1
+                                    # Agregar hoja de continuación (página 2, 3, etc.)
+                                    if curr_writer is None:
+                                        curr_inv_row = df_ref.iloc[0] if len(df_ref) > 0 else None
+                                        curr_writer = PdfWriter()
+                                    curr_writer.add_page(reader.pages[p_idx])
+                                    paginas_del_comprobante += 1
+
+                            # Guardar la última factura al terminar el archivo
+                            if curr_writer is not None and curr_inv_row is not None:
+                                out_c = io.BytesIO()
+                                curr_writer.write(out_c)
+                                c_bytes = out_c.getvalue()
+                                doc_nombre = curr_inv_row["Soporte PDF Renombrado"]
+                                zf.writestr(doc_nombre, c_bytes)
+                                st.session_state["dict_pdfs"][doc_nombre] = c_bytes
+                                total_generados += 1
+                                facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
 
                     except Exception as e:
                         st.error(f"Error procesando {pdf_file.name}: {e}")
 
-            st.success(f"¡Éxito! Se generaron y desbloquearon **{total_generados} facturas individuales en PDF**, nombradas exactamente con su comprobante y consecutivo (`Comp_10-XXX_...pdf`).")
+            st.success(f"¡Éxito! Se identificaron y unieron **{total_generados} facturas completas en PDF** (incluyendo facturas de 2 o más hojas), nombradas con su respectivo comprobante y consecutivo (`Comp_10-XXX_...pdf`).")
             buffer_zip.seek(0)
             st.download_button(
                 label="📥 Descargar Paquete Completo de Facturas Separadas (.ZIP)",
@@ -952,3 +1023,4 @@ with tab_siigo:
         )
     else:
         st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
+        
