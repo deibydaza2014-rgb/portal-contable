@@ -2,13 +2,16 @@ import streamlit as st
 import pandas as pd
 import openpyxl
 import io
+import time
 import zipfile
 import re
 from pypdf import PdfReader, PdfWriter
 
 st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
 
-# Estilos visuales profesionales
+# 1. TEMPORIZADOR DE INACTIVIDAD (30 MINUTOS) Y ESTILOS
+TIEMPO_MAX_INACTIVIDAD = 30 * 60 # 30 minutos en segundos
+
 st.markdown("""
 <style>
     .main { background-color: #f8fafc; }
@@ -20,37 +23,29 @@ st.markdown("""
     .tag-propio { background-color: #dcfce7; color: #15803d; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
     .tag-comp { background-color: #eff6ff; color: #1d4ed8; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-family: monospace; }
 </style>
+
+<script>
+// Script que vigila la inactividad en el navegador por 30 minutos (1.800.000 ms)
+let tiempoLimite = 30 * 60 * 1000;
+let temporizador;
+
+function resetInactividad() {
+    clearTimeout(temporizador);
+    temporizador = setTimeout(() => {
+        alert("Tu sesión ha expirado por 30 minutos de inactividad.");
+        window.location.search = "?sesion_expirada=1";
+    }, tiempoLimite);
+}
+
+window.onload = resetInactividad;
+document.onmousemove = resetInactividad;
+document.onkeydown = resetInactividad;
+document.onclick = resetInactividad;
+document.onscroll = resetInactividad;
+</script>
 """, unsafe_allow_html=True)
 
-# 1. ESTADOS DE SESION
-if "autenticado" not in st.session_state:
-    st.session_state["autenticado"] = False
-if "empresa_activa" not in st.session_state:
-    st.session_state["empresa_activa"] = None
-if "proceso_activo" not in st.session_state:
-    st.session_state["proceso_activo"] = None
-
-# PANTALLA 1: LOGIN
-if not st.session_state["autenticado"]:
-    col1, col2, col3 = st.columns(3)
-    with col2:
-        st.markdown("<h2 style='text-align: center; color: #0f172a;'>Portal ERP y Auditoria Contable</h2>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: #64748b;'>Plataforma unificada para gestion contable y DIAN (Siigo / World Office)</p>", unsafe_allow_html=True)
-        
-        with st.form("login_form"):
-            usuario = st.text_input("Usuario o Correo Electronico", value="deibydaza2014@gmail.com")
-            password = st.text_input("Contrasena", type="password", value="123456")
-            submit = st.form_submit_button("Ingresar al Ecosistema")
-            
-            if submit:
-                if usuario and password:
-                    st.session_state["autenticado"] = True
-                    st.rerun()
-                else:
-                    st.error("Ingresa usuario y contrasena.")
-    st.stop()
-
-# PANTALLA 2: SELECTOR DE EMPRESAS
+# EMPRESAS REGISTRADAS
 EMPRESAS_DISPONIBLES = [
     {
         "nombre": "INDUMAQ ER SAS",
@@ -94,6 +89,87 @@ EMPRESAS_DISPONIBLES = [
     }
 ]
 
+# Inicializacion de variables de sesion
+if "autenticado" not in st.session_state:
+    st.session_state["autenticado"] = False
+if "empresa_activa" not in st.session_state:
+    st.session_state["empresa_activa"] = None
+if "proceso_activo" not in st.session_state:
+    st.session_state["proceso_activo"] = None
+if "ultima_actividad" not in st.session_state:
+    st.session_state["ultima_actividad"] = time.time()
+
+# Recuperar o expirar sesion
+if st.query_params.get("sesion_expirada") == "1":
+    st.session_state["autenticado"] = False
+    st.session_state["empresa_activa"] = None
+    st.session_state["proceso_activo"] = None
+    st.query_params.clear()
+    st.warning("⏳ Tu sesión se cerró automáticamente por 30 minutos de inactividad.")
+
+# Control de inactividad en Python
+ahora = time.time()
+if st.session_state["autenticado"]:
+    if ahora - st.session_state["ultima_actividad"] > TIEMPO_MAX_INACTIVIDAD:
+        st.session_state["autenticado"] = False
+        st.session_state["empresa_activa"] = None
+        st.session_state["proceso_activo"] = None
+        st.query_params.clear()
+        st.warning("⏳ Sesión cerrada por 30 minutos de inactividad.")
+        st.stop()
+    else:
+        st.session_state["ultima_actividad"] = ahora
+else:
+    # Si recargo la pagina (F5) y estaba autenticado dentro de los 30 min
+    if st.query_params.get("auth") == "1":
+        t_param = int(st.query_params.get("t", 0))
+        if ahora - t_param < TIEMPO_MAX_INACTIVIDAD:
+            st.session_state["autenticado"] = True
+            st.session_state["ultima_actividad"] = ahora
+            emp_param = st.query_params.get("emp", "")
+            if emp_param:
+                for e in EMPRESAS_DISPONIBLES:
+                    if emp_param in e["nombre"]:
+                        st.session_state["empresa_activa"] = e
+                        break
+            proc_param = st.query_params.get("proc", "")
+            if proc_param:
+                st.session_state["proceso_activo"] = proc_param
+
+# PANTALLA 1: LOGIN
+if not st.session_state["autenticado"]:
+    col1, col2, col3 = st.columns(3)
+    with col2:
+        st.markdown("<h2 style='text-align: center; color: #0f172a;'>Portal ERP y Auditoria Contable</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #64748b;'>Plataforma unificada para gestion contable y DIAN (Siigo / World Office)</p>", unsafe_allow_html=True)
+        
+        with st.form("login_form"):
+            usuario = st.text_input("Usuario o Correo Electronico", value="deibydaza2014@gmail.com")
+            password = st.text_input("Contrasena", type="password", value="123456")
+            submit = st.form_submit_button("Ingresar al Ecosistema")
+            
+            if submit:
+                if usuario and password:
+                    st.session_state["autenticado"] = True
+                    st.session_state["ultima_actividad"] = time.time()
+                    st.query_params["auth"] = "1"
+                    st.query_params["t"] = str(int(time.time()))
+                    st.rerun()
+                else:
+                    st.error("Ingresa usuario y contrasena.")
+    st.stop()
+
+# Barra superior con boton para Cerrar Sesion manual
+col_top_l, col_top_r = st.columns(2)
+with col_top_r:
+    if st.button("🚪 Cerrar Sesión"):
+        st.session_state["autenticado"] = False
+        st.session_state["empresa_activa"] = None
+        st.session_state["proceso_activo"] = None
+        st.query_params.clear()
+        st.rerun()
+
+# PANTALLA 2: SELECTOR DE EMPRESAS
 if not st.session_state["empresa_activa"]:
     st.title("Seleccion de Empresa")
     st.caption("Selecciona la entidad sobre la cual vas a trabajar:")
@@ -116,6 +192,9 @@ if not st.session_state["empresa_activa"]:
                 if st.button(f"Ingresar a {emp['nombre']}", key=f"btn_emp_{i}"):
                     st.session_state["empresa_activa"] = emp
                     st.session_state["proceso_activo"] = None
+                    st.session_state["ultima_actividad"] = time.time()
+                    st.query_params["emp"] = emp["nombre"]
+                    st.query_params["t"] = str(int(time.time()))
                     st.rerun()
             else:
                 st.button(f"Pendiente Datos / Parametrizacion ({emp['estado']})", key=f"btn_emp_{i}", disabled=True)
@@ -168,6 +247,8 @@ if not st.session_state["proceso_activo"]:
         if st.button("Cambiar de Empresa"):
             st.session_state["empresa_activa"] = None
             st.session_state["proceso_activo"] = None
+            if "emp" in st.query_params: del st.query_params["emp"]
+            if "proc" in st.query_params: del st.query_params["proc"]
             st.rerun()
 
     st.markdown("---")
@@ -188,6 +269,9 @@ if not st.session_state["proceso_activo"]:
             if proc["estado"] == "ACTIVO":
                 if st.button(f"Abrir Modulo de Facturacion", key=f"btn_proc_{idx}"):
                     st.session_state["proceso_activo"] = proc["id"]
+                    st.session_state["ultima_actividad"] = time.time()
+                    st.query_params["proc"] = proc["id"]
+                    st.query_params["t"] = str(int(time.time()))
                     st.rerun()
             else:
                 st.button(f"Modulo en Construccion ({proc['estado']})", key=f"btn_proc_{idx}", disabled=True)
@@ -201,6 +285,7 @@ with col_nav1:
 with col_nav2:
     if st.button("Volver a Procesos"):
         st.session_state["proceso_activo"] = None
+        if "proc" in st.query_params: del st.query_params["proc"]
         st.rerun()
 
 st.markdown("---")
@@ -356,7 +441,6 @@ with tab_compras:
                 nit_limpio = "901346412"
                 contrasenas = [nit_limpio, f"{nit_limpio}5", f"{nit_limpio}-5", ""]
                 
-                # Leer todos los PDFs subidos y sus páginas usando safe_read_pdf
                 total_paginas = []
                 for pdf_file in archivos_pdfs:
                     try:
@@ -382,13 +466,11 @@ with tab_compras:
                     facturas_asignadas = {}
                     
                     if "Modo Secuencial" in modo_corte:
-                        # 1 página por fila del Excel
                         for idx_f, row in df_proc.iterrows():
                             if idx_f < len(total_paginas):
                                 facturas_asignadas[idx_f] = [total_paginas[idx_f][0]]
                                 
                     elif "Modo Archivos Sueltos" in modo_corte:
-                        # Cada archivo subido es una factura
                         for idx_pdf, pdf_file in enumerate(archivos_pdfs):
                             try:
                                 r_single = safe_read_pdf(pdf_file)
@@ -412,7 +494,6 @@ with tab_compras:
                                 st.error(f"Error procesando {pdf_file.name}: {e}")
                                 
                     else:
-                        # Modo Inteligente: Escanear hoja por hoja buscando números de factura
                         inv_actual = 0
                         for p_idx, (p_obj, p_txt) in enumerate(total_paginas):
                             clean_txt = re.sub(r'[^a-zA-Z0-9]', '', p_txt.upper())
@@ -514,39 +595,3 @@ with tab_auditoria:
                     </p>
                     <ul style="color:#78350f; font-size:14px;">
                         <li><b>Ingresos Propios del Agente (Honorarios / Comision):</b> Gravados con IVA 19%, sujetos a ReteFuente de Servicios (4%) u Honorarios (11%).</li>
-                        <li><b>Pagos por Cuenta de Terceros (Tributos / Fletes / Bodegaje):</b> Imputables directamente al costo de importacion (Cuenta 146505). No llevan IVA del agente ni retencion en la fuente sobre el intermediario.</li>
-                    </ul>
-                </div>
-                """, unsafe_allow_html=True)
-                
-        with col_a2:
-            st.markdown("#### Resumen Financiero")
-            st.metric("Base Gravable", f"${fac_sel['Base']:,.0f}")
-            st.metric("IVA Liquidado", f"${fac_sel['IVA']:,.0f}")
-            st.metric("ReteFuente", f"${fac_sel['ReteFuente']:,.0f}")
-            st.metric("Total a Pagar (Cta 22 / 23)", f"${fac_sel['Total'] - fac_sel['ReteFuente']:,.0f}")
-    else:
-        st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
-
-with tab_siigo:
-    st.markdown("### Descargar Planilla de Importacion Oficial para Siigo Nube")
-    
-    if "df_procesado" in st.session_state:
-        df_p = st.session_state["df_procesado"]
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_siigo = df_p[["Tipo Comp", "Consecutivo", "Fecha", "NIT Emisor", "Factura", "Proveedor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Cta Contrapartida"]].copy()
-            df_siigo.columns = ["Tipo Comp", "Consecutivo", "Fecha", "NIT", "Factura Num", "Descripcion", "Cta Principal", "Valor Base", "IVA", "ReteFuente", "Cta Contrapartida"]
-            df_siigo.to_excel(writer, sheet_name="matriz_captura", index=False)
-            
-        output.seek(0)
-        st.download_button(
-            label=f"Descargar Planilla Siigo ({empresa['nombre']})",
-            data=output,
-            file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-        st.success("Estructura validada para cargar directamente en Siigo Nube.")
-    else:
-        st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
