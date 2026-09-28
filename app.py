@@ -119,7 +119,7 @@ else:
 
 # PANTALLA 1: LOGIN (Línea con spec explícito para evitar TypeError)
 if not st.session_state["autenticado"]:
-    col1, col2, col3 = st.columns()
+    col1, col2, col3 = st.columns(3)
     with col2:
         st.markdown("<h2 style='text-align: center;'>Portal ERP y Auditoría Contable</h2>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; color: gray;'>Plataforma unificada para gestión contable y DIAN (Siigo / World Office)</p>", unsafe_allow_html=True)
