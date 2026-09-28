@@ -383,11 +383,25 @@ with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
     st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs para desbloquear y renombrar automáticamente por comprobante.")
     
-    col_u1, col_u2 = st.columns(2)
+    col_u1, col_u2, col_u3 = st.columns([1.5, 1.5, 1.2])
     with col_u1:
         archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
     with col_u2:
         archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo y renombrado)", type=["pdf"], accept_multiple_files=True)
+    with col_u3:
+        consecutivo_inicial = st.number_input(
+            "3. ¿En qué consecutivo vas? (Siigo):",
+            min_value=1,
+            max_value=999999,
+            value=680,
+            step=1,
+            help="Digita el número de comprobante con el que comenzará la primera factura."
+        )
+        clave_pdf_extra = st.text_input(
+            "Contraseña PDFs (opcional):",
+            type="password",
+            help="Si alguna factura viene con contraseña especial, ingrésala aquí."
+        )
         
     if archivo_excel is not None:
         df_dian = pd.read_excel(archivo_excel)
@@ -443,7 +457,7 @@ with tab_compras:
             t_comp, op, cta_p, cta_c, desc, rfte, rica, riva, cta_rfte, cta_iva, cta_rica, cat, razon, audit_dict = clasificar_factura(
                 nit_e, nom_e, base, iva, tipo_doc, resp_e, empresa
             )
-            consecutivo = 680 + idx
+            consecutivo = int(consecutivo_inicial) + idx
             
             nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
             nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
@@ -508,7 +522,6 @@ with tab_compras:
         if st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora"):
             buffer_zip = io.BytesIO()
             total_generados = 0
-            nit_limpio = "901346412"
             
             if "dict_pdfs" not in st.session_state:
                 st.session_state["dict_pdfs"] = {}
@@ -519,13 +532,40 @@ with tab_compras:
                 for idx_pdf, pdf_file in enumerate(archivos_pdfs):
                     try:
                         reader = PdfReader(pdf_file)
+                        desencriptado = False
                         if reader.is_encrypted:
-                            for pwd in [nit_limpio, f"{nit_limpio}5", f"{nit_limpio}-5", ""]:
+                            claves_probar = []
+                            if "clave_pdf_extra" in locals() and clave_pdf_extra:
+                                claves_probar.append(clave_pdf_extra.strip())
+                            
+                            # NITs empresa compradora
+                            nit_rec = re.sub(r"\D", "", str(empresa.get("nit", "")))
+                            if nit_rec:
+                                if len(nit_rec) > 9:
+                                    claves_probar.extend([nit_rec, nit_rec[:-1], f"{nit_rec[:-1]}-{nit_rec[-1]}"])
+                                else:
+                                    claves_probar.extend([nit_rec, f"{nit_rec}5", f"{nit_rec}-5"])
+                            claves_probar.extend(["901346412", "9013464125", "901346412-5", ""])
+                            
+                            # NITs emisores en reporte
+                            if not df_ref.empty:
+                                for n_e in df_ref["NIT Emisor"].dropna().unique():
+                                    n_c = re.sub(r"\D", "", str(n_e))
+                                    if n_c and len(n_c) >= 7:
+                                        claves_probar.append(n_c)
+                            
+                            for pwd in claves_probar:
                                 try:
-                                    if reader.decrypt(pwd) > 0:
+                                    res_dec = reader.decrypt(pwd)
+                                    if res_dec in (1, 2) or not reader.is_encrypted:
+                                        desencriptado = True
                                         break
                                 except:
                                     pass
+                                    
+                            if reader.is_encrypted and not desencriptado:
+                                st.warning(f"⚠️ No se pudo desencriptar automáticamente {pdf_file.name}. Ingrese la contraseña en el campo correspondiente.")
+                                continue
                         
                         num_pags = len(reader.pages)
 
