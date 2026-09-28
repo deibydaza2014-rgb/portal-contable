@@ -32,7 +32,7 @@ if "proceso_activo" not in st.session_state:
 
 # PANTALLA 1: LOGIN
 if not st.session_state["autenticado"]:
-    col1, col2, col3 = st.columns()
+    col1, col2, col3 = st.columns(3)
     with col2:
         st.markdown("<h2 style='text-align: center; color: #0f172a;'>Portal ERP y Auditoria Contable</h2>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; color: #64748b;'>Plataforma unificada para gestion contable y DIAN (Siigo / World Office)</p>", unsafe_allow_html=True)
@@ -119,7 +119,7 @@ PROCESOS_SISTEMA = [
 ]
 
 if not st.session_state["proceso_activo"]:
-    col_t1, col_t2 = st.columns()
+    col_t1, col_t2 = st.columns(2)
     with col_t1:
         st.subheader(f"{empresa['nombre']} - Panel de Procesos")
         st.caption(f"NIT: {empresa['nit']} - Selecciona el modulo de trabajo que deseas ejecutar:")
@@ -153,7 +153,7 @@ if not st.session_state["proceso_activo"]:
     st.stop()
 
 # PANTALLA 4: PROCESO ACTIVO
-col_nav1, col_nav2 = st.columns()
+col_nav1, col_nav2 = st.columns(2)
 with col_nav1:
     st.subheader(f"{empresa['nombre']} - Facturacion, Auditoria y Siigo")
     st.caption(f"NIT: {empresa['nit']} - Modulo Activo: Facturas de Compra, Venta y Devoluciones")
@@ -265,7 +265,7 @@ with tab_auditoria:
         fac_sel = df_p[df_p["N°"] == num_sel].iloc[0]
         es_aduanero = any(k in fac_sel["Proveedor"].upper() for k in AGENTES_ADUANEROS)
         
-        col_a1, col_a2 = st.columns()
+        col_a1, col_a2 = st.columns(2)
         with col_a1:
             st.markdown(f"""
             <div class="audit-card">
