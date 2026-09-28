@@ -6,7 +6,7 @@ import zipfile
 import re
 from pypdf import PdfReader, PdfWriter
 
-st.set_page_config(page_title="Sistema ERP & Auditoría Contable DIAN", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
 
 # Estilos visuales tipo Siigo / World Office
 st.markdown("""
@@ -22,7 +22,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. ESTADOS DE SESIÓN (LOGIN, EMPRESA, PROCESO)
+# 1. ESTADOS DE SESION
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
 if "empresa_activa" not in st.session_state:
@@ -34,12 +34,12 @@ if "proceso_activo" not in st.session_state:
 if not st.session_state["autenticado"]:
     col1, col2, col3 = st.columns()
     with col2:
-        st.markdown("<h2 style='text-align: center; color: #0f172a;'>Portal ERP & Auditoría Contable</h2>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: #64748b;'>Plataforma unificada para gestión contable y DIAN (Siigo / World Office)</p>", unsafe_allow_html=True)
+        st.markdown("<h2 style='text-align: center; color: #0f172a;'>Portal ERP y Auditoria Contable</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #64748b;'>Plataforma unificada para gestion contable y DIAN (Siigo / World Office)</p>", unsafe_allow_html=True)
         
         with st.form("login_form"):
-            usuario = st.text_input("Usuario o Correo Electrónico", value="deibydaza2014@gmail.com")
-            password = st.text_input("Contraseña", type="password", value="123456")
+            usuario = st.text_input("Usuario o Correo Electronico", value="deibydaza2014@gmail.com")
+            password = st.text_input("Contrasena", type="password", value="123456")
             submit = st.form_submit_button("Ingresar al Ecosistema")
             
             if submit:
@@ -47,20 +47,20 @@ if not st.session_state["autenticado"]:
                     st.session_state["autenticado"] = True
                     st.rerun()
                 else:
-                    st.error("Ingresa usuario y contraseña.")
+                    st.error("Ingresa usuario y contrasena.")
     st.stop()
 
 # PANTALLA 2: SELECTOR DE EMPRESAS
 EMPRESAS_DISPONIBLES = [
-    {"nombre": "INDUMAQ ER SAS", "nit": "901.346.412-5", "actividad": "Comercio y Reparación de Maquinaria / Importaciones", "regimen": "Responsable de IVA"},
-    {"nombre": "ASMINCOL S.A.S.", "nit": "900.467.519-1", "actividad": "Servicios Mineros y Construcción", "regimen": "Responsable de IVA"},
-    {"nombre": "CONSTRUDISEÑO CT SAS", "nit": "900.524.356-8", "actividad": "Construcción y Obras Civiles", "regimen": "Responsable de IVA"},
-    {"nombre": "SCG TRANSPORTES", "nit": "901.700.731-8", "actividad": "Transporte de Carga y Logística", "regimen": "Responsable de IVA"},
+    {"nombre": "INDUMAQ ER SAS", "nit": "901.346.412-5", "actividad": "Comercio y Reparacion de Maquinaria / Importaciones", "regimen": "Responsable de IVA"},
+    {"nombre": "ASMINCOL S.A.S.", "nit": "900.467.519-1", "actividad": "Servicios Mineros y Construccion", "regimen": "Responsable de IVA"},
+    {"nombre": "CONSTRUDISENO CT SAS", "nit": "900.524.356-8", "actividad": "Construccion y Obras Civiles", "regimen": "Responsable de IVA"},
+    {"nombre": "SCG TRANSPORTES", "nit": "901.700.731-8", "actividad": "Transporte de Carga y Logistica", "regimen": "Responsable de IVA"},
     {"nombre": "OPJ SAS", "nit": "901.425.101-3", "actividad": "Servicios Generales y Operaciones", "regimen": "Responsable de IVA"}
 ]
 
 if not st.session_state["empresa_activa"]:
-    st.title("🏢 Selección de Empresa")
+    st.title("Seleccion de Empresa")
     st.caption("Selecciona la entidad sobre la cual vas a trabajar:")
     
     c1, c2 = st.columns(2)
@@ -70,7 +70,7 @@ if not st.session_state["empresa_activa"]:
             st.markdown(f"""
             <div class="card-box">
                 <h3 style="margin-top:0; color:#0f172a;">{emp['nombre']}</h3>
-                <p style="margin:2px 0; color:#475569;"><b>NIT:</b> {emp['nit']} | <b>Régimen:</b> {emp['regimen']}</p>
+                <p style="margin:2px 0; color:#475569;"><b>NIT:</b> {emp['nit']} - <b>Regimen:</b> {emp['regimen']}</p>
                 <p style="margin:2px 0 14px 0; color:#64748b; font-size:14px;">{emp['actividad']}</p>
             </div>
             """, unsafe_allow_html=True)
@@ -82,38 +82,38 @@ if not st.session_state["empresa_activa"]:
 
 empresa = st.session_state["empresa_activa"]
 
-# PANTALLA 3: MENÚ DE PROCESOS OPERATIVOS
+# PANTALLA 3: MENU DE PROCESOS OPERATIVOS
 PROCESOS_SISTEMA = [
     {
         "id": "facturacion",
-        "icono": "📥",
+        "icono": "Facturas",
         "titulo": "Facturas de Compra, Venta y Devoluciones",
-        "desc": "Carga de reportes DIAN/Token, desbloqueo automático de facturas, auditoría contable y generación de la plantilla de importación para Siigo Nube.",
+        "desc": "Carga de reportes DIAN/Token, desbloqueo automatico de facturas, auditoria contable y generacion de la plantilla de importacion para Siigo Nube.",
         "estado": "ACTIVO",
         "badge": "badge-active"
     },
     {
         "id": "nomina",
-        "icono": "👥",
-        "titulo": "Gestión Laboral y Nómina Electrónica",
-        "desc": "Cálculo de liquidación de nómina, provisiones de prestaciones sociales, seguridad social y emisión de soportes electrónicos DIAN.",
-        "estado": "PRÓXIMAMENTE",
+        "icono": "Nomina",
+        "titulo": "Gestion Laboral y Nomina Electronica",
+        "desc": "Calculo de liquidacion de nomina, provisiones de prestaciones sociales, seguridad social y emision de soportes electronicos DIAN.",
+        "estado": "PROXIMAMENTE",
         "badge": "badge-next"
     },
     {
         "id": "conciliacion",
-        "icono": "🏦",
-        "titulo": "Tesorería y Conciliación Bancaria",
+        "icono": "Bancos",
+        "titulo": "Tesoreria y Conciliacion Bancaria",
         "desc": "Cruce automatizado de extractos bancarios (Bancolombia, Davivienda) contra libros auxiliares y control de partidas conciliatorias.",
-        "estado": "PRÓXIMAMENTE",
+        "estado": "PROXIMAMENTE",
         "badge": "badge-next"
     },
     {
         "id": "notas",
-        "icono": "📑",
+        "icono": "Ajustes",
         "titulo": "Notas de Contabilidad y Cierre Fiscal",
-        "desc": "Comprobantes de ajuste, amortizaciones de intangibles (NIC 38), depreciaciones y conciliación fiscal NIIF vs. DIAN.",
-        "estado": "PRÓXIMAMENTE",
+        "desc": "Comprobantes de ajuste, amortizaciones de intangibles (NIC 38), depreciaciones y conciliacion fiscal NIIF vs. DIAN.",
+        "estado": "PROXIMAMENTE",
         "badge": "badge-next"
     }
 ]
@@ -121,10 +121,10 @@ PROCESOS_SISTEMA = [
 if not st.session_state["proceso_activo"]:
     col_t1, col_t2 = st.columns()
     with col_t1:
-        st.subheader(f"🏢 {empresa['nombre']} — Panel de Procesos")
-        st.caption(f"NIT: {empresa['nit']} | Selecciona el módulo de trabajo que deseas ejecutar:")
+        st.subheader(f"{empresa['nombre']} - Panel de Procesos")
+        st.caption(f"NIT: {empresa['nit']} - Selecciona el modulo de trabajo que deseas ejecutar:")
     with col_t2:
-        if st.button("⬅️ Cambiar de Empresa"):
+        if st.button("Cambiar de Empresa"):
             st.session_state["empresa_activa"] = None
             st.session_state["proceso_activo"] = None
             st.rerun()
@@ -138,48 +138,48 @@ if not st.session_state["proceso_activo"]:
             st.markdown(f"""
             <div class="card-box">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3 style="margin:0; color:#0f172a;">{proc['icono']} {proc['titulo']}</h3>
+                    <h3 style="margin:0; color:#0f172a;">{proc['titulo']}</h3>
                     <span class="{proc['badge']}">{proc['estado']}</span>
                 </div>
                 <p style="margin:12px 0 16px 0; color:#475569; font-size:14px; line-height:1.5;">{proc['desc']}</p>
             </div>
             """, unsafe_allow_html=True)
             if proc["estado"] == "ACTIVO":
-                if st.button(f"Abrir Módulo de Facturación", key=f"btn_proc_{idx}"):
+                if st.button(f"Abrir Modulo de Facturacion", key=f"btn_proc_{idx}"):
                     st.session_state["proceso_activo"] = proc["id"]
                     st.rerun()
             else:
-                st.button(f"Módulo en Construcción ({proc['estado']})", key=f"btn_proc_{idx}", disabled=True)
+                st.button(f"Modulo en Construccion ({proc['estado']})", key=f"btn_proc_{idx}", disabled=True)
     st.stop()
 
-# PANTALLA 4: FACTURACIÓN, AUDITORÍA Y SIIGO
+# PANTALLA 4: PROCESO ACTIVO
 col_nav1, col_nav2 = st.columns()
 with col_nav1:
-    st.subheader(f"📥 {empresa['nombre']} | Facturación, Auditoría & Siigo")
-    st.caption(f"NIT: {empresa['nit']} | Módulo Activo: Facturas de Compra, Venta y Devoluciones")
+    st.subheader(f"{empresa['nombre']} - Facturacion, Auditoria y Siigo")
+    st.caption(f"NIT: {empresa['nit']} - Modulo Activo: Facturas de Compra, Venta y Devoluciones")
 with col_nav2:
-    if st.button("⬅️ Volver a Procesos"):
+    if st.button("Volver a Procesos"):
         st.session_state["proceso_activo"] = None
         st.rerun()
 
 st.markdown("---")
 
 tab_compras, tab_auditoria, tab_siigo = st.tabs([
-    "📂 1. Cargar Documentos y Desbloquear",
-    "🔍 2. Auditoría y Trazabilidad Fiscal",
-    "📊 3. Exportar Planilla Oficial a Siigo"
+    "1. Cargar Documentos y Desbloquear",
+    "2. Auditoria y Trazabilidad Fiscal",
+    "3. Exportar Planilla Oficial a Siigo"
 ])
 
 AGENTES_ADUANEROS = ["DHL", "ADUANA", "EURO SHIPPING", "PORTUARIA", "ALMACENADORA", "CARGO", "TRADE GLOBAL", "TERMINAL", "BUENAVENTURA"]
 
 def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
     nombre = str(nombre_emisor).upper()
-    es_nc = "CRÉDITO" in str(tipo_doc).upper() or "CREDITO" in str(tipo_doc).upper()
+    es_nc = "CREDITO" in str(tipo_doc).upper() or "CRÉDITO" in str(tipo_doc).upper()
     t_comp = 17 if es_nc else 10
     op = "Devolucion Compra" if es_nc else "Compra"
     
     if any(k in nombre for k in AGENTES_ADUANEROS):
-        return t_comp, op, "146505", "22050501", f"Importación / Tránsito - {nombre_emisor[:25]}", round(valor_base * 0.04, 2) if valor_base >= 210000 else 0.0, "Importación (1465)", "Honorarios Agenciamiento vs Terceros"
+        return t_comp, op, "146505", "22050501", f"Importacion / Transito - {nombre_emisor[:25]}", round(valor_base * 0.04, 2) if valor_base >= 210000 else 0.0, "Importacion (1465)", "Honorarios Agenciamiento vs Terceros"
         
     repuestos_kw = ["FERROMENDEZ", "TORNILLOLOCO", "CAUCHOS", "ASIMFER", "MAFLEXCOL", "EMPRECOL", "BATTS ZONE", "MECANIZAR", "HIDRAHULICAS", "BAMACOLGROUP"]
     if any(k in nombre for k in repuestos_kw):
@@ -195,22 +195,22 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, tipo_doc):
         return t_comp, op, "51352001", "23359501", f"Software Siigo - {nombre_emisor[:25]}", 0.0, "Software", "Autorretenedor de renta"
         
     if "PANAMERICANA" in nombre:
-        return t_comp, op, "51953001", "23359501", f"Papelería - {nombre_emisor[:25]}", 0.0, "Gastos Papelería", "Útiles de oficina"
+        return t_comp, op, "51953001", "23359501", f"Papeleria - {nombre_emisor[:25]}", 0.0, "Gastos Papeleria", "Utiles de oficina"
         
     if valor_base >= 500000:
-        return t_comp, op, "14350101", "22050501", f"Compra mercancías - {nombre_emisor[:25]}", round(valor_base * 0.025, 2) if valor_base >= 1414000 else 0.0, "Mercancía", "Compra general > 500k"
+        return t_comp, op, "14350101", "22050501", f"Compra mercancias - {nombre_emisor[:25]}", round(valor_base * 0.025, 2) if valor_base >= 1414000 else 0.0, "Mercancia", "Compra general > 500k"
     else:
         return t_comp, op, "51959501", "23359501", f"Gastos generales - {nombre_emisor[:25]}", 0.0, "Gasto General", "Compra menor general"
 
 with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
-    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el token de acceso, y los PDFs para desbloquear.")
+    st.write("Sube el archivo Excel de la DIAN (prueba.xlsx) o el token de acceso, y los PDFs para desbloquear.")
     
     col_u1, col_u2 = st.columns(2)
     with col_u1:
         archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo automático)", type=["pdf"], accept_multiple_files=True)
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo automatico)", type=["pdf"], accept_multiple_files=True)
         
     if archivo_excel is not None:
         df_dian = pd.read_excel(archivo_excel)
@@ -253,12 +253,12 @@ with tab_compras:
         st.dataframe(df_proc[["N°", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Concepto / Cta", "Base", "IVA", "ReteFuente", "Total"]], use_container_width=True)
 
 with tab_auditoria:
-    st.markdown("### 🔍 Módulo de Auditoría Contable y Trazabilidad")
-    st.caption("Inspección de cuentas, deducciones y separación de gastos por cuenta de terceros.")
+    st.markdown("### Modulo de Auditoria Contable y Trazabilidad")
+    st.caption("Inspeccion de cuentas, deducciones y separacion de gastos por cuenta de terceros.")
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
-        opciones_fac = [f"[{r['N°']}] {r['Factura']} — {r['Proveedor']} (${r['Total']:,.0f})" for _, r in df_p.iterrows()]
+        opciones_fac = [f"[{r['N°']}] {r['Factura']} - {r['Proveedor']} (${r['Total']:,.0f})" for _, r in df_p.iterrows()]
         seleccion = st.selectbox("Selecciona una factura para auditar:", opciones_fac)
         
         num_sel = int(seleccion.split("]")[0].replace("[", ""))
@@ -271,14 +271,14 @@ with tab_auditoria:
             <div class="audit-card">
                 <h4>Detalle del Documento: {fac_sel['Factura']}</h4>
                 <p><b>Proveedor / Emisor:</b> {fac_sel['Proveedor']} (NIT: {fac_sel['NIT Emisor']})</p>
-                <p><b>Fecha de Emisión:</b> {fac_sel['Fecha']} | <b>Total:</b> ${fac_sel['Total']:,.2f}</p>
+                <p><b>Fecha de Emision:</b> {fac_sel['Fecha']} - <b>Total:</b> ${fac_sel['Total']:,.2f}</p>
                 <hr>
-                <h5>Trazabilidad de la Contabilización:</h5>
+                <h5>Trazabilidad de la Contabilizacion:</h5>
                 <ul>
-                    <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Concepto / Cta']}</span> — {fac_sel['Categoría']}</li>
-                    <li><b>Motivo Técnico:</b> {fac_sel['Razón Contable']}</li>
-                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} \vert{} <b>IVA:</b>${fac_sel['IVA']:,.2f}</li>
-                    <li><b>Retención en la Fuente:</b> ${fac_sel['ReteFuente']:,.2f}</li>
+                    <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Concepto / Cta']}</span> - {fac_sel['Categoría']}</li>
+                    <li><b>Motivo Tecnico:</b> {fac_sel['Razón Contable']}</li>
+                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b> ${fac_sel['IVA']:,.2f}</li>
+                    <li><b>Retencion en la Fuente:</b> ${fac_sel['ReteFuente']:,.2f}</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
@@ -287,13 +287,13 @@ with tab_auditoria:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown("""
                 <div style="background:#fef3c7; padding:15px; border-radius:8px; border-left:5px solid #d97706;">
-                    <h5 style="color:#92400e; margin-top:0;">⚠️ Alerta de Importación / Agenciamiento Aduanero</h5>
+                    <h5 style="color:#92400e; margin-top:0;">Alerta de Importacion / Agenciamiento Aduanero</h5>
                     <p style="color:#78350f; font-size:14px; margin-bottom:5px;">
                     En este documento intervienen <b>gastos por cuenta de terceros</b> y <b>honorarios propios del agente</b>:
                     </p>
                     <ul style="color:#78350f; font-size:14px;">
-                        <li><b>Ingresos Propios del Agente (Honorarios / Comisión):</b> Gravados con IVA 19%, sujetos a ReteFuente de Servicios (4%) u Honorarios (11%).</li>
-                        <li><b>Pagos por Cuenta de Terceros (Tributos / Fletes / Bodegaje):</b> Imputables directamente al costo de importación (Cuenta 146505). No llevan IVA del agente ni retención en la fuente sobre el intermediario.</li>
+                        <li><b>Ingresos Propios del Agente (Honorarios / Comision):</b> Gravados con IVA 19%, sujetos a ReteFuente de Servicios (4%) u Honorarios (11%).</li>
+                        <li><b>Pagos por Cuenta de Terceros (Tributos / Fletes / Bodegaje):</b> Imputables directamente al costo de importacion (Cuenta 146505). No llevan IVA del agente ni retencion en la fuente sobre el intermediario.</li>
                     </ul>
                 </div>
                 """, unsafe_allow_html=True)
@@ -305,10 +305,10 @@ with tab_auditoria:
             st.metric("ReteFuente", f"${fac_sel['ReteFuente']:,.0f}")
             st.metric("Total a Pagar (Cta 22 / 23)", f"${fac_sel['Total'] - fac_sel['ReteFuente']:,.0f}")
     else:
-        st.info("Carga el archivo Excel en la Pestaña 1 para habilitar la auditoría.")
+        st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
 
 with tab_siigo:
-    st.markdown("### 📥 Descargar Planilla de Importación Oficial para Siigo Nube")
+    st.markdown("### Descargar Planilla de Importacion Oficial para Siigo Nube")
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
@@ -320,12 +320,12 @@ with tab_siigo:
             
         output.seek(0)
         st.download_button(
-            label=f"⬇️ Descargar Planilla Siigo ({empresa['nombre']})",
+            label=f"Descargar Planilla Siigo ({empresa['nombre']})",
             data=output,
             file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-        st.success("✅ Estructura validada para cargar directamente en Siigo Nube.")
+        st.success("Estructura validada para cargar directamente en Siigo Nube.")
     else:
-        st.info("Primero procesa los documentos en la Pestaña 1 para habilitar la descarga.")
+        st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
