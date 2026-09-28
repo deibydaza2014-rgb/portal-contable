@@ -841,4 +841,3 @@ with tab_siigo:
         )
     else:
         st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
-            ¿
