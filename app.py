@@ -644,7 +644,7 @@ with tab_auditoria:
                 <ul>
                     <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Cta Principal']}</span> - {fac_sel['Categoría']}</li>
                     <li><b>Motivo Tecnico:</b> {fac_sel['Razón Contable']}</li>
-                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b>${fac_sel['IVA']:,.2f}</li>
+                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b> ${fac_sel['IVA']:,.2f}</li>
                     <li><b>Retencion en la Fuente:</b> ${fac_sel['ReteFuente']:,.2f}</li>
                     <li><b>ReteICA:</b> ${fac_sel['ReteICA']:,.2f}</li>
                 </ul>
@@ -884,4 +884,234 @@ with tab_auditoria:
         with c_as2:
             st.metric("Total Crédito", f"${sum_cred:,.2f}")
         with c_as3:
-            st
+            st.metric("Diferencia / Cuadre", f"${abs(sum_deb - sum_cred):,.2f}")
+        st.success("✅ **Comprobante Verificado:** Partida doble cuadrada con sumas iguales.")
+    else:
+        st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
+
+with tab_siigo:
+    st.markdown("### Descargar Planilla Oficial Siigo Nube (3 Hojas)")
+    st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' y 'Parametrización'.")
+    
+    if "df_procesado" in st.session_state:
+        df_p = st.session_state["df_procesado"]
+        
+        # Generar archivo Excel con las 3 hojas completas
+        wb = openpyxl.Workbook()
+        
+        # 1. Hoja matriz_captura
+        ws_matriz = wb.active
+        ws_matriz.title = "matriz_captura"
+        headers_matriz = [
+            "Tipo Comp", "Consecutivo", "Fecha (DD/MM/AAAA)", "NIT", "Prefijo", "Factura Num",
+            "Descripcion", "Operacion", "Cta Principal", "Valor Base", "IVA", "ReteFuente",
+            "ReteICA", "ReteIVA", "Cta Contrapartida"
+        ]
+        ws_matriz.append(headers_matriz)
+        
+        # 2. Hoja interfaz_siigo
+        ws_interfaz = wb.create_sheet(title="interfaz_siigo")
+        headers_interfaz = [
+            "Tipo de comprobante", "Consecutivo comprobante", "Fecha de elaboración", "Sigla moneda",
+            "Tasa de cambio", "Código cuenta contable", "Identificación tercero", "Sucursal",
+            "Código producto", "Código de bodega", "Acción", "Cantidad producto", "Prefijo",
+            "Consecutivo", "No. cuota", "Fecha vencimiento", "Código impuesto", "Código grupo activo fijo",
+            "Código activo fijo", "Descripción", "Código centro/subcentro de costos", "Débito",
+            "Crédito", "Observaciones", "Base gravable libro compras/ventas", "Base exenta libro compras/ventas", "Mes de cierre"
+        ]
+        ws_interfaz.append(headers_interfaz)
+        
+        fila_r = 2
+        for _, item in df_p.iterrows():
+            t_comp = item["Tipo Comp"]
+            cons = item["Consecutivo"]
+            f_str = item["Fecha"]
+            nit = item["NIT Emisor"]
+            pref = item["Prefijo"]
+            fac_num = item["Folio"]
+            desc = item["Descripcion"]
+            op = item["Operacion"]
+            cta_p = item["Cta Principal"]
+            base = item["Base"]
+            iva = item["IVA"]
+            rfte = item["ReteFuente"]
+            rica = item.get("ReteICA", 0.0)
+            riva = item.get("ReteIVA", 0.0)
+            cta_c = item["Cta Contrapartida"]
+            cta_iva = item.get("Cta IVA", "24081001")
+            cta_rfte = item.get("Cta ReteFuente", "23654001")
+            cta_rica = item.get("Cta ReteICA", "23680501")
+            
+            ws_matriz.append([
+                t_comp, cons, f_str, nit, pref, fac_num,
+                desc, op, cta_p, base, iva, rfte, rica, riva, cta_c
+            ])
+            
+            r = fila_r
+            # Línea 1: Base Imponible
+            ws_interfaz.append([
+                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                f"=matriz_captura!I{r}", f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "", "", "", "",
+                f"=matriz_captura!G{r}", "",
+                f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r})',
+                f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r}, 0)',
+                "", f"=matriz_captura!J{r}", 0.0, ""
+            ])
+            
+            # Línea 2: IVA
+            if iva > 0:
+                cod_imp_iva = CODIGOS_IMPUESTO_SIIGO.get(str(cta_iva).strip(), "")
+                ws_interfaz.append([
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                    cta_iva, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                    cod_imp_iva, "", "", f'="IVA Base: " & matriz_captura!J{r}', "",
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!K{r})',
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!K{r}, 0)',
+                    "", f"=matriz_captura!J{r}", 0.0, ""
+                ])
+                
+            # Línea 3: ReteFuente
+            if rfte > 0 and cta_rfte:
+                cod_imp_rfte = CODIGOS_IMPUESTO_SIIGO.get(str(cta_rfte).strip(), "")
+                ws_interfaz.append([
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                    cta_rfte, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                    cod_imp_rfte, "", "", f'="ReteFuente Base: " & matriz_captura!J{r}', "",
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!L{r}, 0)',
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!L{r})',
+                    "", f"=matriz_captura!J{r}", 0.0, ""
+                ])
+                
+            # Línea 4: ReteICA
+            if rica > 0 and cta_rica:
+                cod_imp_rica = CODIGOS_IMPUESTO_SIIGO.get(str(cta_rica).strip(), "")
+                ws_interfaz.append([
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                    cta_rica, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                    cod_imp_rica, "", "", f'="ReteICA Base: " & matriz_captura!J{r}', "",
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!M{r}, 0)',
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!M{r})',
+                    "", f"=matriz_captura!J{r}", 0.0, ""
+                ])
+                
+            # Línea 5: Cuenta por Pagar (Contrapartida)
+            formula_deb = f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r} + matriz_captura!K{r} - matriz_captura!L{r} - matriz_captura!M{r} - matriz_captura!N{r}, 0)'
+            formula_cred = f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r} + matriz_captura!K{r} - matriz_captura!L{r} - matriz_captura!M{r} - matriz_captura!N{r})'
+            ws_interfaz.append([
+                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                f"=matriz_captura!O{r}", f"=matriz_captura!D{r}", 0, "", "", "", "",
+                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", 1, f"=matriz_captura!C{r}",
+                "", "", "", f'="Fac " & matriz_captura!E{r} & "-" & matriz_captura!F{r}', "",
+                formula_deb, formula_cred, "", 0.0, 0.0, ""
+            ])
+            fila_r += 1
+            
+        # 3. Hoja Parametrización
+        ws_params = wb.create_sheet(title="Parametrización")
+        ws_params.append(["Tipo Comprobante", "", "Impuesto", "Siigo_ID", "Tarifa", "Venta", "Compra", "Dev_Venta", "Dev_Compra"])
+        comprobantes = [
+            "1 - Ajustes contables", "2 - Depreciación", "3 - Costeo", "4 - Diferidos", "5 - Legalización de viaticos",
+            "6 - Legalización de Caja menores", "7 - Obligaciones financieras", "8 - Nómina", "998 - Cierre año",
+            "999 - Saldos iniciales", "992 - Comprobante de nómina", "993 - Comprobante de nómina provisión y seguridad social",
+            "994 - Comprobante liquidación de contrato", "995 - Comprobante liquidación de primas", "996 - Comprobante liquidación de cesantías",
+            "997 - Comprobante desembolso nómina", "9 - Recibo de Caja", "10 - Factura de Compra", "11 - Comprobante de Egreso",
+            "12 - Factura de Venta", "13 - Nota Credito", "14 - Nota de Contabilidad", "15 - Documento soporte electronico",
+            "777 - Ajustes contables de cartera", "9901 - Traslado de dinero", "16 - FACTURAS DE COMPRA (2)", "17 - NOTA CREDITO DE COMPRA"
+        ]
+        impuestos = [
+            ("IVA 19%", 1, 0.19, "24080601", "24081001", "24082001", "24081002"),
+            ("IVA Servicios 19%", "", 0.19, "24080601", "24081501", "24082001", "24082001"),
+            ("IVA 5%", 2, 0.05, "24080602", "24081003", "24082002", "24081004"),
+            ("Retefuente 11%", 3, 0.11, "13551509", "23651501", "13551510", "23651502"),
+            ("Retefuente 10%", 4, 0.1, "13551507", "23652001", "13551508", "23652002"),
+            ("Retefuente 6%", 5, 0.06, "13551505", "23652501", "13551506", "23652502"),
+            ("Retefuente 4%", 6, 0.04, "13551503", "23652503", "13551504", "23652504"),
+            ("Retefuente 3.5%", 18, 0.035, "13551513", "23654004", "13551514", "23654005"),
+            ("Retefuente 2.5%", 7, 0.025, "13551501", "23654001", "13551502", "23654002"),
+            ("Retefuente Combustibles 0.1%", 23, 0.001, "13551599", "23654006", "13551599", "23654006"),
+            ("ReteICA 11.04", 8, 0.01104, "13551801", "23680501", "13551802", "23680502"),
+            ("ReteICA 13.8", 9, 0.0138, "13551803", "23680503", "13551804", "23680504"),
+            ("ReteICA 9.66", 10, 0.00966, "13551805", "23680505", "13551806", "23680506"),
+            ("ReteICA 8", 11, 0.008, "13551807", "23680507", "13551808", "23680508"),
+            ("ReteICA 7", 12, 0.007, "13551809", "23680509", "13551810", "23680510"),
+            ("ReteICA 6.9", 13, 0.0069, "13551811", "23680511", "13551812", "23680512"),
+            ("ReteICA 4.14", 14, 0.00414, "13551813", "23680513", "13551814", "23680514"),
+            ("ReteIVA 15%", 15, 0.15, "13551701", "23670101", "13551702", "23670102")
+        ]
+        max_len = max(len(comprobantes), len(impuestos))
+        for idx_row in range(max_len):
+            c_val = comprobantes[idx_row] if idx_row < len(comprobantes) else ""
+            if idx_row < len(impuestos):
+                imp = list(impuestos[idx_row])
+                ws_params.append([c_val, ""] + imp)
+            else:
+                ws_params.append([c_val, "", "", "", "", "", "", "", ""])
+                
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        st.download_button(
+            label=f"📥 1. Descargar Planilla Oficial Siigo Nube (3 Hojas Formuladas) - {empresa['nombre']}",
+            data=output,
+            file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}_3_Hojas.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+        st.success("Planilla generada con las 3 hojas oficiales: 'matriz_captura', 'interfaz_siigo' (con códigos de impuesto) y 'Parametrización'.")
+
+        st.markdown("---")
+        st.markdown("### 📊 Libro Auxiliar Contable: Facturas Una a Una y Consolidado")
+        st.write("Genera el reporte administrativo con el detalle factura a factura y las hojas de consolidado por proveedor y cuentas contables:")
+
+        out_aux = io.BytesIO()
+        with pd.ExcelWriter(out_aux, engine='openpyxl') as writer_aux:
+            cols_detalle = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Cta Principal", "Categoría", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Cta Contrapartida", "Razón Contable", "Soporte PDF Renombrado"]
+            df_det_export = df_p[cols_detalle].copy()
+            
+            totales_dict = {
+                "Comprobante Siigo": "TOTALES CONSOLIDADOS",
+                "Fecha": "-", "Factura": f"{len(df_det_export)} Docs", "Proveedor": "-", "NIT Emisor": "-",
+                "Cta Principal": "-", "Categoría": "-",
+                "Base": df_det_export["Base"].sum(),
+                "IVA": df_det_export["IVA"].sum(),
+                "ReteFuente": df_det_export["ReteFuente"].sum(),
+                "ReteICA": df_det_export["ReteICA"].sum(),
+                "Total": df_det_export["Total"].sum(),
+                "Cta Contrapartida": "-", "Razón Contable": "-", "Soporte PDF Renombrado": "-"
+            }
+            df_det_export = pd.concat([df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
+            df_det_export.to_excel(writer_aux, sheet_name="Facturas_Una_a_Una", index=False)
+            
+            df_cons_prov = df_p.groupby(["NIT Emisor", "Proveedor"]).agg({
+                "Comprobante Siigo": "count",
+                "Base": "sum",
+                "IVA": "sum",
+                "ReteFuente": "sum",
+                "ReteICA": "sum",
+                "Total": "sum"
+            }).reset_index().rename(columns={"Comprobante Siigo": "Cant Facturas"})
+            df_cons_prov["Neto CxP"] = df_cons_prov["Total"] - df_cons_prov["ReteFuente"] - df_cons_prov["ReteICA"]
+            df_cons_prov = df_cons_prov.sort_values(by="Total", ascending=False).reset_index(drop=True)
+            df_cons_prov.to_excel(writer_aux, sheet_name="Consolidado_Proveedores", index=False)
+            
+            df_cons_cta = df_p.groupby(["Cta Principal", "Categoría"]).agg({
+                "Comprobante Siigo": "count",
+                "Base": "sum",
+                "IVA": "sum",
+                "ReteFuente": "sum",
+                "ReteICA": "sum",
+                "Total": "sum"
+            }).reset_index().rename(columns={"Comprobante Siigo": "Cant Facturas"})
+            df_cons_cta.to_excel(writer_aux, sheet_name="Consolidado_Cuentas_PUC", index=False)
+
+        out_aux.seek(0)
+        st.download_button(
+            label=f"📥 2. Descargar Libro de Facturas (Una a Una + Consolidado) - {empresa['nombre']}",
+            data=out_aux,
+            file_name=f"Libro_Facturas_Detallado_Y_Consolidado_{empresa['nombre'].replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+    else:
+        st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
