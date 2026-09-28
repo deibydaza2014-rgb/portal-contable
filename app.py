@@ -293,7 +293,6 @@ with tab_compras:
                 folio = folio[:-2]
             prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) and str(r.get("Prefijo")) != "nan" else ""
             
-            # Fecha formateada DD/MM/AAAA
             f_dt = r["_fecha_dt"]
             if pd.notna(f_dt):
                 fecha_str = f"{f_dt.day:02d}/{f_dt.month:02d}/{f_dt.year}"
@@ -612,13 +611,9 @@ with tab_siigo:
             c_val = comprobantes[idx_row] if idx_row < len(comprobantes) else ""
             if idx_row < len(impuestos):
                 imp = impuestos[idx_row]
-                ws_params.append([c_val, "", imp[0], imp, imp, imp, imp[4], imp[5], imp[6]])
+                ws_params.append([c_val, "", imp[0], imp, imp, imp, imp, imp[5], imp[6]])
             else:
                 ws_params.append([c_val, "", "", "", "", "", "", "", ""])
-                
-        output = io.BytesIO()
-        wb.save(output)
-        output[c_val, "", "", "", "", "", "", "", ""])
                 
         output = io.BytesIO()
         wb.save(output)
