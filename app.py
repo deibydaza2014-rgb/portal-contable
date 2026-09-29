@@ -383,18 +383,21 @@ def eliminar_trabajo_historial(empresa_dict, job_id):
 # ==============================================================================
 def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
     """
-    Busca y entrega los bytes del PDF de la factura seleccionada:
+    Busca y extrae los bytes del PDF de la factura seleccionada con coincidencia inteligente:
     1. Si ya se separó/renombró, busca coincidencia en dict_renombrados.
-    2. Si el usuario subió PDFs separados originales, busca por nombre o folio.
-    3. Si el usuario subió un PDF unificado (o PDFs multi-página), escanea el texto
-       de cada página, localiza cuáles contienen el número de factura/prefijo/NIT y
-       extrae únicamente esas páginas al vuelo en un nuevo PDF.
+    2. Si se subieron PDFs individuales, busca por número de factura o NIT en el nombre.
+    3. Si se subió un PDF unificado (o archivo consolidado como Todas_Licadas.pdf),
+       escanea cada página identificando el folio (con o sin ceros a la izquierda),
+       prefijo y el NIT del emisor (con o sin dígito de verificación) y extrae las páginas exactas.
     Retorna: (pdf_bytes, descripcion_origen, lista_paginas)
     """
     folio_clean = str(fac_sel.get("Folio", "")).replace("-", "").strip().upper()
+    folio_sc = folio_clean.lstrip("0")
     pref_clean = str(fac_sel.get("Prefijo", "")).replace("-", "").strip().upper()
     fac_clean = str(fac_sel.get("Factura", "")).replace("-", "").strip().upper()
-    nit_clean = re.sub(r"\D", "", str(fac_sel.get("NIT Emisor", "")))
+    
+    nit_digits = re.sub(r"\D", "", str(fac_sel.get("NIT Emisor", "")))
+    nit_base = nit_digits[:-1] if len(nit_digits) >= 10 else nit_digits
     soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", ""))
 
     # 1. Búsqueda en renombrados
@@ -413,7 +416,7 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
             if (fac_clean and len(fac_clean) >= 4 and fac_clean in fn_clean) or (folio_clean and len(folio_clean) >= 3 and folio_clean in fn_clean):
                 return fbytes, f"PDF Original Individual ({fname})", None
 
-        # 3. Escaneo inteligente página por página en PDFs originales (PDFs unificados)
+        # 3. Escaneo inteligente página por página en PDFs originales (PDFs unificados como Todas_Licadas.pdf)
         for fname, fbytes in dict_originales.items():
             try:
                 reader = PdfReader(io.BytesIO(fbytes))
@@ -422,16 +425,26 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
                 for p_idx in range(total_p):
                     txt = reader.pages[p_idx].extract_text() or ""
                     txt_clean = txt.replace("-", "").replace(" ", "").upper()
+                    
+                    # Criterio de coincidencia robusta
                     match = False
-                    if pref_clean and folio_clean and (pref_clean + folio_clean) in txt_clean:
+                    
+                    # A. Prefijo + Folio juntos
+                    fac_full = (pref_clean + folio_clean) if pref_clean else folio_clean
+                    fac_full_sc = (pref_clean + folio_sc) if pref_clean else folio_sc
+                    if len(fac_full) >= 4 and fac_full in txt_clean:
                         match = True
-                    elif fac_clean and len(fac_clean) >= 4 and fac_clean in txt_clean:
+                    elif len(fac_full_sc) >= 3 and fac_full_sc in txt_clean:
                         match = True
-                    elif folio_clean and len(folio_clean) >= 3 and folio_clean in txt_clean:
-                        if nit_clean and len(nit_clean) >= 6 and nit_clean in txt_clean:
-                            match = True
-                        elif len(folio_clean) >= 5:
-                            match = True
+                    else:
+                        # B. NIT del emisor + Número de Factura
+                        tiene_nit = (nit_digits and len(nit_digits) >= 6 and nit_digits in txt_clean) or (nit_base and len(nit_base) >= 6 and nit_base in txt_clean)
+                        if tiene_nit:
+                            if len(folio_clean) >= 2 and folio_clean in txt_clean:
+                                match = True
+                            elif len(folio_sc) >= 2 and folio_sc in txt_clean:
+                                match = True
+                                
                     if match:
                         pags_coincidentes.append(p_idx)
                 
@@ -456,7 +469,7 @@ with st.expander("📂 Consultar y Cargar Trabajos Pasados de esta Empresa", exp
     if trabajos_guardados:
         st.caption("Selecciona cualquier trabajo realizado previamente para auditar facturas, ver PDFs o exportar:")
         for tb in trabajos_guardados:
-            c_h1, c_h2, c_h3 = st.columns([3.2, 1.2, 0.4])
+            c_h1, c_h2, c_h3 = st.columns()
             with c_h1:
                 n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
                 n_orig = tb.get("total_pdfs_originales", 0)
@@ -858,7 +871,7 @@ with tab_compras:
             job_id=st.session_state.get("job_actual_id")
         )
         
-        c_aud_btn1, c_aud_btn2 = st.columns()
+        c_aud_btn1, c_aud_btn2 = st.columns(2)
         with c_aud_btn1:
             st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
         with c_aud_btn2:
@@ -1280,7 +1293,7 @@ with tab_auditoria:
 
             with st.expander("⚙️ Corregir / Ajustar Régimen de este Proveedor manualmente:", expanded=False):
                 st.caption("Si la factura física o el RUT indica un régimen diferente, cámbialo aquí para recalcular el asiento al instante:")
-                c_mod1, c_mod2 = st.columns()
+                c_mod1, c_mod2 = st.columns(2)
                 with c_mod1:
                     opciones_reg_man = [
                         "O-48 (Responsable de IVA / Común - Retención Ordinaria)",
@@ -1375,7 +1388,7 @@ with tab_auditoria:
         if pdf_bytes_encontrado:
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
             
-            col_doc1, col_doc2 = st.columns()
+            col_doc1, col_doc2 = st.columns(2)
             with col_doc1:
                 st.markdown(f"""
                 <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px;">
@@ -1488,7 +1501,7 @@ with tab_auditoria:
 
         elif dict_orig or dict_renom:
             # Hay PDFs subidos pero no se identificó automáticamente esta factura
-            st.warning("⚠️️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
+            st.warning("⚠ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
             todos_los_pdfs = {**dict_orig, **dict_renom}
             pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()))
             if pdf_elegido:
