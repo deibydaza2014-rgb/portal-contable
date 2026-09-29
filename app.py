@@ -1596,6 +1596,13 @@ with tab_auditoria:
         if pdf_bytes_encontrado:
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
             
+            # Conteo previo de hojas de la factura para visualización completa
+            try:
+                reader_prev = PdfReader(io.BytesIO(pdf_bytes_encontrado))
+                num_pags_tot = len(reader_prev.pages)
+            except Exception:
+                num_pags_tot = 1
+            
             col_doc1, col_doc2 = st.columns([2.5, 1])
             with col_doc1:
                 pags_badge = f"{num_pags_tot} páginas completas" if num_pags_tot > 1 else "1 página"
@@ -1624,13 +1631,6 @@ with tab_auditoria:
                 )
             else:
                 modo_vista_doc = "📜 Ver Todas las Hojas en Cascada Continua (1, 2, 3...)"
-            
-            # Conteo de hojas de la factura para visualización completa
-            try:
-                reader_prev = PdfReader(io.BytesIO(pdf_bytes_encontrado))
-                num_pags_tot = len(reader_prev.pages)
-            except Exception:
-                num_pags_tot = 1
                 
             # Altura dinámica para visualizar todas las hojas (2, 3 o más páginas continuas)
             visor_height = max(680, min(2200, num_pags_tot * 620))
