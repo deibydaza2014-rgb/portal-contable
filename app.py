@@ -1242,7 +1242,7 @@ with tab_auditoria:
         if pdf_bytes_encontrado:
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
             
-            col_doc1, col_doc2 = st.columns([3, 1])
+            col_doc1, col_doc2 = st.columns()
             with col_doc1:
                 st.markdown(f"""
                 <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px;">
@@ -1355,7 +1355,7 @@ with tab_auditoria:
 
         elif dict_orig or dict_renom:
             # Hay PDFs subidos pero no se identificó automáticamente esta factura
-            st.warning("⚠️️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
+            st.warning("⚠️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
             todos_los_pdfs = {**dict_orig, **dict_renom}
             pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()))
             if pdf_elegido:
@@ -1667,8 +1667,6 @@ with tab_siigo:
                 "Comprobante Siigo": "count",
                 "Base": "sum",
                 "IVA": "sum",
-                "ReteFuente": "sum",
-                "ReteICA": "sum",": "sum",
                 "ReteFuente": "sum",
                 "ReteICA": "sum",
                 "Total": "sum"
