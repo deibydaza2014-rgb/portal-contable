@@ -503,7 +503,20 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
                                 match = True
                                 
                     if match:
-                        pags_coincidentes.append(p_idx)
+                        if p_idx not in pags_coincidentes:
+                            pags_coincidentes.append(p_idx)
+                        # Comprobar si esta página declara tener múltiples hojas (ej. Página 1 de 2, 1 de 3)
+                        m_p = re.search(r'(?:P[ÁAáa]G(?:INA)?|HOJA)\s*[:\.]?\s*1\s*(?:DE|/)\s*(\d+)', txt, re.IGNORECASE)
+                        if m_p:
+                            try:
+                                total_h = int(m_p.group(1))
+                                if 2 <= total_h <= 15:
+                                    for off in range(1, total_h):
+                                        p_next = p_idx + off
+                                        if p_next < len(paginas_txt) and p_next not in pags_coincidentes:
+                                            pags_coincidentes.append(p_next)
+                            except Exception:
+                                pass
                 
                 if pags_coincidentes:
                     reader = PdfReader(io.BytesIO(fbytes))
@@ -653,6 +666,65 @@ def escanear_regimen_texto_pdf(texto):
     if not codigos: codigos.append("O-48")
     
     return ";".join(codigos)
+
+def calcular_base_con_regla_descuento(r, tot, iva, nom_emisor):
+    """
+    Calcula la Base Gravable contable respetando la regla estricta:
+    1. El descuento SOLO se aplica si está incorporado en los ÍTEMS de la factura.
+    2. Si el descuento aparece en las NOTAS u observaciones, NO VA (no disminuye la base gravable).
+    3. En agencias aduaneras (DHL, Euro Shipping, etc.), las casillas o notas de descuento corresponden
+       a retenciones practicadas que no deben restarse de la base para evitar duplicidades.
+    4. Si en el reporte/factura existe la columna de Subtotal (valor de los ítems antes de notas),
+       se toma directamente el Subtotal como base contable.
+    """
+    nom = str(nom_emisor).upper()
+    es_aduanero = any(k in nom for k in AGENTES_ADUANEROS)
+    
+    col_sub = next((c for c in r.index if any(k in str(c).lower() for k in ["subtotal", "sub total", "base gravable", "base_gravable", "valor subtotal", "lineextensionamount"])), None)
+    col_desc_item = next((c for c in r.index if any(k in str(c).lower() for k in ["descuento_items", "descuento item", "descuento ítems", "descuento linea", "descuento comercial"])), None)
+    col_desc_gen = next((c for c in r.index if any(k in str(c).lower() for k in ["descuento", "descuentos", "total descuento", "valor descuento", "allowancetotalamount"])), None)
+    
+    subtotal_val = None
+    if col_sub and pd.notna(r.get(col_sub)):
+        try:
+            v = float(r.get(col_sub))
+            if v > 0:
+                subtotal_val = v
+        except Exception:
+            pass
+            
+    desc_val = 0.0
+    if col_desc_gen and pd.notna(r.get(col_desc_gen)):
+        try:
+            desc_val = float(r.get(col_desc_gen))
+        except Exception:
+            desc_val = 0.0
+
+    desc_item_val = 0.0
+    if col_desc_item and pd.notna(r.get(col_desc_item)):
+        try:
+            desc_item_val = float(r.get(col_desc_item))
+        except Exception:
+            desc_item_val = 0.0
+            
+    # REGLA:
+    # Si viene el Subtotal de los ítems, esa es la base real. Los descuentos en notas NO se restan.
+    if subtotal_val is not None:
+        base = round(subtotal_val, 2)
+        motivo_base = f"Base = Subtotal de Ítems (${base:,.2f}) — Descuentos en notas no aplican"
+    else:
+        # Si no hay columna de subtotal y es agencia aduanera con descuento reportado (retenciones en notas):
+        if es_aduanero and desc_val > 0:
+            base = round(tot - iva + desc_val, 2)
+            motivo_base = f"Agencia Aduanera: Base restituida (${base:,.2f}) sin descontar retenciones de notas"
+        elif desc_item_val > 0:
+            base = round(tot - iva, 2)
+            motivo_base = f"Base calculada con descuento comercial en ítems (${base:,.2f})"
+        else:
+            base = round(tot - iva, 2)
+            motivo_base = f"Base estándar = Total - IVA (${base:,.2f})"
+            
+    return base, desc_val, motivo_base
 
 def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_doc, resp_emisor="", empresa_compradora=None):
     nombre = str(nombre_emisor).upper()
@@ -887,7 +959,7 @@ with tab_compras:
                 except: iva = 0.0
                 try: tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
                 except: tot = 0.0
-                base = round(tot - iva, 2)
+                base, desc_val, motivo_base = calcular_base_con_regla_descuento(r, tot, iva, nom_e)
 
                 col_resp = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["régimen", "regimen", "responsabilidad", "obligacion"])), None)
                 resp_e = str(r.get(col_resp, "")).strip() if col_resp and pd.notna(r.get(col_resp)) else ""
@@ -929,6 +1001,8 @@ with tab_compras:
                     "Cta ReteFuente": cta_rfte,
                     "Cta ReteICA": cta_rica,
                     "Total": tot,
+                    "Descuento Registrado": desc_val,
+                    "Regla Base": motivo_base,
                     "Razón Contable": razon,
                     "Soporte PDF Renombrado": nombre_pdf_esperado
                 })
@@ -1522,23 +1596,46 @@ with tab_auditoria:
         if pdf_bytes_encontrado:
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
             
-            col_doc1, col_doc2 = st.columns(2)
+            col_doc1, col_doc2 = st.columns([2.5, 1])
             with col_doc1:
+                pags_badge = f"{num_pags_tot} páginas completas" if num_pags_tot > 1 else "1 página"
                 st.markdown(f"""
-                <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px;">
-                    📄 {origen_desc} — Factura {fac_sel['Factura']} ({fac_sel['Proveedor']})
+                <div style="background:#0070ba; color:white; padding:9px 16px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px; display:flex; justify-content:space-between; align-items:center;">
+                    <span>📄 {origen_desc} — Factura {fac_sel['Factura']} ({fac_sel['Proveedor']})</span>
+                    <span style="background:rgba(255,255,255,0.25); padding:3px 10px; border-radius:12px; font-size:12px;">📑 {pags_badge}</span>
                 </div>
                 """, unsafe_allow_html=True)
             with col_doc2:
                 st.download_button(
-                    label="📥 Descargar este PDF",
+                    label=f"📥 Descargar Factura Completa ({num_pags_tot} págs)",
                     data=pdf_bytes_encontrado,
                     file_name=fac_sel["Soporte PDF Renombrado"],
                     mime="application/pdf",
                     use_container_width=True
                 )
+                
+            # Opciones de visualización de páginas
+            if num_pags_tot > 1:
+                modo_vista_doc = st.radio(
+                    "Modo de vista de factura:",
+                    ["📜 Ver Todas las Hojas en Cascada Continua (1, 2, 3...)", "🖨️ Visor Integrado del Navegador (con Miniaturas y Barra Lateral)"],
+                    horizontal=True,
+                    key="radio_modo_vista_pdf"
+                )
+            else:
+                modo_vista_doc = "📜 Ver Todas las Hojas en Cascada Continua (1, 2, 3...)"
             
-            # Visor robusto que combina PDF.js interactivo con respaldo en iframe nativo
+            # Conteo de hojas de la factura para visualización completa
+            try:
+                reader_prev = PdfReader(io.BytesIO(pdf_bytes_encontrado))
+                num_pags_tot = len(reader_prev.pages)
+            except Exception:
+                num_pags_tot = 1
+                
+            # Altura dinámica para visualizar todas las hojas (2, 3 o más páginas continuas)
+            visor_height = max(680, min(2200, num_pags_tot * 620))
+            
+            # Visor robusto secuencial de alta resolución para facturas multi-página
             html_visor = f"""
             <!DOCTYPE html>
             <html>
@@ -1549,43 +1646,56 @@ with tab_auditoria:
                 body {{
                   margin: 0;
                   padding: 12px;
-                  background: #334155;
+                  background: #1e293b;
                   display: flex;
                   flex-direction: column;
                   align-items: center;
                   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                  overflow-y: auto;
                 }}
                 .page-box {{
-                  margin-bottom: 16px;
-                  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
-                  border-radius: 4px;
+                  margin-bottom: 24px;
+                  box-shadow: 0 4px 18px rgba(0,0,0,0.45);
+                  border-radius: 6px;
                   background: white;
                   overflow: hidden;
+                  width: 100%;
+                  max-width: 860px;
+                }}
+                .page-header {{
+                  background: #0f172a;
+                  color: #94a3b8;
+                  font-size: 13px;
+                  font-weight: 600;
+                  padding: 8px 14px;
+                  border-bottom: 1px solid #334155;
+                  display: flex;
+                  justify-content: space-between;
                 }}
                 canvas {{
                   display: block;
-                  max-width: 100%;
+                  width: 100%;
                   height: auto;
                 }}
                 #status {{
                   color: #e2e8f0;
-                  padding: 10px;
-                  font-size: 13px;
+                  padding: 12px;
+                  font-size: 14px;
                   text-align: center;
                 }}
                 iframe {{
                   border: none;
                   width: 100%;
-                  height: 540px;
+                  height: 750px;
                   background: white;
-                  border-radius: 4px;
+                  border-radius: 6px;
                 }}
               </style>
             </head>
             <body>
-              <div id="status">Cargando vista previa de la factura...</div>
-              <div id="viewer-container"></div>
-              <iframe id="fallback-frame" style="display:none;" src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=0"></iframe>
+              <div id="status">Cargando factura completa ({num_pags_tot} página(s))...</div>
+              <div id="viewer-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
+              <iframe id="fallback-frame" style="display:none;" src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=1"></iframe>
               <script>
                 function showFallback() {{
                   document.getElementById('status').style.display = 'none';
@@ -1600,38 +1710,59 @@ with tab_auditoria:
                     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
                     const rawPdf = atob("{b64_pdf}");
                     const loadingTask = pdfjsLib.getDocument({{data: rawPdf}});
-                    loadingTask.promise.then(function(pdf) {{
+                    loadingTask.promise.then(async function(pdf) {{
                       document.getElementById('status').style.display = 'none';
                       const container = document.getElementById('viewer-container');
+                      container.innerHTML = '';
+                      
                       for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
-                        pdf.getPage(pNum).then(function(page) {{
-                          const scale = 1.35;
+                        try {{
+                          const page = await pdf.getPage(pNum);
+                          const scale = 1.4;
                           const viewport = page.getViewport({{scale: scale}});
+                          
                           const pageBox = document.createElement('div');
                           pageBox.className = 'page-box';
+                          
+                          const pageHeader = document.createElement('div');
+                          pageHeader.className = 'page-header';
+                          pageHeader.innerHTML = '<span>📄 Factura ' + '{fac_sel["Factura"]}' + '</span><span style="background:#334155; padding:2px 8px; border-radius:4px;">Hoja ' + pNum + ' de ' + pdf.numPages + '</span>';
+                          pageBox.appendChild(pageHeader);
+                          
                           const canvas = document.createElement('canvas');
                           const ctx = canvas.getContext('2d');
                           canvas.height = viewport.height;
                           canvas.width = viewport.width;
                           pageBox.appendChild(canvas);
+                          
                           container.appendChild(pageBox);
-                          page.render({{canvasContext: ctx, viewport: viewport}});
-                        }});
+                          await page.render({{canvasContext: ctx, viewport: viewport}}).promise;
+                        }} catch (renderErr) {{
+                          console.error('Error renderizando página ' + pNum, renderErr);
+                        }}
                       }}
                     }}).catch(function(err) {{
+                      console.error(err);
                       showFallback();
                     }});
                   }} else {{
                     showFallback();
                   }}
                 }} catch (e) {{
+                  console.error(e);
                   showFallback();
                 }}
               </script>
             </body>
             </html>
             """
-            components.html(html_visor, height=580, scrolling=True)
+            if "Visor Integrado" in modo_vista_doc:
+                html_nativo = f"""
+                <embed src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=1" type="application/pdf" width="100%" height="820px" style="border:1px solid #cbd5e1; border-radius:6px;" />
+                """
+                components.html(html_nativo, height=840, scrolling=True)
+            else:
+                components.html(html_visor, height=visor_height, scrolling=True)
 
         elif dict_orig or dict_renom:
             # Hay PDFs subidos pero no se identificó automáticamente esta factura
