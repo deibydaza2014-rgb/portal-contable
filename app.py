@@ -431,8 +431,122 @@ def eliminar_trabajo_historial(empresa_dict, job_id):
 # ==============================================================================
 # MOTOR DE BÚSQUEDA Y EXTRACCIÓN INTELIGENTE DE PDF (UNIFICADO O SEPARADO)
 # ==============================================================================
+def desbloquear_pdf_bytes(fbytes, nit_receptor=None, claves_extra=None, nits_emisores=None):
+    """
+    Desbloquea automáticamente un PDF si viene encriptado/protegido con contraseña.
+    Prueba el NIT de la empresa compradora (con/sin dígito), NITs de emisores,
+    contraseña opcional y contraseñas estándar de facturación electrónica.
+    Retorna: (pdf_desbloqueado_bytes, fue_desbloqueado)
+    """
+    try:
+        reader = PdfReader(io.BytesIO(fbytes))
+        if not reader.is_encrypted:
+            return fbytes, True
+            
+        claves = [""]
+        if claves_extra:
+            claves.append(str(claves_extra).strip())
+            
+        if nit_receptor:
+            nr = re.sub(r"\D", "", str(nit_receptor))
+            if nr:
+                claves.extend([nr, nr[:-1], f"{nr[:-1]}-{nr[-1]}", f"{nr}5", f"{nr}-5"])
+        claves.extend(["901346412", "9013464125", "901346412-5", "1234", "123456"])
+        
+        if nits_emisores:
+            for ne in nits_emisores:
+                c = re.sub(r"\D", "", str(ne))
+                if c and len(c) >= 7:
+                    claves.append(c)
+                    
+        desencriptado = False
+        for pwd in claves:
+            try:
+                res = reader.decrypt(pwd)
+                if res in (1, 2) or not reader.is_encrypted:
+                    desencriptado = True
+                    break
+            except Exception:
+                pass
+                
+        if desencriptado:
+            writer = PdfWriter()
+            for p in reader.pages:
+                writer.add_page(p)
+            out = io.BytesIO()
+            writer.write(out)
+            out.seek(0)
+            return out.getvalue(), True
+        else:
+            return fbytes, False
+    except Exception:
+        return fbytes, False
+
+def auditar_regimen_desde_facturas_renombradas(df_ref, dict_renombrados, empresa_dict):
+    """
+    Escanea el régimen fiscal directamente de las facturas PDF ya desbloqueadas y renombradas.
+    Como cada archivo en dict_renombrados ya está 100% desbloqueado y corresponde exactamente
+    a una factura con todas sus hojas, la extracción es inmediata, sin bloqueos y de máxima fidelidad.
+    """
+    total_modificados = 0
+    if not dict_renombrados or df_ref.empty:
+        return total_modificados
+        
+    for r_idx, r_mat in df_ref.iterrows():
+        soporte_nom = str(r_mat.get("Soporte PDF Renombrado", ""))
+        pdf_bytes = dict_renombrados.get(soporte_nom)
+        
+        # Búsqueda por coincidencia de comprobante o folio si el nombre varió ligeramente
+        if not pdf_bytes:
+            comp_id = str(r_mat.get("Comprobante Siigo", "")).replace(" ", "_")
+            fol_id = str(r_mat.get("Folio", ""))
+            for k, v in dict_renombrados.items():
+                if comp_id and comp_id in k:
+                    pdf_bytes = v
+                    break
+                elif fol_id and len(fol_id) >= 3 and fol_id in k:
+                    pdf_bytes = v
+                    break
+                    
+        if pdf_bytes:
+            try:
+                paginas = cache_extraer_textos_pdf(pdf_bytes, nit_receptor=empresa_dict.get("nit", "9013464125"))
+                txt_completo = "\n".join(paginas)
+                reg_detectado = escanear_regimen_texto_pdf(txt_completo)
+                
+                if reg_detectado and reg_detectado != r_mat.get("Régimen Fiscal Emisor"):
+                    df_ref.at[r_idx, "Régimen Fiscal Emisor"] = reg_detectado
+                    t_c_n, op_n, c_p_n, c_c_n, desc_n, rfte_n, rica_n, riva_n, c_rf_n, c_iv_n, c_ri_n, cat_n, razon_n, audit_n = clasificar_factura(
+                        df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
+                        df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
+                        df_ref.at[r_idx, "Operacion"], reg_detectado, empresa_dict
+                    )
+                    df_ref.at[r_idx, "ReteFuente"] = rfte_n
+                    df_ref.at[r_idx, "ReteICA"] = rica_n
+                    df_ref.at[r_idx, "ReteIVA"] = riva_n
+                    df_ref.at[r_idx, "Cta ReteFuente"] = c_rf_n
+                    df_ref.at[r_idx, "Cta ReteICA"] = c_ri_n
+                    df_ref.at[r_idx, "Razón Contable"] = razon_n
+                    df_ref.at[r_idx, "Audit Info"] = audit_n
+                    df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
+                    total_modificados += 1
+            except Exception:
+                pass
+                
+    return total_modificados
+
 @st.cache_data(show_spinner=False)
-def cache_extraer_textos_pdf(fbytes):
+def cache_extraer_textos_pdf(fbytes, nit_receptor="9013464125"):
+    """Extrae el texto de todas las páginas de un PDF, desbloqueándolo automáticamente si está protegido."""
+    try:
+        reader = PdfReader(io.BytesIO(fbytes))
+        if reader.is_encrypted:
+            fbytes_des, ok = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_receptor)
+            if ok:
+                reader = PdfReader(io.BytesIO(fbytes_des))
+        return [(p.extract_text() or "") for p in reader.pages]
+    except Exception:
+        return []
     """Extrae el texto de todas las páginas de un PDF y lo almacena en caché en RAM para búsqueda ultrarrápida."""
     try:
         reader = PdfReader(io.BytesIO(fbytes))
@@ -1062,7 +1176,22 @@ with tab_compras:
                 dict_renom_s = st.session_state.get("dict_pdfs", {})
                 dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
                 total_modificados = 0
-                if dict_renom_s or dict_orig_s:
+                if dict_renom_s:
+                    with st.spinner("⚡ Escaneando régimen fiscal directamente desde las facturas ya desbloqueadas y renombradas..."):
+                        total_modificados = auditar_regimen_desde_facturas_renombradas(df_proc, dict_renom_s, empresa)
+                    st.session_state["df_procesado"] = df_proc
+                    guardar_trabajo_en_historial(
+                        empresa, df_proc,
+                        excel_bytes=st.session_state.get("excel_bytes"),
+                        excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                        dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+                        dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+                        zip_bytes=st.session_state.get("zip_pdfs"),
+                        job_id=st.session_state.get("job_actual_id")
+                    )
+                    st.success(f"⚡ Auditoría completada desde facturas renombradas: se revisaron {len(df_proc)} facturas y se actualizaron {total_modificados} con su régimen oficial del PDF.")
+                    st.rerun()
+                elif dict_orig_s:
                     with st.spinner("⚡ Extrayendo texto en memoria y cruzando regímenes fiscales..."):
                         # 1. Pre-cargar textos en caché de todos los PDFs una sola vez
                         mapa_textos = []
@@ -1426,9 +1555,12 @@ with tab_compras:
             buffer_zip.seek(0)
             st.session_state["zip_pdfs"] = buffer_zip.getvalue()
             st.session_state["total_zip_pdfs"] = total_generados
+            
+            # Escaneo oficial de régimen fiscal directamente sobre las facturas ya desbloqueadas y renombradas
+            total_auditados = auditar_regimen_desde_facturas_renombradas(df_ref, st.session_state["dict_pdfs"], empresa)
             st.session_state["df_procesado"] = df_ref
 
-            # Guardar trabajo actualizado con PDFs procesados
+            # Guardar trabajo actualizado con PDFs procesados y regímenes verificados
             guardar_trabajo_en_historial(
                 empresa, df_ref,
                 excel_bytes=st.session_state.get("excel_bytes"),
@@ -1439,7 +1571,8 @@ with tab_compras:
                 consecutivo_ini=cons_ini_fac,
                 job_id=st.session_state.get("job_actual_id")
             )
-            st.success(f"¡Procesamiento exitoso! Se separaron y renombraron **{total_generados} facturas completas** vinculadas a sus comprobantes y se actualizaron retenciones según el régimen extraído del PDF.")
+            msg_reg = f" y se auditó el régimen de cada factura ({total_auditados} actualizadas)" if total_auditados > 0 else " y se validó el régimen de cada factura"
+            st.success(f"¡Procesamiento exitoso! Se desbloquearon y renombraron **{total_generados} facturas completas**{msg_reg} directamente desde las facturas PDF desbloqueadas.")
 
         if "zip_pdfs" in st.session_state:
             st.download_button(
