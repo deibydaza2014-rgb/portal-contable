@@ -229,123 +229,263 @@ with col_nav2:
 st.markdown("---")
 
 # ==============================================================================
-# PERSISTENCIA Y GUARDADO DE SESIONES
+# GESTOR DE HISTORIAL DE TRABAJOS Y AUDITORÍAS PASADAS (PERSISTENCIA TOTAL)
 # ==============================================================================
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "almacenamiento_contable")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-def get_empresa_dir(empresa_dict):
+def get_empresa_trabajos_dir(empresa_dict):
     nit_clean = re.sub(r"\D", "", str(empresa_dict.get("nit", "empresa")))
-    d = os.path.join(DATA_DIR, nit_clean)
+    d = os.path.join(DATA_DIR, nit_clean, "trabajos")
     os.makedirs(d, exist_ok=True)
-    os.makedirs(os.path.join(d, "pdfs"), exist_ok=True)
     return d
 
-def guardar_trabajo_empresa(empresa_dict, df_procesado, dict_pdfs=None, zip_bytes=None, consecutivo_ini=680):
+def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, excel_nombre="Reporte.xlsx", dict_pdfs_renombrados=None, dict_pdfs_originales=None, zip_bytes=None, consecutivo_ini=680, job_id=None):
     try:
-        d = get_empresa_dir(empresa_dict)
-        with open(os.path.join(d, "df_procesado.pkl"), "wb") as f:
-            pickle.dump(df_procesado, f)
-        if dict_pdfs:
-            pdf_dir = os.path.join(d, "pdfs")
-            for nombre, bdata in dict_pdfs.items():
-                with open(os.path.join(pdf_dir, nombre), "wb") as pf:
+        base_dir = get_empresa_trabajos_dir(empresa_dict)
+        if not job_id:
+            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            job_id = f"job_{now_str}"
+            
+        job_dir = os.path.join(base_dir, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        
+        dir_renom = os.path.join(job_dir, "pdfs_renombrados")
+        os.makedirs(dir_renom, exist_ok=True)
+        dir_orig = os.path.join(job_dir, "pdfs_originales")
+        os.makedirs(dir_orig, exist_ok=True)
+        
+        # 1. Guardar DataFrame procesado
+        if df_procesado is not None:
+            with open(os.path.join(job_dir, "df_procesado.pkl"), "wb") as f:
+                pickle.dump(df_procesado, f)
+                
+        # 2. Guardar archivo Excel original subido
+        if excel_bytes:
+            with open(os.path.join(job_dir, "excel_original.xlsx"), "wb") as f_ex:
+                f_ex.write(excel_bytes)
+                
+        # 3. Guardar PDFs renombrados / separados
+        if dict_pdfs_renombrados:
+            for fname, bdata in dict_pdfs_renombrados.items():
+                with open(os.path.join(dir_renom, fname), "wb") as pf:
                     pf.write(bdata)
+                    
+        # 4. Guardar PDFs originales subidos (unificados o separados)
+        if dict_pdfs_originales:
+            for fname, bdata in dict_pdfs_originales.items():
+                with open(os.path.join(dir_orig, fname), "wb") as pf:
+                    pf.write(bdata)
+                    
+        # 5. Guardar paquete ZIP de facturas si existe
         if zip_bytes:
-            with open(os.path.join(d, "paquete_facturas.zip"), "wb") as zf:
+            with open(os.path.join(job_dir, "paquete_facturas.zip"), "wb") as zf:
                 zf.write(zip_bytes)
+                
+        now_disp = datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p")
         meta = {
-            "empresa": empresa_dict.get("nombre", ""),
-            "nit": empresa_dict.get("nit", ""),
-            "fecha_guardado": datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "id": job_id,
+            "nombre_trabajo": f"Trabajo del {now_disp} ({excel_nombre})",
+            "archivo_excel": excel_nombre,
+            "fecha": now_disp,
             "total_facturas": len(df_procesado) if df_procesado is not None else 0,
             "consecutivo_inicial": consecutivo_ini,
             "total_valor": float(df_procesado["Total"].sum()) if (df_procesado is not None and "Total" in df_procesado) else 0.0,
-            "pdfs_guardados": len(dict_pdfs) if dict_pdfs else 0
+            "total_pdfs_renombrados": len(dict_pdfs_renombrados) if dict_pdfs_renombrados else 0,
+            "total_pdfs_originales": len(dict_pdfs_originales) if dict_pdfs_originales else 0
         }
-        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as mf:
+        with open(os.path.join(job_dir, "meta.json"), "w", encoding="utf-8") as mf:
             json.dump(meta, mf, ensure_ascii=False, indent=2)
-        return True
+            
+        return job_id
     except:
-        return False
+        return None
 
-def existe_trabajo_guardado(empresa_dict):
-    d = get_empresa_dir(empresa_dict)
-    return os.path.exists(os.path.join(d, "df_procesado.pkl")) and os.path.exists(os.path.join(d, "meta.json"))
+def listar_trabajos_historial(empresa_dict):
+    base_dir = get_empresa_trabajos_dir(empresa_dict)
+    lista = []
+    if os.path.exists(base_dir):
+        for jid in os.listdir(base_dir):
+            jdir = os.path.join(base_dir, jid)
+            meta_file = os.path.join(jdir, "meta.json")
+            if os.path.isdir(jdir) and os.path.exists(meta_file):
+                try:
+                    with open(meta_file, "r", encoding="utf-8") as mf:
+                        meta = json.load(mf)
+                        lista.append(meta)
+                except:
+                    pass
+    lista.sort(key=lambda x: x.get("id", ""), reverse=True)
+    return lista
 
-def cargar_meta_trabajo(empresa_dict):
-    d = get_empresa_dir(empresa_dict)
-    meta_path = os.path.join(d, "meta.json")
-    if os.path.exists(meta_path):
+def cargar_trabajo_historial(empresa_dict, job_id):
+    base_dir = get_empresa_trabajos_dir(empresa_dict)
+    jdir = os.path.join(base_dir, job_id)
+    df = None
+    dict_renom = {}
+    dict_orig = {}
+    zip_bytes = None
+    excel_bytes = None
+    excel_nombre = "Reporte.xlsx"
+    
+    meta_file = os.path.join(jdir, "meta.json")
+    if os.path.exists(meta_file):
         try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(meta_file, "r", encoding="utf-8") as mf:
+                m_data = json.load(mf)
+                excel_nombre = m_data.get("archivo_excel", "Reporte.xlsx")
         except:
             pass
-    return None
 
-def cargar_trabajo_guardado(empresa_dict):
-    d = get_empresa_dir(empresa_dict)
-    pkl_path = os.path.join(d, "df_procesado.pkl")
-    df = None
-    dict_pdfs = {}
-    zip_bytes = None
-    if os.path.exists(pkl_path):
-        with open(pkl_path, "rb") as f:
+    pkl_file = os.path.join(jdir, "df_procesado.pkl")
+    if os.path.exists(pkl_file):
+        with open(pkl_file, "rb") as f:
             df = pickle.load(f)
-    pdf_dir = os.path.join(d, "pdfs")
-    if os.path.exists(pdf_dir):
-        for fn in os.listdir(pdf_dir):
+            
+    ex_file = os.path.join(jdir, "excel_original.xlsx")
+    if os.path.exists(ex_file):
+        with open(ex_file, "rb") as f_ex:
+            excel_bytes = f_ex.read()
+            
+    # PDFs renombrados
+    pdf_dir_r = os.path.join(jdir, "pdfs_renombrados")
+    if not os.path.exists(pdf_dir_r):
+        pdf_dir_r = os.path.join(jdir, "pdfs")
+    if os.path.exists(pdf_dir_r):
+        for fn in os.listdir(pdf_dir_r):
             if fn.endswith(".pdf"):
-                with open(os.path.join(pdf_dir, fn), "rb") as f:
-                    dict_pdfs[fn] = f.read()
-    zip_path = os.path.join(d, "paquete_facturas.zip")
-    if os.path.exists(zip_path):
-        with open(zip_path, "rb") as f:
-            zip_bytes = f.read()
-    return df, dict_pdfs, zip_bytes
+                with open(os.path.join(pdf_dir_r, fn), "rb") as pf:
+                    dict_renom[fn] = pf.read()
+                    
+    # PDFs originales
+    pdf_dir_o = os.path.join(jdir, "pdfs_originales")
+    if os.path.exists(pdf_dir_o):
+        for fn in os.listdir(pdf_dir_o):
+            if fn.endswith(".pdf"):
+                with open(os.path.join(pdf_dir_o, fn), "rb") as pf:
+                    dict_orig[fn] = pf.read()
+                    
+    zip_file = os.path.join(jdir, "paquete_facturas.zip")
+    if os.path.exists(zip_file):
+        with open(zip_file, "rb") as zf:
+            zip_bytes = zf.read()
+            
+    return df, dict_renom, dict_orig, excel_bytes, excel_nombre, zip_bytes
 
-def borrar_trabajo_guardado(empresa_dict):
-    d = get_empresa_dir(empresa_dict)
-    if os.path.exists(d):
-        shutil.rmtree(d)
-        os.makedirs(d, exist_ok=True)
-        os.makedirs(os.path.join(d, "pdfs"), exist_ok=True)
+def eliminar_trabajo_historial(empresa_dict, job_id):
+    base_dir = get_empresa_trabajos_dir(empresa_dict)
+    jdir = os.path.join(base_dir, job_id)
+    if os.path.exists(jdir):
+        shutil.rmtree(jdir)
 
-# BANNER DE AUTO-RECUPERACIÓN DE TRABAJO GUARDADO
-if existe_trabajo_guardado(empresa):
-    meta_inf = cargar_meta_trabajo(empresa)
-    f_guardado = meta_inf.get("fecha_guardado", "Reciente") if meta_inf else "Reciente"
-    n_fac = meta_inf.get("total_facturas", 0) if meta_inf else 0
-    tot_v = meta_inf.get("total_valor", 0.0) if meta_inf else 0.0
-    n_pdf = meta_inf.get("pdfs_guardados", 0) if meta_inf else 0
-    
-    col_g1, col_g2 = st.columns()
-    with col_g1:
-        st.info(f"💾 **Sesión anterior guardada:** Fecha: **{f_guardado}** | **{n_fac} facturas** (${tot_v:,.2f}) | **{n_pdf} PDFs listos**.")
-    with col_g2:
-        cg1, cg2 = st.columns(2)
-        with cg1:
-            if st.button("📂 Cargar Sesión", key="btn_cargar_sesion_guardada"):
-                df_g, pdfs_g, zip_g = cargar_trabajo_guardado(empresa)
-                if df_g is not None:
-                    st.session_state["df_procesado"] = df_g
-                if pdfs_g:
-                    st.session_state["dict_pdfs"] = pdfs_g
-                if zip_g:
-                    st.session_state["zip_pdfs"] = zip_g
-                    st.session_state["total_zip_pdfs"] = len(pdfs_g)
-                st.success("¡Sesión restaurada con éxito!")
-                st.rerun()
-        with cg2:
-            if st.button("🗑️ Descartar", key="btn_descartar_guardado"):
-                borrar_trabajo_guardado(empresa)
-                if "df_procesado" in st.session_state:
-                    del st.session_state["df_procesado"]
-                if "dict_pdfs" in st.session_state:
-                    del st.session_state["dict_pdfs"]
-                st.warning("Sesión anterior descartada.")
-                st.rerun()
+# ==============================================================================
+# MOTOR DE BÚSQUEDA Y EXTRACCIÓN INTELIGENTE DE PDF (UNIFICADO O SEPARADO)
+# ==============================================================================
+def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
+    """
+    Busca y entrega los bytes del PDF de la factura seleccionada:
+    1. Si ya se separó/renombró, busca coincidencia en dict_renombrados.
+    2. Si el usuario subió PDFs separados originales, busca por nombre o folio.
+    3. Si el usuario subió un PDF unificado (o PDFs multi-página), escanea el texto
+       de cada página, localiza cuáles contienen el número de factura/prefijo/NIT y
+       extrae únicamente esas páginas al vuelo en un nuevo PDF.
+    Retorna: (pdf_bytes, descripcion_origen, lista_paginas)
+    """
+    folio_clean = str(fac_sel.get("Folio", "")).replace("-", "").strip().upper()
+    pref_clean = str(fac_sel.get("Prefijo", "")).replace("-", "").strip().upper()
+    fac_clean = str(fac_sel.get("Factura", "")).replace("-", "").strip().upper()
+    nit_clean = re.sub(r"\D", "", str(fac_sel.get("NIT Emisor", "")))
+    soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", ""))
+
+    # 1. Búsqueda en renombrados
+    if dict_renombrados:
+        if soporte_nom in dict_renombrados:
+            return dict_renombrados[soporte_nom], f"PDF Renombrado ({soporte_nom})", None
+        for k, v in dict_renombrados.items():
+            k_clean = k.replace("-", "").replace(" ", "").upper()
+            if folio_clean and len(folio_clean) >= 3 and folio_clean in k_clean:
+                return v, f"PDF Renombrado ({k})", None
+
+    # 2. Búsqueda en originales por nombre de archivo
+    if dict_originales:
+        for fname, fbytes in dict_originales.items():
+            fn_clean = fname.replace("-", "").replace(" ", "").upper()
+            if (fac_clean and len(fac_clean) >= 4 and fac_clean in fn_clean) or (folio_clean and len(folio_clean) >= 3 and folio_clean in fn_clean):
+                return fbytes, f"PDF Original Individual ({fname})", None
+
+        # 3. Escaneo inteligente página por página en PDFs originales (PDFs unificados)
+        for fname, fbytes in dict_originales.items():
+            try:
+                reader = PdfReader(io.BytesIO(fbytes))
+                total_p = len(reader.pages)
+                pags_coincidentes = []
+                for p_idx in range(total_p):
+                    txt = reader.pages[p_idx].extract_text() or ""
+                    txt_clean = txt.replace("-", "").replace(" ", "").upper()
+                    match = False
+                    if pref_clean and folio_clean and (pref_clean + folio_clean) in txt_clean:
+                        match = True
+                    elif fac_clean and len(fac_clean) >= 4 and fac_clean in txt_clean:
+                        match = True
+                    elif folio_clean and len(folio_clean) >= 3 and folio_clean in txt_clean:
+                        if nit_clean and len(nit_clean) >= 6 and nit_clean in txt_clean:
+                            match = True
+                        elif len(folio_clean) >= 5:
+                            match = True
+                    if match:
+                        pags_coincidentes.append(p_idx)
+                
+                if pags_coincidentes:
+                    writer = PdfWriter()
+                    for p in pags_coincidentes:
+                        writer.add_page(reader.pages[p])
+                    out = io.BytesIO()
+                    writer.write(out)
+                    out.seek(0)
+                    str_p = ", ".join([str(p+1) for p in pags_coincidentes])
+                    return out.getvalue(), f"Extraído de '{fname}' (Págs {str_p})", [p+1 for p in pags_coincidentes]
+            except Exception:
+                pass
+
+    return None, None, None
+
+# PANEL DE HISTORIAL DE TRABAJOS Y AUDITORÍAS PASADAS
+st.markdown("### 🗂️ Historial de Trabajos y Auditorías Pasadas")
+with st.expander("📂 Consultar y Cargar Trabajos Pasados de esta Empresa", expanded=False):
+    trabajos_guardados = listar_trabajos_historial(empresa)
+    if trabajos_guardados:
+        st.caption("Selecciona cualquier trabajo realizado previamente para auditar facturas, ver PDFs o exportar:")
+        for tb in trabajos_guardados:
+            c_h1, c_h2, c_h3 = st.columns([3.2, 1.2, 0.4])
+            with c_h1:
+                n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
+                n_orig = tb.get("total_pdfs_originales", 0)
+                info_pdf_str = f"{n_renom} PDFs procesados" if n_renom > 0 else (f"{n_orig} PDFs subidos" if n_orig > 0 else "Sin PDFs")
+                st.markdown(f"📄 **{tb['nombre_trabajo']}** — {tb['total_facturas']} facturas (${tb['total_valor']:,.2f}) — **{info_pdf_str}**")
+            with c_h2:
+                if st.button("📂 Cargar este Trabajo", key=f"btn_h_load_{tb['id']}"):
+                    df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, tb["id"])
+                    if df_g is not None:
+                        st.session_state["df_procesado"] = df_g
+                    if pdfs_r_g:
+                        st.session_state["dict_pdfs"] = pdfs_r_g
+                    if pdfs_o_g:
+                        st.session_state["raw_uploaded_pdfs"] = pdfs_o_g
+                    if ex_b_g:
+                        st.session_state["excel_bytes"] = ex_b_g
+                        st.session_state["excel_nombre"] = ex_n_g
+                    if zip_g:
+                        st.session_state["zip_pdfs"] = zip_g
+                        st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
+                    st.session_state["job_actual_id"] = tb["id"]
+                    st.success(f"¡Trabajo '{tb['nombre_trabajo']}' cargado! Puedes ir a Auditoría o Siigo.")
+                    st.rerun()
+            with c_h3:
+                if st.button("🗑️", key=f"btn_h_del_{tb['id']}"):
+                    eliminar_trabajo_historial(empresa, tb["id"])
+                    st.rerun()
+    else:
+        st.info("💡 Aún no tienes trabajos guardados para esta empresa. Cada vez que subas un archivo Excel o proceses PDFs, se guardará aquí como un trabajo pasado para que nunca tengas que empezar desde cero.")
 
 st.markdown("---")
 
@@ -402,7 +542,7 @@ def escanear_regimen_texto_pdf(texto):
         codigos.add("O-47")
         
     # 3. Línea explícita Régimen Fiscal: o Responsabilidad Fiscal:
-    m = re.search(r"(?:r[eé]gimen\s*fiscal|responsabilidad(?:es)?\s*(?:fiscal(?:es)?)?)\s*[:\s]*([^\n\r\|\<\>]+)", texto, re.IGNORECASE)
+    m = re.search(r"(?:r[eé]gimen\s*fiscal|responsabilidad(?:es)?\s*(?:fiscal(?:es)?)?)\s*[:\s]*([^\\n\\r\\|\\<\\>]+)", texto, re.IGNORECASE)
     if m:
         val = m.group(1).strip()
         for c in re.findall(r"([Oo0]-[0-9]{2}(?:-[A-Za-z0-9]+)?)", val):
@@ -545,13 +685,13 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_do
 
 with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
-    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs para desbloquear y renombrar automáticamente por comprobante.")
+    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs (unificados o separados) para desbloquear, guardar y renombrar automáticamente por comprobante.")
     
     col_u1, col_u2 = st.columns(2)
     with col_u1:
         archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo y escaneo de régimen)", type=["pdf"], accept_multiple_files=True)
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (unificadas o separadas)", type=["pdf"], accept_multiple_files=True)
         
     st.markdown("##### 🔢 3. Consecutivos Iniciales por Tipo de Comprobante Siigo:")
     st.caption("Cada tipo de comprobante lleva su propia numeración independiente. Digita en qué número vas en cada uno:")
@@ -566,8 +706,18 @@ with tab_compras:
     with c_con4:
         clave_pdf_extra = st.text_input("Clave PDF (opcional):", type="password", help="Si algún archivo PDF tiene contraseña específica, ingrésala aquí.")
         
+    # Almacenar PDFs originales subidos en session_state de inmediato
+    if archivos_pdfs:
+        if "raw_uploaded_pdfs" not in st.session_state:
+            st.session_state["raw_uploaded_pdfs"] = {}
+        for p in archivos_pdfs:
+            st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
+
     if archivo_excel is not None:
-        df_dian = pd.read_excel(archivo_excel)
+        st.session_state["excel_bytes"] = archivo_excel.getvalue()
+        st.session_state["excel_nombre"] = archivo_excel.name
+        
+        df_dian = pd.read_excel(io.BytesIO(st.session_state["excel_bytes"]))
         
         # Identificar columna de fecha y ordenar cronológicamente de Enero a la fecha actual
         col_fecha = None
@@ -576,7 +726,7 @@ with tab_compras:
                 col_fecha = col_cand
                 break
         if col_fecha is None:
-            col_fecha = df_dian.columns
+            col_fecha = df_dian.columns[0]
             
         df_dian["_fecha_dt"] = pd.to_datetime(df_dian[col_fecha], dayfirst=True, errors="coerce")
         df_dian = df_dian.sort_values(by="_fecha_dt", ascending=True).reset_index(drop=True)
@@ -666,7 +816,18 @@ with tab_compras:
             
         df_proc = pd.DataFrame(filas)
         st.session_state["df_procesado"] = df_proc
-        guardar_trabajo_empresa(empresa, df_proc, st.session_state.get("dict_pdfs", {}), st.session_state.get("zip_pdfs"), cons_ini_fac)
+        
+        # Guardar automáticamente en historial de trabajos
+        st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
+            empresa, df_proc,
+            excel_bytes=st.session_state.get("excel_bytes"),
+            excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+            dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+            dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+            zip_bytes=st.session_state.get("zip_pdfs"),
+            consecutivo_ini=cons_ini_fac,
+            job_id=st.session_state.get("job_actual_id")
+        )
         
         st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
         st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Régimen Fiscal Emisor", "Base", "IVA", "ReteFuente", "ReteICA", "ReteIVA", "Neto a Pagar", "Soporte PDF Renombrado"]], use_container_width=True)
@@ -700,9 +861,15 @@ with tab_compras:
             with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
                 df_ref = st.session_state.get("df_procesado", pd.DataFrame())
 
-                for idx_pdf, pdf_file in enumerate(archivos_pdfs):
+                # Lista de PDFs a procesar: los recién subidos o los almacenados en la sesión
+                pdfs_a_procesar = archivos_pdfs if archivos_pdfs else [
+                    io.BytesIO(b_bytes) for b_bytes in st.session_state.get("raw_uploaded_pdfs", {}).values()
+                ]
+                
+                for idx_pdf, pdf_item in enumerate(pdfs_a_procesar):
                     try:
-                        reader = PdfReader(pdf_file)
+                        pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
+                        reader = PdfReader(pdf_item)
                         desencriptado = False
                         if reader.is_encrypted:
                             claves_probar = []
@@ -735,7 +902,7 @@ with tab_compras:
                                     pass
                                     
                             if reader.is_encrypted and not desencriptado:
-                                st.warning(f"⚠️ No se pudo desencriptar automáticamente {pdf_file.name}. Ingrese la contraseña en el campo correspondiente.")
+                                st.warning(f"⚠️ No se pudo desencriptar automáticamente {pdf_name}. Ingrese la contraseña en el campo correspondiente.")
                                 continue
                         
                         num_pags = len(reader.pages)
@@ -749,7 +916,7 @@ with tab_compras:
                                 try: texto_pdf += page.extract_text() + "\n"
                                 except: pass
                             
-                            nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_file.name}"
+                            nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_name}"
                             if not df_ref.empty:
                                 for _, r_mat in df_ref.iterrows():
                                     folio_m = str(r_mat["Folio"]).strip()
@@ -766,7 +933,6 @@ with tab_compras:
                                     nit_m = str(r_mat["NIT Emisor"]).strip()
                                     if (fol_m and fol_m in texto_pdf) or (nit_m and nit_m in texto_pdf):
                                         df_ref.at[r_idx, "Régimen Fiscal Emisor"] = regimen_escaneado
-                                        # Recalcular retenciones con el régimen real escaneado del PDF
                                         _, _, _, _, _, rfte_n, rica_n, riva_n, cta_rf_n, _, cta_ri_n, _, razon_n, audit_n = clasificar_factura(
                                             df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
                                             df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
@@ -802,7 +968,7 @@ with tab_compras:
                                 if not df_ref.empty and fac_idx < len(df_ref):
                                     nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"]
                                 else:
-                                    nombre_final = f"Factura_Pags_{p_i+1}-{p_i+2}_{pdf_file.name}"
+                                    nombre_final = f"Factura_Pags_{p_i+1}-{p_i+2}_{pdf_name}"
                                     
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
@@ -824,7 +990,7 @@ with tab_compras:
                                 if not df_ref.empty and fac_idx < len(df_ref):
                                     nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"]
                                 else:
-                                    nombre_final = f"Factura_Pags_{p_i+1}-{p_i+3}_{pdf_file.name}"
+                                    nombre_final = f"Factura_Pags_{p_i+1}-{p_i+3}_{pdf_name}"
                                     
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
@@ -842,7 +1008,7 @@ with tab_compras:
                                 if not df_ref.empty and p_i < len(df_ref):
                                     nombre_final = df_ref.iloc[p_i]["Soporte PDF Renombrado"]
                                 else:
-                                    nombre_final = f"Factura_Pag_{p_i+1}_{pdf_file.name}"
+                                    nombre_final = f"Factura_Pag_{p_i+1}_{pdf_name}"
                                     
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
@@ -950,13 +1116,24 @@ with tab_compras:
                                 facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
 
                     except Exception as e:
-                        st.error(f"Error procesando {pdf_file.name}: {e}")
+                        st.error(f"Error procesando {pdf_name}: {e}")
 
             buffer_zip.seek(0)
             st.session_state["zip_pdfs"] = buffer_zip.getvalue()
             st.session_state["total_zip_pdfs"] = total_generados
             st.session_state["df_procesado"] = df_ref
-            guardar_trabajo_empresa(empresa, df_ref, st.session_state["dict_pdfs"], st.session_state["zip_pdfs"], cons_ini_fac)
+            
+            # Guardar trabajo actualizado con PDFs procesados
+            guardar_trabajo_en_historial(
+                empresa, df_ref,
+                excel_bytes=st.session_state.get("excel_bytes"),
+                excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+                dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+                zip_bytes=st.session_state["zip_pdfs"],
+                consecutivo_ini=cons_ini_fac,
+                job_id=st.session_state.get("job_actual_id")
+            )
             st.success(f"¡Procesamiento exitoso! Se separaron y renombraron **{total_generados} facturas completas** vinculadas a sus comprobantes y se actualizaron retenciones según el régimen extraído del PDF.")
 
         if "zip_pdfs" in st.session_state:
@@ -966,6 +1143,16 @@ with tab_compras:
                 file_name=f"Facturas_Renombradas_Comprobantes_{empresa['nombre'].replace(' ', '_')}.zip",
                 mime="application/zip",
                 use_container_width=True
+            )
+            
+    elif "df_procesado" in st.session_state:
+        st.info("ℹ️ Tienes un trabajo cargado en memoria. Puedes descargar su Excel original o auditar sus facturas.")
+        if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
+            st.download_button(
+                label=f"📥 Descargar Archivo Excel de este Trabajo ({st.session_state.get('excel_nombre', 'Reporte.xlsx')})",
+                data=st.session_state["excel_bytes"],
+                file_name=st.session_state.get("excel_nombre", "Reporte_Guardado.xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
 with tab_auditoria:
@@ -1038,28 +1225,28 @@ with tab_auditoria:
             neto_cxp = round(fac_sel["Total"] - fac_sel["ReteFuente"] - fac_sel.get("ReteICA", 0.0) - reteiva_val, 2)
             st.metric("Total Neto CxP (Cta 22 / 23)", f"${neto_cxp:,.2f}")
 
-        # VISTA PREVIA DE LA FACTURA EN UN CUADRO
+        # VISTA PREVIA DE LA FACTURA EN UN CUADRO (SOPORTE PARA UNIFICADOS O SEPARADOS)
         st.markdown("---")
         st.markdown("### 🔍 Vista Previa del Documento Soporte")
+        st.caption("Visualiza el PDF de esta factura directamente en pantalla, tanto si subiste archivos individuales como un PDF consolidado/unificado.")
+
+        dict_renom = st.session_state.get("dict_pdfs", {})
+        dict_orig = st.session_state.get("raw_uploaded_pdfs", {})
         
-        pdf_bytes_encontrado = None
-        folio_clean = str(fac_sel["Folio"]).replace("-", "").strip()
-        
-        if "dict_pdfs" in st.session_state and st.session_state["dict_pdfs"]:
-            for fname, pbytes in st.session_state["dict_pdfs"].items():
-                fname_clean = fname.replace("-", "").replace(" ", "")
-                if folio_clean and folio_clean in fname_clean:
-                    pdf_bytes_encontrado = pbytes
-                    break
-        
+        pdf_bytes_encontrado, origen_desc, pags_encontradas = buscar_y_extraer_pdf(
+            fac_sel,
+            dict_renombrados=dict_renom,
+            dict_originales=dict_orig
+        )
+
         if pdf_bytes_encontrado:
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
             
-            col_doc1, col_doc2 = st.columns(2)
+            col_doc1, col_doc2 = st.columns([3, 1])
             with col_doc1:
                 st.markdown(f"""
-                <div style="background:#0070ba; colorwhite; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px;">
-                    📄 Documento Digitalizado Completo: Factura {fac_sel['Factura']} - {fac_sel['Proveedor']}
+                <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px;">
+                    📄 {origen_desc} — Factura {fac_sel['Factura']} ({fac_sel['Proveedor']})
                 </div>
                 """, unsafe_allow_html=True)
             with col_doc2:
@@ -1071,6 +1258,7 @@ with tab_auditoria:
                     use_container_width=True
                 )
             
+            # Visor robusto que combina PDF.js interactivo con respaldo en iframe nativo
             html_visor = f"""
             <!DOCTYPE html>
             <html>
@@ -1081,7 +1269,7 @@ with tab_auditoria:
                 body {{
                   margin: 0;
                   padding: 12px;
-                  background: #475569;
+                  background: #334155;
                   display: flex;
                   flex-direction: column;
                   align-items: center;
@@ -1101,55 +1289,87 @@ with tab_auditoria:
                 }}
                 #status {{
                   color: #e2e8f0;
-                  padding: 20px;
-                  font-size: 14px;
+                  padding: 10px;
+                  font-size: 13px;
                   text-align: center;
+                }}
+                iframe {{
+                  border: none;
+                  width: 100%;
+                  height: 540px;
+                  background: white;
+                  border-radius: 4px;
                 }}
               </style>
             </head>
             <body>
               <div id="status">Cargando vista previa de la factura...</div>
               <div id="viewer-container"></div>
+              <iframe id="fallback-frame" style="display:none;" src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=0"></iframe>
               <script>
+                function showFallback() {{
+                  document.getElementById('status').style.display = 'none';
+                  document.getElementById('viewer-container').style.display = 'none';
+                  document.getElementById('fallback-frame').style.display = 'block';
+                }}
                 try {{
-                  const rawPdf = atob("{b64_pdf}");
-                  const pdfjsLib = window['pdfjs-dist/build/pdf'];
-                  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
-                  const loadingTask = pdfjsLib.getDocument({{data: rawPdf}});
-                  loadingTask.promise.then(function(pdf) {{
-                    document.getElementById('status').style.display = 'none';
-                    const container = document.getElementById('viewer-container');
-                    
-                    for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
-                      pdf.getPage(pNum).then(function(page) {{
-                        const scale = 1.35;
-                        const viewport = page.getViewport({{scale: scale}});
-                        
-                        const pageBox = document.createElement('div');
-                        pageBox.className = 'page-box';
-                        
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        canvas.height = viewport.height;
-                        canvas.width = viewport.width;
-                        
-                        pageBox.appendChild(canvas);
-                        container.appendChild(pageBox);
-                        
-                        page.render({{canvasContext: ctx, viewport: viewport}});
-                      }});
-                    }}
-                  }}).catch(function(err) {{\n                    document.getElementById('status').innerHTML = '<span style="color:#fca5a5;">No se pudo procesar la vista previa: ' + err.message + '</span>';
-                  }});
+                  if (typeof pdfjsLib === 'undefined' && window['pdfjs-dist/build/pdf']) {{
+                    window.pdfjsLib = window['pdfjs-dist/build/pdf'];
+                  }}
+                  if (typeof pdfjsLib !== 'undefined') {{
+                    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                    const rawPdf = atob("{b64_pdf}");
+                    const loadingTask = pdfjsLib.getDocument({{data: rawPdf}});
+                    loadingTask.promise.then(function(pdf) {{
+                      document.getElementById('status').style.display = 'none';
+                      const container = document.getElementById('viewer-container');
+                      for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
+                        pdf.getPage(pNum).then(function(page) {{
+                          const scale = 1.35;
+                          const viewport = page.getViewport({{scale: scale}});
+                          const pageBox = document.createElement('div');
+                          pageBox.className = 'page-box';
+                          const canvas = document.createElement('canvas');
+                          const ctx = canvas.getContext('2d');
+                          canvas.height = viewport.height;
+                          canvas.width = viewport.width;
+                          pageBox.appendChild(canvas);
+                          container.appendChild(pageBox);
+                          page.render({{canvasContext: ctx, viewport: viewport}});
+                        }});
+                      }}
+                    }}).catch(function(err) {{
+                      showFallback();
+                    }});
+                  }} else {{
+                    showFallback();
+                  }}
                 }} catch (e) {{
-                  document.getElementById('status').innerHTML = '<span style="color:#fca5a5;">Error al decodificar: ' + e.message + '</span>';
+                  showFallback();
                 }}
               </script>
             </body>
             </html>
             """
-            components.html(html_visor, height=560, scrolling=True)
+            components.html(html_visor, height=580, scrolling=True)
+
+        elif dict_orig or dict_renom:
+            # Hay PDFs subidos pero no se identificó automáticamente esta factura
+            st.warning("⚠️️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
+            todos_los_pdfs = {**dict_orig, **dict_renom}
+            pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()))
+            if pdf_elegido:
+                b64_m = base64.b64encode(todos_los_pdfs[pdf_elegido]).decode('utf-8')
+                st.download_button(
+                    label=f"📥 Descargar {pdf_elegido}",
+                    data=todos_los_pdfs[pdf_elegido],
+                    file_name=pdf_elegido,
+                    mime="application/pdf"
+                )
+                html_v_man = f"""
+                <iframe src="data:application/pdf;base64,{b64_m}#toolbar=1" width="100%" height="540px" style="border:1px solid #cbd5e1; border-radius:6px;"></iframe>
+                """
+                components.html(html_v_man, height=560, scrolling=True)
         else:
             st.markdown(f"""
             <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px;">
@@ -1164,7 +1384,7 @@ with tab_auditoria:
                     <div><b>Valor Total Facturado:</b> ${fac_sel['Total']:,.2f}</div>
                 </div>
                 <p style="margin-top: 14px; margin-bottom: 0; font-size: 13px; color: #64748b;">
-                    <i>💡 Nota: Para ver el PDF gráfico original escaneado dentro de este marco, asegúrate de subir el archivo en la Pestaña 1.</i>
+                    <i>💡 Nota: Sube los archivos PDF (unificados o separados) en la Pestaña 1 para ver el documento digitalizado en este visor.</i>
                 </p>
             </div>
             """, unsafe_allow_html=True)
@@ -1441,13 +1661,14 @@ with tab_siigo:
                 "Cta Contrapartida": "-", "Razón Contable": "-", "Soporte PDF Renombrado": "-"
             }
             df_det_export = pd.concat([df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
-            [df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
             df_det_export.to_excel(writer_aux, sheet_name="Facturas_Una_a_Una", index=False)
             
             df_cons_prov = df_p.groupby(["NIT Emisor", "Proveedor"]).agg({
                 "Comprobante Siigo": "count",
                 "Base": "sum",
                 "IVA": "sum",
+                "ReteFuente": "sum",
+                "ReteICA": "sum",": "sum",
                 "ReteFuente": "sum",
                 "ReteICA": "sum",
                 "Total": "sum"
