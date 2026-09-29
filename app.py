@@ -556,40 +556,59 @@ def cache_extraer_textos_pdf(fbytes, nit_receptor="9013464125"):
 
 def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
     """
-    Busca y extrae los bytes del PDF de la factura seleccionada con coincidencia inteligente:
-    1. Si ya se separó/renombró, busca coincidencia en dict_renombrados.
-    2. Si se subieron PDFs individuales, busca por número de factura o NIT en el nombre.
-    3. Si se subió un PDF unificado (o archivo consolidado como Todas_Licadas.pdf),
-       escanea cada página identificando el folio (con o sin ceros a la izquierda),
-       prefijo y el NIT del emisor (con o sin dígito de verificación) y extrae las páginas exactas.
+    Busca y extrae los bytes del PDF de la factura seleccionada con estricta vinculación
+    al comprobante específico elegido por el usuario en la auditoría:
+    1. Vinculación directa por número de Comprobante Siigo (ej. Comp_10-680) o nombre de soporte exacto.
+    2. Vinculación por Prefijo + Folio + Proveedor en facturas renombradas.
+    3. Vinculación en PDFs originales individuales.
+    4. Escaneo y extracción exacta de todas las hojas en PDFs unificados (incluyendo multi-página 1, 2 o 3 hojas).
     Retorna: (pdf_bytes, descripcion_origen, lista_paginas)
     """
+    comp_siigo = str(fac_sel.get("Comprobante Siigo", "")).strip()
+    comp_clean = comp_siigo.replace(" ", "_").upper()
+    consecutivo = str(fac_sel.get("Consecutivo", "")).strip()
+    t_comp = str(fac_sel.get("Tipo Comp", "")).strip()
+    
     folio_clean = str(fac_sel.get("Folio", "")).replace("-", "").strip().upper()
     folio_sc = folio_clean.lstrip("0")
     pref_clean = str(fac_sel.get("Prefijo", "")).replace("-", "").strip().upper()
     fac_clean = str(fac_sel.get("Factura", "")).replace("-", "").strip().upper()
+    fac_full = (pref_clean + folio_clean) if pref_clean else folio_clean
+    fac_full_sc = (pref_clean + folio_sc) if pref_clean else folio_sc
     
     nit_digits = re.sub(r"\D", "", str(fac_sel.get("NIT Emisor", "")))
     nit_base = nit_digits[:-1] if len(nit_digits) >= 10 else nit_digits
-    soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", ""))
+    soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", "")).strip()
 
-    # 1. Búsqueda en renombrados
+    # 1. BÚSQUEDA DIRECTA Y ESTRICTA EN FACTURAS RENOMBRADAS
     if dict_renombrados:
-        if soporte_nom in dict_renombrados:
-            return dict_renombrados[soporte_nom], f"PDF Renombrado ({soporte_nom})", None
-        for k, v in dict_renombrados.items():
-            k_clean = k.replace("-", "").replace(" ", "").upper()
-            if folio_clean and len(folio_clean) >= 3 and folio_clean in k_clean:
-                return v, f"PDF Renombrado ({k})", None
+        # A. Coincidencia exacta por nombre de archivo esperado
+        if soporte_nom and soporte_nom in dict_renombrados:
+            return dict_renombrados[soporte_nom], f"Factura Oficial ({soporte_nom})", None
+            
+        # B. Coincidencia estricta por Comprobante Siigo (ej. Comp_10-680)
+        if comp_clean:
+            for k, v in dict_renombrados.items():
+                k_upper = k.upper().replace(" ", "_")
+                if comp_clean in k_upper or f"COMP_{t_comp}-{consecutivo}" in k_upper:
+                    return v, f"Factura Comprobante ({k})", None
+                    
+        # C. Coincidencia estricta por Prefijo + Folio específico
+        if fac_full and len(fac_full) >= 3:
+            for k, v in dict_renombrados.items():
+                k_clean = k.replace("-", "").replace(" ", "").upper()
+                if fac_full in k_clean:
+                    return v, f"Factura Renombrada ({k})", None
 
-    # 2. Búsqueda en originales por nombre de archivo
+    # 2. BÚSQUEDA EN ARCHIVOS ORIGINALES INDIVIDUALES
     if dict_originales:
-        for fname, fbytes in dict_originales.items():
-            fn_clean = fname.replace("-", "").replace(" ", "").upper()
-            if (fac_clean and len(fac_clean) >= 4 and fac_clean in fn_clean) or (folio_clean and len(folio_clean) >= 3 and folio_clean in fn_clean):
-                return fbytes, f"PDF Original Individual ({fname})", None
+        if fac_full and len(fac_full) >= 3:
+            for fname, fbytes in dict_originales.items():
+                fn_clean = fname.replace("-", "").replace(" ", "").upper()
+                if fac_full in fn_clean or (fac_clean and fac_clean in fn_clean):
+                    return fbytes, f"PDF Individual ({fname})", None
 
-        # 3. Escaneo ultrarrápido página por página con caché en RAM (PDFs unificados)
+        # 3. ESCANEO INTELIGENTE EN PDFS UNIFICADOS (EXTRAYENDO TODAS LAS PÁGINAS DE ESTA FACTURA)
         for fname, fbytes in dict_originales.items():
             try:
                 paginas_txt = cache_extraer_textos_pdf(fbytes)
@@ -597,18 +616,12 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
                 for p_idx, txt in enumerate(paginas_txt):
                     txt_clean = txt.replace("-", "").replace(" ", "").upper()
                     
-                    # Criterio de coincidencia robusta
                     match = False
-                    
-                    # A. Prefijo + Folio juntos
-                    fac_full = (pref_clean + folio_clean) if pref_clean else folio_clean
-                    fac_full_sc = (pref_clean + folio_sc) if pref_clean else folio_sc
-                    if len(fac_full) >= 4 and fac_full in txt_clean:
+                    if len(fac_full) >= 3 and fac_full in txt_clean:
                         match = True
                     elif len(fac_full_sc) >= 3 and fac_full_sc in txt_clean:
                         match = True
                     else:
-                        # B. NIT del emisor + Número de Factura
                         tiene_nit = (nit_digits and len(nit_digits) >= 6 and nit_digits in txt_clean) or (nit_base and len(nit_base) >= 6 and nit_base in txt_clean)
                         if tiene_nit:
                             if len(folio_clean) >= 2 and folio_clean in txt_clean:
@@ -619,8 +632,7 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
                     if match:
                         if p_idx not in pags_coincidentes:
                             pags_coincidentes.append(p_idx)
-                        # Comprobar si esta página declara tener múltiples hojas (ej. Página 1 de 2, 1 de 3)
-                        m_p = re.search(r'(?:P[ÁAáa]G(?:INA)?|HOJA)\s*[:\.]?\s*1\s*(?:DE|/)\s*(\d+)', txt, re.IGNORECASE)
+                        m_p = re.search(r'(?:P[ÁAáa]G(?:INA)?|HOJA|PAGE)\s*[:\.]?\s*1\s*(?:DE|/|OF)\s*(\d+)', txt, re.IGNORECASE)
                         if m_p:
                             try:
                                 total_h = int(m_p.group(1))
@@ -1778,8 +1790,8 @@ with tab_auditoria:
               <style>
                 body {{
                   margin: 0;
-                  padding: 12px;
-                  background: #1e293b;
+                  padding: 14px;
+                  background: #0f172a;
                   display: flex;
                   flex-direction: column;
                   align-items: center;
@@ -1788,16 +1800,16 @@ with tab_auditoria:
                 }}
                 .page-box {{
                   margin-bottom: 24px;
-                  box-shadow: 0 4px 18px rgba(0,0,0,0.45);
+                  box-shadow: 0 6px 20px rgba(0,0,0,0.5);
                   border-radius: 6px;
                   background: white;
                   overflow: hidden;
                   width: 100%;
-                  max-width: 860px;
+                  max-width: 880px;
                 }}
                 .page-header {{
-                  background: #0f172a;
-                  color: #94a3b8;
+                  background: #1e293b;
+                  color: #cbd5e1;
                   font-size: 13px;
                   font-weight: 600;
                   padding: 8px 14px;
@@ -1811,15 +1823,16 @@ with tab_auditoria:
                   height: auto;
                 }}
                 #status {{
-                  color: #e2e8f0;
-                  padding: 12px;
+                  color: #38bdf8;
+                  padding: 14px;
                   font-size: 14px;
+                  font-weight: 600;
                   text-align: center;
                 }}
                 iframe {{
                   border: none;
                   width: 100%;
-                  height: 750px;
+                  height: 780px;
                   background: white;
                   border-radius: 6px;
                 }}
@@ -1828,75 +1841,109 @@ with tab_auditoria:
             <body>
               <div id="status">Cargando factura completa ({num_pags_tot} página(s))...</div>
               <div id="viewer-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
-              <iframe id="fallback-frame" style="display:none;" src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=1"></iframe>
+              <iframe id="fallback-frame" style="display:none;" width="100%" height="780px"></iframe>
               <script>
-                function showFallback() {{
-                  document.getElementById('status').style.display = 'none';
-                  document.getElementById('viewer-container').style.display = 'none';
-                  document.getElementById('fallback-frame').style.display = 'block';
+                const b64Data = "{b64_pdf}";
+                function base64ToUint8Array(base64) {{
+                    const binaryString = atob(base64);
+                    const len = binaryString.length;
+                    const bytes = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) {{
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }}
+                    return bytes;
                 }}
+                
+                const uint8Pdf = base64ToUint8Array(b64Data);
+                
+                function showFallback() {{
+                    document.getElementById('status').style.display = 'none';
+                    document.getElementById('viewer-container').style.display = 'none';
+                    const frame = document.getElementById('fallback-frame');
+                    try {{
+                        const blob = new Blob([uint8Pdf], {{type: 'application/pdf'}});
+                        const blobUrl = URL.createObjectURL(blob);
+                        frame.src = blobUrl + '#toolbar=1&navpanes=1';
+                    }} catch (e) {{
+                        frame.src = 'data:application/pdf;base64,' + b64Data + '#toolbar=1&navpanes=1';
+                    }}
+                    frame.style.display = 'block';
+                }}
+
                 try {{
-                  if (typeof pdfjsLib === 'undefined' && window['pdfjs-dist/build/pdf']) {{
-                    window.pdfjsLib = window['pdfjs-dist/build/pdf'];
-                  }}
-                  if (typeof pdfjsLib !== 'undefined') {{
-                    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-                    const rawPdf = atob("{b64_pdf}");
-                    const loadingTask = pdfjsLib.getDocument({{data: rawPdf}});
-                    loadingTask.promise.then(async function(pdf) {{
-                      document.getElementById('status').style.display = 'none';
-                      const container = document.getElementById('viewer-container');
-                      container.innerHTML = '';
-                      
-                      for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
-                        try {{
-                          const page = await pdf.getPage(pNum);
-                          const scale = 1.4;
-                          const viewport = page.getViewport({{scale: scale}});
-                          
-                          const pageBox = document.createElement('div');
-                          pageBox.className = 'page-box';
-                          
-                          const pageHeader = document.createElement('div');
-                          pageHeader.className = 'page-header';
-                          pageHeader.innerHTML = '<span>📄 Factura ' + '{fac_sel["Factura"]}' + '</span><span style="background:#334155; padding:2px 8px; border-radius:4px;">Hoja ' + pNum + ' de ' + pdf.numPages + '</span>';
-                          pageBox.appendChild(pageHeader);
-                          
-                          const canvas = document.createElement('canvas');
-                          const ctx = canvas.getContext('2d');
-                          canvas.height = viewport.height;
-                          canvas.width = viewport.width;
-                          pageBox.appendChild(canvas);
-                          
-                          container.appendChild(pageBox);
-                          await page.render({{canvasContext: ctx, viewport: viewport}}).promise;
-                        }} catch (renderErr) {{
-                          console.error('Error renderizando página ' + pNum, renderErr);
-                        }}
-                      }}
-                    }}).catch(function(err) {{
-                      console.error(err);
-                      showFallback();
-                    }});
-                  }} else {{
-                    showFallback();
-                  }}
+                    if (typeof pdfjsLib === 'undefined' && window['pdfjs-dist/build/pdf']) {{
+                        window.pdfjsLib = window['pdfjs-dist/build/pdf'];
+                    }}
+                    if (typeof pdfjsLib !== 'undefined') {{
+                        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                        const loadingTask = pdfjsLib.getDocument({{data: uint8Pdf}});
+                        loadingTask.promise.then(async function(pdf) {{
+                            document.getElementById('status').style.display = 'none';
+                            const container = document.getElementById('viewer-container');
+                            container.innerHTML = '';
+                            
+                            for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
+                                try {{
+                                    const page = await pdf.getPage(pNum);
+                                    const scale = 1.45;
+                                    const viewport = page.getViewport({{scale: scale}});
+                                    
+                                    const pageBox = document.createElement('div');
+                                    pageBox.className = 'page-box';
+                                    
+                                    const pageHeader = document.createElement('div');
+                                    pageHeader.className = 'page-header';
+                                    pageHeader.innerHTML = '<span>📄 Factura ' + '{fac_sel["Factura"]}' + ' — {fac_sel["Comprobante Siigo"]}</span><span style="background:#334155; padding:2px 8px; border-radius:4px;">Hoja ' + pNum + ' de ' + pdf.numPages + '</span>';
+                                    pageBox.appendChild(pageHeader);
+                                    
+                                    const canvas = document.createElement('canvas');
+                                    const ctx = canvas.getContext('2d');
+                                    canvas.height = viewport.height;
+                                    canvas.width = viewport.width;
+                                    pageBox.appendChild(canvas);
+                                    
+                                    container.appendChild(pageBox);
+                                    await page.render({{canvasContext: ctx, viewport: viewport}}).promise;
+                                }} catch (renderErr) {{
+                                    console.error('Error renderizando página ' + pNum, renderErr);
+                                }}
+                            }}
+                        }}).catch(function(err) {{
+                            console.error('Error cargando documento PDF:', err);
+                            showFallback();
+                        }});
+                    }} else {{
+                        showFallback();
+                    }}
                 }} catch (e) {{
-                  console.error(e);
-                  showFallback();
+                    console.error('Excepción general en visor:', e);
+                    showFallback();
                 }}
               </script>
             </body>
             </html>
             """
+            
             if "Visor Integrado" in modo_vista_doc:
-                html_nativo = f"""
-                <embed src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=1" type="application/pdf" width="100%" height="820px" style="border:1px solid #cbd5e1; border-radius:6px;" />
+                html_blob = f"""
+                <!DOCTYPE html>
+                <html>
+                <body style="margin:0; padding:0; background:#0f172a;">
+                  <iframe id="native-frame" width="100%" height="820px" style="border:1px solid #334155; border-radius:6px; background:white;"></iframe>
+                  <script>
+                    const b64 = "{b64_pdf}";
+                    const bin = atob(b64);
+                    const bArr = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) bArr[i] = bin.charCodeAt(i);
+                    const bUrl = URL.createObjectURL(new Blob([bArr], {{type: 'application/pdf'}}));
+                    document.getElementById('native-frame').src = bUrl + '#toolbar=1&navpanes=1';
+                  </script>
+                </body>
+                </html>
                 """
-                components.html(html_nativo, height=840, scrolling=True)
+                components.html(html_blob, height=840, scrolling=True)
             else:
                 components.html(html_visor, height=visor_height, scrolling=True)
-
         elif dict_orig or dict_renom:
             # Hay PDFs subidos pero no se identificó automáticamente esta factura
             st.warning("⚠️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
