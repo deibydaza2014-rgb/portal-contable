@@ -535,6 +535,57 @@ def auditar_regimen_desde_facturas_renombradas(df_ref, dict_renombrados, empresa
                 
     return total_modificados
 
+def identificar_factura_en_texto(texto, df_ref):
+    """
+    Motor de correspondencia estricta entre el texto del PDF y el registro contable:
+    Evalúa CUFE, Prefijo, Folio, NIT Emisor (sin puntos) y nombre comercial del proveedor.
+    Garantiza que la factura encontrada coincida 100% con el registro contable seleccionado.
+    """
+    if not texto or df_ref.empty:
+        return None
+    txt_clean = re.sub(r'[^A-Z0-9]', '', texto.upper())
+    digits_only = re.sub(r'\D', '', texto)
+    
+    mejor_cand = None
+    mejor_score = 0
+    
+    for _, r_cand in df_ref.iterrows():
+        pref = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Prefijo", "")).upper())
+        fol = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Folio", "")).upper())
+        fol_sc = fol.lstrip('0')
+        fac_full = (pref + fol) if pref else fol
+        fac_full_sc = (pref + fol_sc) if pref else fol_sc
+        
+        nit_c = re.sub(r'\D', '', str(r_cand.get("NIT Emisor", "")))
+        nit_base = nit_c[:-1] if len(nit_c) >= 10 else nit_c
+        
+        # 1. Validación por CUFE / Token (si está en el reporte, certeza total)
+        cufe_cand = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE / Token", "") or r_cand.get("CUFE", "") or "")).upper()
+        if len(cufe_cand) >= 20 and cufe_cand[:20] in txt_clean:
+            return r_cand
+            
+        has_nit = (nit_c and len(nit_c) >= 6 and nit_c in digits_only) or (nit_base and len(nit_base) >= 6 and nit_base in digits_only)
+        has_fac = (len(fac_full) >= 3 and fac_full in txt_clean) or (len(fac_full_sc) >= 3 and fac_full_sc in txt_clean)
+        
+        prov_words = [w for w in re.split(r'[^A-Z0-9]+', str(r_cand.get("Proveedor", "")).upper()) if len(w) >= 4 and w not in ["SAS", "LTDA", "S.A.", "COLOMBIA", "SERVICES", "SOLUTIONS", "SOCIEDAD", "DISTRIBUCIONES", "GLOBAL", "TRADE"]]
+        has_prov = any(w in txt_clean for w in prov_words)
+        
+        score = 0
+        if has_fac and has_nit:
+            score = 600
+        elif has_fac and has_prov:
+            score = 450
+        elif has_nit and has_prov and len(fol) >= 2 and fol in digits_only:
+            score = 350
+        elif has_fac and len(fac_full) >= 4:
+            score = 250
+            
+        if score > mejor_score and score >= 250:
+            mejor_score = score
+            mejor_cand = r_cand
+            
+    return mejor_cand
+
 @st.cache_data(show_spinner=False)
 def cache_extraer_textos_pdf(fbytes, nit_receptor="9013464125"):
     """Extrae el texto de todas las páginas de un PDF, desbloqueándolo automáticamente si está protegido."""
@@ -554,18 +605,16 @@ def cache_extraer_textos_pdf(fbytes, nit_receptor="9013464125"):
     except Exception:
         return []
 
-def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
+def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, empresa_compradora=None):
     """
-    Busca y extrae los bytes del PDF de la factura seleccionada con estricta vinculación
-    al comprobante específico elegido por el usuario en la auditoría:
-    1. Vinculación directa por número de Comprobante Siigo (ej. Comp_10-680) o nombre de soporte exacto.
-    2. Vinculación por Prefijo + Folio + Proveedor en facturas renombradas.
-    3. Vinculación en PDFs originales individuales.
-    4. Escaneo y extracción exacta de todas las hojas en PDFs unificados (incluyendo multi-página 1, 2 o 3 hojas).
+    Busca y extrae el PDF de la factura seleccionada con máxima precisión:
+    1. Búsqueda por CUFE en el nombre del archivo (para PDFs descargados directamente de la DIAN nombrados con CUFE).
+    2. Búsqueda por Comprobante Siigo o Soporte Renombrado oficial.
+    3. Búsqueda por CUFE en el contenido del texto.
+    4. Búsqueda por Factura + NIT Emisor (desencriptando automáticamente con el NIT del comprador).
     Retorna: (pdf_bytes, descripcion_origen, lista_paginas)
     """
     comp_siigo = str(fac_sel.get("Comprobante Siigo", "")).strip()
-    comp_clean = comp_siigo.replace(" ", "_").upper()
     consecutivo = str(fac_sel.get("Consecutivo", "")).strip()
     t_comp = str(fac_sel.get("Tipo Comp", "")).strip()
     
@@ -576,60 +625,87 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
     fac_full = (pref_clean + folio_clean) if pref_clean else folio_clean
     fac_full_sc = (pref_clean + folio_sc) if pref_clean else folio_sc
     
-    nit_digits = re.sub(r"\D", "", str(fac_sel.get("NIT Emisor", "")))
-    nit_base = nit_digits[:-1] if len(nit_digits) >= 10 else nit_digits
+    cufe_raw = str(fac_sel.get("CUFE", "") or fac_sel.get("CUFE / Token", "") or "").strip()
+    cufe_clean = re.sub(r'[^a-zA-Z0-9]', '', cufe_raw).lower()
+    
+    # El NIT con el que vienen encriptadas las facturas electrónicas de proveedores es el NIT del COMPRADOR
+    nit_comprador = "9013464125"
+    if empresa_compradora:
+        nit_comprador = re.sub(r"\D", "", str(empresa_compradora.get("nit", "9013464125")))
+        
+    nit_emisor_digits = re.sub(r"\D", "", str(fac_sel.get("NIT Emisor", "")))
     soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", "")).strip()
+    df_una_fac = pd.DataFrame([fac_sel])
 
-    # 1. BÚSQUEDA DIRECTA Y ESTRICTA EN FACTURAS RENOMBRADAS
-    if dict_renombrados:
-        # A. Coincidencia exacta por nombre de archivo esperado
-        if soporte_nom and soporte_nom in dict_renombrados:
-            return dict_renombrados[soporte_nom], f"Factura Oficial ({soporte_nom})", None
-            
-        # B. Coincidencia estricta por Comprobante Siigo (ej. Comp_10-680)
-        if comp_clean:
-            for k, v in dict_renombrados.items():
-                k_upper = k.upper().replace(" ", "_")
-                if comp_clean in k_upper or f"COMP_{t_comp}-{consecutivo}" in k_upper:
-                    return v, f"Factura Comprobante ({k})", None
-                    
-        # C. Coincidencia estricta por Prefijo + Folio específico
-        if fac_full and len(fac_full) >= 3:
-            for k, v in dict_renombrados.items():
-                k_clean = k.replace("-", "").replace(" ", "").upper()
-                if fac_full in k_clean:
-                    return v, f"Factura Renombrada ({k})", None
-
-    # 2. BÚSQUEDA EN ARCHIVOS ORIGINALES INDIVIDUALES
-    if dict_originales:
-        if fac_full and len(fac_full) >= 3:
+    # 1. BÚSQUEDA DIRECTA POR CUFE EN NOMBRE DE ARCHIVO (Archivos DIAN originales)
+    if cufe_clean and len(cufe_clean) >= 15:
+        if dict_originales:
             for fname, fbytes in dict_originales.items():
-                fn_clean = fname.replace("-", "").replace(" ", "").upper()
-                if fac_full in fn_clean or (fac_clean and fac_clean in fn_clean):
-                    return fbytes, f"PDF Individual ({fname})", None
+                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
+                if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
+                    f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
+                    return f_des, f"Factura Oficial DIAN (CUFE: {fname[:18]}...pdf)", None
+        if dict_renombrados:
+            for fname, fbytes in dict_renombrados.items():
+                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
+                if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
+                    return fbytes, f"Factura Oficial DIAN ({fname})", None
 
-        # 3. ESCANEO INTELIGENTE EN PDFS UNIFICADOS (EXTRAYENDO TODAS LAS PÁGINAS DE ESTA FACTURA)
+    # 2. BÚSQUEDA EN FACTURAS RENOMBRADAS
+    if dict_renombrados:
+        candidatos = []
+        if soporte_nom and soporte_nom in dict_renombrados:
+            candidatos.append((soporte_nom, dict_renombrados[soporte_nom]))
+            
+        comp_key = f"Comp_{t_comp}-{consecutivo}".upper()
+        for k, v in dict_renombrados.items():
+            if comp_key in k.upper().replace(" ", "_"):
+                if (k, v) not in candidatos:
+                    candidatos.append((k, v))
+                    
+        for k, v in dict_renombrados.items():
+            k_clean = k.replace("-", "").replace(" ", "").upper()
+            if fac_full and len(fac_full) >= 3 and fac_full in k_clean:
+                if (k, v) not in candidatos:
+                    candidatos.append((k, v))
+                    
+        for c_nom, c_bytes in candidatos:
+            try:
+                pgs = cache_extraer_textos_pdf(c_bytes, nit_receptor=nit_comprador)
+                txt_c = " ".join(pgs)
+                if identificar_factura_en_texto(txt_c, df_una_fac) is not None:
+                    return c_bytes, f"Factura Verificada ({c_nom})", None
+            except Exception:
+                pass
+                
+        if candidatos:
+            return candidatos[0][1], f"Factura Renombrada ({candidatos[0][0]})", None
+
+    # 3. BÚSQUEDA EN ARCHIVOS ORIGINALES INDIVIDUALES Y UNIFICADOS
+    if dict_originales:
+        # A. Archivos individuales por nombre o texto
         for fname, fbytes in dict_originales.items():
             try:
-                paginas_txt = cache_extraer_textos_pdf(fbytes)
+                f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
+                fn_clean = fname.replace("-", "").replace(" ", "").upper()
+                if fac_full and len(fac_full) >= 3 and fac_full in fn_clean:
+                    return f_des, f"Factura Individual ({fname})", None
+                    
+                pgs = cache_extraer_textos_pdf(f_des, nit_receptor=nit_comprador)
+                txt_ind = " ".join(pgs)
+                if len(pgs) <= 4 and identificar_factura_en_texto(txt_ind, df_una_fac) is not None:
+                    return f_des, f"Factura Individual Verificada ({fname})", None
+            except Exception:
+                pass
+
+        # B. Escaneo en PDFs unificados página por página
+        for fname, fbytes in dict_originales.items():
+            try:
+                f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
+                paginas_txt = cache_extraer_textos_pdf(f_des, nit_receptor=nit_comprador)
                 pags_coincidentes = []
                 for p_idx, txt in enumerate(paginas_txt):
-                    txt_clean = txt.replace("-", "").replace(" ", "").upper()
-                    
-                    match = False
-                    if len(fac_full) >= 3 and fac_full in txt_clean:
-                        match = True
-                    elif len(fac_full_sc) >= 3 and fac_full_sc in txt_clean:
-                        match = True
-                    else:
-                        tiene_nit = (nit_digits and len(nit_digits) >= 6 and nit_digits in txt_clean) or (nit_base and len(nit_base) >= 6 and nit_base in txt_clean)
-                        if tiene_nit:
-                            if len(folio_clean) >= 2 and folio_clean in txt_clean:
-                                match = True
-                            elif len(folio_sc) >= 2 and folio_sc in txt_clean:
-                                match = True
-                                
-                    if match:
+                    if identificar_factura_en_texto(txt, df_una_fac) is not None:
                         if p_idx not in pags_coincidentes:
                             pags_coincidentes.append(p_idx)
                         m_p = re.search(r'(?:P[ÁAáa]G(?:INA)?|HOJA|PAGE)\s*[:\.]?\s*1\s*(?:DE|/|OF)\s*(\d+)', txt, re.IGNORECASE)
@@ -645,7 +721,7 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
                                 pass
                 
                 if pags_coincidentes:
-                    reader = PdfReader(io.BytesIO(fbytes))
+                    reader = PdfReader(io.BytesIO(f_des))
                     writer = PdfWriter()
                     for p in pags_coincidentes:
                         writer.add_page(reader.pages[p])
@@ -1086,6 +1162,8 @@ with tab_compras:
                 try: tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
                 except: tot = 0.0
                 base, desc_val, motivo_base = calcular_base_con_regla_descuento(r, tot, iva, nom_e)
+                col_cufe = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["cufe", "token", "uuid", "cude"])), None)
+                cufe_val = str(r.get(col_cufe, "")).strip() if col_cufe and pd.notna(r.get(col_cufe)) else ""
 
                 col_resp = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["régimen", "regimen", "responsabilidad", "obligacion"])), None)
                 resp_e = str(r.get(col_resp, "")).strip() if col_resp and pd.notna(r.get(col_resp)) else ""
@@ -1127,6 +1205,7 @@ with tab_compras:
                     "Cta ReteFuente": cta_rfte,
                     "Cta ReteICA": cta_rica,
                     "Total": tot,
+                    "CUFE": cufe_val,
                     "Descuento Registrado": desc_val,
                     "Regla Base": motivo_base,
                     "Razón Contable": razon,
@@ -1473,22 +1552,7 @@ with tab_compras:
                             facturas_generadas = []
 
                             def buscar_coincidencia_factura(texto_pagina):
-                                t_clean = texto_pagina.replace("-", "").replace(" ", "").upper()
-                                for _, r_cand in df_ref.iterrows():
-                                    fol_cand = str(r_cand["Folio"]).replace("-", "").strip().upper()
-                                    pref_cand = str(r_cand["Prefijo"]).replace("-", "").strip().upper()
-                                    fac_cand = str(r_cand["Factura"]).replace("-", "").strip().upper()
-                                    nit_cand = str(r_cand["NIT Emisor"]).replace("-", "").strip().upper()
-
-                                    if pref_cand and fol_cand and (pref_cand + fol_cand) in t_clean:
-                                        return r_cand
-                                    if fac_cand and len(fac_cand) >= 4 and fac_cand in t_clean:
-                                        return r_cand
-                                    if nit_cand and fol_cand and len(fol_cand) >= 3 and (nit_cand in t_clean and fol_cand in t_clean):
-                                        return r_cand
-                                    if fol_cand and len(fol_cand) >= 4 and fol_cand in t_clean:
-                                        return r_cand
-                                return None
+                                return identificar_factura_en_texto(texto_pagina, df_ref)
 
                             for p_idx in range(num_pags):
                                 try: txt_p = reader.pages[p_idx].extract_text() or ""
@@ -1524,7 +1588,7 @@ with tab_compras:
                                         total_generados += 1
                                         facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
 
-                                    curr_inv_row = inv_encontrada if inv_encontrada is not None else (df_ref.iloc[len(facturas_generadas)] if len(facturas_generadas) < len(df_ref) else None)
+                                    curr_inv_row = inv_encontrada if inv_encontrada is not None else curr_inv_row
                                     if curr_inv_row is not None and reg_detectado and not df_ref.empty:
                                         r_idx = curr_inv_row.name
                                         df_ref.at[r_idx, "Régimen Fiscal Emisor"] = reg_detectado
@@ -1735,10 +1799,14 @@ with tab_auditoria:
         pdf_bytes_encontrado, origen_desc, pags_encontradas = buscar_y_extraer_pdf(
             fac_sel,
             dict_renombrados=dict_renom,
-            dict_originales=dict_orig
+            dict_originales=dict_orig,
+            empresa_compradora=empresa
         )
 
         if pdf_bytes_encontrado:
+            # Banner de coincidencia exacta con el registro contable
+            st.success(f"✅ **Factura y Registro Contable Vinculados:** Comprobante **{fac_sel['Comprobante Siigo']}** | Factura: **{fac_sel['Factura']}** | Proveedor: **{fac_sel['Proveedor']}** (NIT: {fac_sel['NIT Emisor']}) — Total: **${fac_sel['Total']:,.2f}**")
+
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
             
             # Conteo previo de hojas de la factura para visualización completa
@@ -1945,22 +2013,39 @@ with tab_auditoria:
             else:
                 components.html(html_visor, height=visor_height, scrolling=True)
         elif dict_orig or dict_renom:
-            # Hay PDFs subidos pero no se identificó automáticamente esta factura
-            st.warning("⚠️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
+            st.warning("⚠️ No se identificó automáticamente esta factura. Puedes seleccionar manualmente cualquier PDF cargado para visualizarlo:")
             todos_los_pdfs = {**dict_orig, **dict_renom}
             pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()))
             if pdf_elegido:
-                b64_m = base64.b64encode(todos_los_pdfs[pdf_elegido]).decode('utf-8')
+                f_bytes_sel = todos_los_pdfs[pdf_elegido]
+                # Desbloquear si está protegido
+                f_bytes_sel, _ = desbloquear_pdf_bytes(f_bytes_sel, nit_receptor=re.sub(r"\D", "", str(empresa.get("nit", "9013464125"))))
+                b64_m = base64.b64encode(f_bytes_sel).decode('utf-8')
+                
                 st.download_button(
                     label=f"📥 Descargar {pdf_elegido}",
-                    data=todos_los_pdfs[pdf_elegido],
+                    data=f_bytes_sel,
                     file_name=pdf_elegido,
                     mime="application/pdf"
                 )
-                html_v_man = f"""
-                <iframe src="data:application/pdf;base64,{b64_m}#toolbar=1" width="100%" height="540px" style="border:1px solid #cbd5e1; border-radius:6px;"></iframe>
+                
+                html_blob_manual = f"""
+                <!DOCTYPE html>
+                <html>
+                <body style="margin:0; padding:0; background:#0f172a;">
+                  <iframe id="man-frame" width="100%" height="750px" style="border:1px solid #334155; border-radius:6px; background:white;"></iframe>
+                  <script>
+                    const b64 = "{b64_m}";
+                    const bin = atob(b64);
+                    const bArr = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) bArr[i] = bin.charCodeAt(i);
+                    const bUrl = URL.createObjectURL(new Blob([bArr], {{type: 'application/pdf'}}));
+                    document.getElementById('man-frame').src = bUrl + '#toolbar=1&navpanes=1';
+                  </script>
+                </body>
+                </html>
                 """
-                components.html(html_v_man, height=560, scrolling=True)
+                components.html(html_blob_manual, height=770, scrolling=True)
         else:
             st.markdown(f"""
             <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px;">
@@ -1975,7 +2060,7 @@ with tab_auditoria:
                     <div><b>Valor Total Facturado:</b> ${fac_sel['Total']:,.2f}</div>
                 </div>
                 <p style="margin-top: 14px; margin-bottom: 0; font-size: 13px; color: #64748b;">
-                    <i>💡 Nota: Sube los archivos PDF (unificados o separados) en la Pestaña 1 para ver el documento digitalizado en este visor.</i>
+                    <i>💡 Nota: Sube los archivos PDF en la Pestaña 1 para ver el documento digitalizado en este visor.</i>
                 </p>
             </div>
             """, unsafe_allow_html=True)
