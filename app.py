@@ -524,35 +524,64 @@ CODIGOS_IMPUESTO_SIIGO = {
 AGENTES_ADUANEROS = ["DHL", "ADUANA", "EURO SHIPPING", "PORTUARIA", "ALMACENADORA", "CARGO", "TRADE GLOBAL", "TERMINAL", "BUENAVENTURA"]
 
 def escanear_regimen_texto_pdf(texto):
+    """
+    Escaneo inteligente de responsabilidades fiscales del EMISOR en la factura electrónica:
+    1. Descarta el pie de página de proveedores tecnológicos (Siigo, Facturatech, Carvajal, Cadena, etc.)
+       para no confundir las resoluciones de autorretenedor del software con las del proveedor real.
+    2. Aísla el bloque de datos del Emisor antes de los datos del Cliente/Adquirente.
+    3. Descarta frases negativas como 'No somos grandes contribuyentes ni autorretenedores'.
+    4. Detecta afirmativamente O-13 (Gran Contribuyente), O-15 (Autorretenedor), O-47 (Régimen Simple), O-48 y O-49.
+    """
     if not texto:
         return ""
-    codigos = set()
-    txt_lower = texto.lower()
     
-    # 1. Regex de códigos DIAN oficiales (O-13, O-15, O-23, O-47, etc.)
-    for c in re.findall(r"\b([Oo0]-[0-9]{2}(?:-[A-Za-z0-9]+)?)\b", texto):
-        codigos.add(c.upper().replace("0-", "O-"))
-        
-    # 2. Textos comunes en facturas colombianas
-    if "gran contribuyente" in txt_lower or "grandes contribuyentes" in txt_lower:
-        codigos.add("O-13")
-    if "autorretenedor" in txt_lower or "autoretenedor" in txt_lower or "autorretenedores" in txt_lower:
-        codigos.add("O-15")
-    if "simple" in txt_lower and ("régimen" in txt_lower or "regimen" in txt_lower or "tributación" in txt_lower or "tributacion" in txt_lower):
-        codigos.add("O-47")
-        
-    # 3. Línea explícita Régimen Fiscal: o Responsabilidad Fiscal:
-    m = re.search(r"(?:r[eé]gimen\s*fiscal|responsabilidad(?:es)?\s*(?:fiscal(?:es)?)?)\s*[:\s]*([^\\n\\r\\|\\<\\>]+)", texto, re.IGNORECASE)
-    if m:
-        val = m.group(1).strip()
-        for c in re.findall(r"([Oo0]-[0-9]{2}(?:-[A-Za-z0-9]+)?)", val):
-            codigos.add(c.upper().replace("0-", "O-"))
+    txt = texto.upper()
+    
+    # 1. Cortar pie de página de proveedores tecnológicos de software
+    for corte in ["PROVEEDOR TECNOLÓGICO", "PROVEEDOR TECNOLOGICO", "IMPRESO POR SOFTWARE", "DESARROLLADO POR", "SOFTWARE SIIGO", "TECNOLOGÍA TRANSACCIONAL", "THE FACTORY HKA", "DISPAPELES", "FACTURATECH", "CADENA S.A."]:
+        pos_c = txt.find(corte)
+        if pos_c != -1:
+            txt = txt[:pos_c]
             
-    if codigos:
-        return ";".join(sorted(list(codigos)))
-    elif m:
-        return m.group(1).strip()[:40]
-    return ""
+    # 2. Aislar el bloque del Emisor antes de los datos del Cliente/Adquirente
+    pos_cli = -1
+    for k_cli in ["DATOS DEL CLIENTE", "DATOS DEL ADQUIRENTE", "CLIENTE:", "SEÑOR(ES):", "SEÑORES:", "ADQUIRENTE:", "FACTURADO A:"]:
+        p = txt.find(k_cli)
+        if p != -1 and (pos_cli == -1 or p < pos_cli):
+            pos_cli = p
+            
+    txt_emisor = txt[:pos_cli] if pos_cli != -1 else txt
+    
+    # 3. Analizar Gran Contribuyente (O-13)
+    es_gc = False
+    if "O-13" in txt_emisor or "0-13" in txt_emisor:
+        es_gc = True
+    elif "GRAN CONTRIBUYENTE" in txt_emisor or "GRANDES CONTRIBUYENTES" in txt_emisor:
+        if not re.search(r"(?:NO\s+(?:SOMOS\s+)?|NI\s+)GRANDES?\s+CONTRIBUYENTES?", txt_emisor):
+            es_gc = True
+            
+    # 4. Analizar Autorretenedor (O-15)
+    es_autorr = False
+    if "O-15" in txt_emisor or "0-15" in txt_emisor:
+        es_autorr = True
+    elif "AUTORRETENEDOR" in txt_emisor or "AUTORETENEDOR" in txt_emisor:
+        if not re.search(r"(?:NO\s+(?:SOMOS\s+)?|NI\s+)AUTO[R]?RETENEDOR(?:ES)?", txt_emisor):
+            es_autorr = True
+            
+    # 5. Analizar Régimen Simple de Tributación (O-47 / RST)
+    es_rst = False
+    if "O-47" in txt_emisor or "0-47" in txt_emisor:
+        es_rst = True
+    elif "REGIMEN SIMPLE" in txt_emisor or "RÉGIMEN SIMPLE" in txt_emisor or "SIMPLE DE TRIBUTACION" in txt_emisor or "RST" in txt_emisor:
+        es_rst = True
+
+    codigos = []
+    if es_gc: codigos.append("O-13")
+    if es_autorr: codigos.append("O-15")
+    if es_rst: codigos.append("O-47")
+    if not codigos: codigos.append("O-48")
+    
+    return ";".join(codigos)
 
 def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_doc, resp_emisor="", empresa_compradora=None):
     nombre = str(nombre_emisor).upper()
@@ -829,7 +858,57 @@ with tab_compras:
             job_id=st.session_state.get("job_actual_id")
         )
         
-        st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
+        c_aud_btn1, c_aud_btn2 = st.columns()
+        with c_aud_btn1:
+            st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
+        with c_aud_btn2:
+            if st.button("🔎 Auditar y Escanear Régimen Fiscal de los PDFs (Factura por Factura)", key="btn_escanear_regimen_todos"):
+                dict_renom_s = st.session_state.get("dict_pdfs", {})
+                dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
+                total_modificados = 0
+                if dict_renom_s or dict_orig_s:
+                    for r_idx, r_mat in df_proc.iterrows():
+                        p_bytes, p_desc, _ = buscar_y_extraer_pdf(r_mat, dict_renom_s, dict_orig_s)
+                        if p_bytes:
+                            try:
+                                r_pdf = PdfReader(io.BytesIO(p_bytes))
+                                txt_f = ""
+                                for pg in r_pdf.pages:
+                                    txt_f += (pg.extract_text() or "") + "\n"
+                                reg_f = escanear_regimen_texto_pdf(txt_f)
+                                if reg_f and reg_f != r_mat.get("Régimen Fiscal Emisor"):
+                                    df_proc.at[r_idx, "Régimen Fiscal Emisor"] = reg_f
+                                    t_c_n, op_n, c_p_n, c_c_n, desc_n, rfte_n, rica_n, riva_n, c_rf_n, c_iv_n, c_ri_n, cat_n, razon_n, audit_n = clasificar_factura(
+                                        df_proc.at[r_idx, "NIT Emisor"], df_proc.at[r_idx, "Proveedor"],
+                                        df_proc.at[r_idx, "Base"], df_proc.at[r_idx, "IVA"],
+                                        df_proc.at[r_idx, "Operacion"], reg_f, empresa
+                                    )
+                                    df_proc.at[r_idx, "ReteFuente"] = rfte_n
+                                    df_proc.at[r_idx, "ReteICA"] = rica_n
+                                    df_proc.at[r_idx, "ReteIVA"] = riva_n
+                                    df_proc.at[r_idx, "Cta ReteFuente"] = c_rf_n
+                                    df_proc.at[r_idx, "Cta ReteICA"] = c_ri_n
+                                    df_proc.at[r_idx, "Razón Contable"] = razon_n
+                                    df_proc.at[r_idx, "Audit Info"] = audit_n
+                                    df_proc.at[r_idx, "Neto a Pagar"] = round(df_proc.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
+                                    total_modificados += 1
+                            except:
+                                pass
+                    st.session_state["df_procesado"] = df_proc
+                    guardar_trabajo_en_historial(
+                        empresa, df_proc,
+                        excel_bytes=st.session_state.get("excel_bytes"),
+                        excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                        dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+                        dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+                        zip_bytes=st.session_state.get("zip_pdfs"),
+                        job_id=st.session_state.get("job_actual_id")
+                    )
+                    st.success(f"Auditoría de PDFs completada: se revisaron todas las facturas y se actualizaron {total_modificados} con su régimen oficial extraído del PDF.")
+                    st.rerun()
+                else:
+                    st.warning("Primero sube los PDFs en el campo 2 para poder escanearlos.")
+
         st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Régimen Fiscal Emisor", "Base", "IVA", "ReteFuente", "ReteICA", "ReteIVA", "Neto a Pagar", "Soporte PDF Renombrado"]], use_container_width=True)
 
         st.markdown("---")
@@ -1198,6 +1277,60 @@ with tab_auditoria:
                 </ul>
             </div>
             """, unsafe_allow_html=True)
+
+            with st.expander("⚙️ Corregir / Ajustar Régimen de este Proveedor manualmente:", expanded=False):
+                st.caption("Si la factura física o el RUT indica un régimen diferente, cámbialo aquí para recalcular el asiento al instante:")
+                c_mod1, c_mod2 = st.columns()
+                with c_mod1:
+                    opciones_reg_man = [
+                        "O-48 (Responsable de IVA / Común - Retención Ordinaria)",
+                        "O-15 (Autorretenedor de Renta - Sin ReteFuente)",
+                        "O-13 (Gran Contribuyente - Sin ReteIVA)",
+                        "O-13;O-15 (Gran Contribuyente y Autorretenedor)",
+                        "O-47 (Régimen Simple - Exento ReteFuente y ReteIVA)",
+                        "O-49 (No Responsable de IVA)"
+                    ]
+                    idx_actual = 0
+                    reg_actual = str(fac_sel.get("Régimen Fiscal Emisor", ""))
+                    if "O-13" in reg_actual and "O-15" in reg_actual: idx_actual = 3
+                    elif "O-15" in reg_actual: idx_actual = 1
+                    elif "O-13" in reg_actual: idx_actual = 2
+                    elif "O-47" in reg_actual: idx_actual = 4
+                    elif "O-49" in reg_actual: idx_actual = 5
+                    
+                    nuevo_reg_sel = st.selectbox("Selecciona Régimen Fiscal:", opciones_reg_man, index=idx_actual, key=f"sel_reg_{fac_sel['Comprobante Siigo']}")
+                with c_mod2:
+                    st.write("")
+                    st.write("")
+                    if st.button("💾 Aplicar Cambio", key=f"btn_aplica_reg_{fac_sel['Comprobante Siigo']}"):
+                        cod_reg = nuevo_reg_sel.split()[0]
+                        r_idx = df_p[df_p["Comprobante Siigo"] == comp_sel].index[0]
+                        df_p.at[r_idx, "Régimen Fiscal Emisor"] = cod_reg
+                        t_c_n, op_n, c_p_n, c_c_n, desc_n, rfte_n, rica_n, riva_n, c_rf_n, c_iv_n, c_ri_n, cat_n, razon_n, audit_n = clasificar_factura(
+                            df_p.at[r_idx, "NIT Emisor"], df_p.at[r_idx, "Proveedor"],
+                            df_p.at[r_idx, "Base"], df_p.at[r_idx, "IVA"],
+                            df_p.at[r_idx, "Operacion"], cod_reg, empresa
+                        )
+                        df_p.at[r_idx, "ReteFuente"] = rfte_n
+                        df_p.at[r_idx, "ReteICA"] = rica_n
+                        df_p.at[r_idx, "ReteIVA"] = riva_n
+                        df_p.at[r_idx, "Cta ReteFuente"] = c_rf_n
+                        df_p.at[r_idx, "Cta ReteICA"] = c_ri_n
+                        df_p.at[r_idx, "Razón Contable"] = razon_n
+                        df_p.at[r_idx, "Audit Info"] = audit_n
+                        df_p.at[r_idx, "Neto a Pagar"] = round(df_p.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
+                        st.session_state["df_procesado"] = df_p
+                        guardar_trabajo_en_historial(
+                            empresa, df_p,
+                            excel_bytes=st.session_state.get("excel_bytes"),
+                            excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                            dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+                            dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+                            zip_bytes=st.session_state.get("zip_pdfs"),
+                            job_id=st.session_state.get("job_actual_id")
+                        )
+                        st.success(f"¡Régimen de {fac_sel['Proveedor']} actualizado a {cod_reg} y asiento recalculado!")
+                        st.rerun()
             
             if es_aduanero:
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -1355,7 +1488,7 @@ with tab_auditoria:
 
         elif dict_orig or dict_renom:
             # Hay PDFs subidos pero no se identificó automáticamente esta factura
-            st.warning("⚠️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
+            st.warning("⚠️️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
             todos_los_pdfs = {**dict_orig, **dict_renom}
             pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()))
             if pdf_elegido:
