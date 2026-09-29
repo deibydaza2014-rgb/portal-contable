@@ -283,16 +283,22 @@ def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, e
                 zf.write(zip_bytes)
                 
         now_disp = datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p")
+        # Verificar archivos físicos guardados en disco
+        n_orig_disco = len(os.listdir(dir_orig)) if os.path.exists(dir_orig) else 0
+        n_renom_disco = len(os.listdir(dir_renom)) if os.path.exists(dir_renom) else 0
+        tiene_excel = os.path.exists(os.path.join(job_dir, "excel_original.xlsx")) or (excel_bytes is not None)
+        
         meta = {
             "id": job_id,
             "nombre_trabajo": f"Trabajo del {now_disp} ({excel_nombre})",
             "archivo_excel": excel_nombre,
+            "tiene_excel": tiene_excel,
             "fecha": now_disp,
             "total_facturas": len(df_procesado) if df_procesado is not None else 0,
             "consecutivo_inicial": consecutivo_ini,
             "total_valor": float(df_procesado["Total"].sum()) if (df_procesado is not None and "Total" in df_procesado) else 0.0,
-            "total_pdfs_renombrados": len(dict_pdfs_renombrados) if dict_pdfs_renombrados else 0,
-            "total_pdfs_originales": len(dict_pdfs_originales) if dict_pdfs_originales else 0
+            "total_pdfs_renombrados": n_renom_disco,
+            "total_pdfs_originales": n_orig_disco
         }
         with open(os.path.join(job_dir, "meta.json"), "w", encoding="utf-8") as mf:
             json.dump(meta, mf, ensure_ascii=False, indent=2)
@@ -392,6 +398,17 @@ def cargar_trabajo_historial(empresa_dict, job_id):
     if os.path.exists(zip_file):
         with open(zip_file, "rb") as zf:
             zip_bytes = zf.read()
+    elif dict_renom or dict_orig:
+        try:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf_temp:
+                fuente = dict_renom if dict_renom else dict_orig
+                for fn, bdata in fuente.items():
+                    zf_temp.writestr(fn, bdata)
+            buf.seek(0)
+            zip_bytes = buf.getvalue()
+        except Exception:
+            pass
             
     return df, dict_renom, dict_orig, excel_bytes, excel_nombre, zip_bytes
 
@@ -781,12 +798,25 @@ with tab_compras:
     with c_con4:
         clave_pdf_extra = st.text_input("Clave PDF (opcional):", type="password", help="Si algún archivo PDF tiene contraseña específica, ingrésala aquí.")
         
-    # Almacenar PDFs originales subidos en session_state de inmediato
+    # Almacenar PDFs originales subidos en session_state y en el historial de inmediato
     if archivos_pdfs:
         if "raw_uploaded_pdfs" not in st.session_state:
             st.session_state["raw_uploaded_pdfs"] = {}
         for p in archivos_pdfs:
             st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
+            
+        st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
+            empresa,
+            st.session_state.get("df_procesado"),
+            excel_bytes=st.session_state.get("excel_bytes"),
+            excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+            dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+            dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+            zip_bytes=st.session_state.get("zip_pdfs"),
+            consecutivo_ini=cons_ini_fac,
+            job_id=st.session_state.get("job_actual_id")
+        )
+        st.success(f"💾 **{len(archivos_pdfs)} archivo(s) PDF guardados** en el Historial de {empresa['nombre']}.")
 
     if archivo_excel is not None:
         st.session_state["excel_bytes"] = archivo_excel.getvalue()
@@ -892,7 +922,7 @@ with tab_compras:
         df_proc = pd.DataFrame(filas)
         st.session_state["df_procesado"] = df_proc
         
-        # Guardar automáticamente en historial de trabajos
+        # Guardar automáticamente en historial de trabajos (Excel + PDFs + Registros)
         st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
             empresa, df_proc,
             excel_bytes=st.session_state.get("excel_bytes"),
@@ -903,7 +933,39 @@ with tab_compras:
             consecutivo_ini=cons_ini_fac,
             job_id=st.session_state.get("job_actual_id")
         )
+        st.success(f"💾 **Reporte Excel '{archivo_excel.name}' guardado** exitosamente en el Historial de {empresa['nombre']}.")
+
+    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+        df_proc = st.session_state["df_procesado"]
         
+        c_job1, c_job2, c_job3 = st.columns([2.5, 1, 1])
+        with c_job1:
+            n_orig_mem = len(st.session_state.get("raw_uploaded_pdfs", {}))
+            n_renom_mem = len(st.session_state.get("dict_pdfs", {}))
+            nom_ex = st.session_state.get("excel_nombre", "Reporte.xlsx")
+            st.info(f"📂 **Trabajo Activo:** `{nom_ex}` ({len(df_proc)} facturas) | 📑 **{n_orig_mem} PDFs guardados** | 📄 **{n_renom_mem} procesados**")
+        with c_job2:
+            if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
+                st.download_button(
+                    label="📥 Descargar Excel",
+                    data=st.session_state["excel_bytes"],
+                    file_name=st.session_state.get("excel_nombre", "Reporte_Guardado.xlsx"),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_dl_excel_tab_compras",
+                    use_container_width=True
+                )
+        with c_job3:
+            if "zip_pdfs" in st.session_state and st.session_state["zip_pdfs"]:
+                st.download_button(
+                    label="📦 Descargar ZIP Facturas",
+                    data=st.session_state["zip_pdfs"],
+                    file_name=f"Facturas_{empresa['nombre'].replace(' ', '_')}.zip",
+                    mime="application/zip",
+                    key="btn_dl_zip_tab_compras",
+                    use_container_width=True
+                )
+
+    
         c_aud_btn1, c_aud_btn2 = st.columns(2)
         with c_aud_btn1:
             st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
@@ -979,7 +1041,7 @@ with tab_compras:
         if st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora"):
             buffer_zip = io.BytesIO()
             total_generados = 0
-            
+
             if "dict_pdfs" not in st.session_state:
                 st.session_state["dict_pdfs"] = {}
 
@@ -990,7 +1052,7 @@ with tab_compras:
                 pdfs_a_procesar = archivos_pdfs if archivos_pdfs else [
                     io.BytesIO(b_bytes) for b_bytes in st.session_state.get("raw_uploaded_pdfs", {}).values()
                 ]
-                
+
                 for idx_pdf, pdf_item in enumerate(pdfs_a_procesar):
                     try:
                         pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
@@ -1000,7 +1062,7 @@ with tab_compras:
                             claves_probar = []
                             if "clave_pdf_extra" in locals() and clave_pdf_extra:
                                 claves_probar.append(clave_pdf_extra.strip())
-                            
+
                             # NITs empresa compradora
                             nit_rec = re.sub(r"\D", "", str(empresa.get("nit", "")))
                             if nit_rec:
@@ -1009,14 +1071,14 @@ with tab_compras:
                                 else:
                                     claves_probar.extend([nit_rec, f"{nit_rec}5", f"{nit_rec}-5"])
                             claves_probar.extend(["901346412", "9013464125", "901346412-5", ""])
-                            
+
                             # NITs emisores en reporte
                             if not df_ref.empty:
                                 for n_e in df_ref["NIT Emisor"].dropna().unique():
                                     n_c = re.sub(r"\D", "", str(n_e))
                                     if n_c and len(n_c) >= 7:
                                         claves_probar.append(n_c)
-                            
+
                             for pwd in claves_probar:
                                 try:
                                     res_dec = reader.decrypt(pwd)
@@ -1025,11 +1087,11 @@ with tab_compras:
                                         break
                                 except:
                                     pass
-                                    
+
                             if reader.is_encrypted and not desencriptado:
                                 st.warning(f"⚠️ No se pudo desencriptar automáticamente {pdf_name}. Ingrese la contraseña en el campo correspondiente.")
                                 continue
-                        
+
                         num_pags = len(reader.pages)
 
                         # Caso 1: Archivo de una sola página o modo sin separación
@@ -1040,7 +1102,7 @@ with tab_compras:
                                 writer.add_page(page)
                                 try: texto_pdf += page.extract_text() + "\n"
                                 except: pass
-                            
+
                             nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_name}"
                             if not df_ref.empty:
                                 for _, r_mat in df_ref.iterrows():
@@ -1049,7 +1111,7 @@ with tab_compras:
                                     if (folio_m and folio_m in texto_pdf) or (nit_m and nit_m in texto_pdf):
                                         nombre_final = r_mat["Soporte PDF Renombrado"]
                                         break
-                            
+
                             # Escaneo de régimen fiscal en el texto del PDF
                             regimen_escaneado = escanear_regimen_texto_pdf(texto_pdf)
                             if regimen_escaneado and not df_ref.empty:
@@ -1072,7 +1134,7 @@ with tab_compras:
                                         df_ref.at[r_idx, "Audit Info"] = audit_n
                                         df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
                                         break
-                                        
+
                             pdf_bytes = io.BytesIO()
                             writer.write(pdf_bytes)
                             pdf_bytes.seek(0)
@@ -1088,13 +1150,13 @@ with tab_compras:
                                 writer.add_page(reader.pages[p_i])
                                 if p_i + 1 < num_pags:
                                     writer.add_page(reader.pages[p_i + 1])
-                                
+
                                 fac_idx = p_i // 2
                                 if not df_ref.empty and fac_idx < len(df_ref):
                                     nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"]
                                 else:
                                     nombre_final = f"Factura_Pags_{p_i+1}-{p_i+2}_{pdf_name}"
-                                    
+
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
                                 pdf_bytes.seek(0)
@@ -1110,13 +1172,13 @@ with tab_compras:
                                 for off in range(3):
                                     if p_i + off < num_pags:
                                         writer.add_page(reader.pages[p_i + off])
-                                
+
                                 fac_idx = p_i // 3
                                 if not df_ref.empty and fac_idx < len(df_ref):
                                     nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"]
                                 else:
                                     nombre_final = f"Factura_Pags_{p_i+1}-{p_i+3}_{pdf_name}"
-                                    
+
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
                                 pdf_bytes.seek(0)
@@ -1134,7 +1196,7 @@ with tab_compras:
                                     nombre_final = df_ref.iloc[p_i]["Soporte PDF Renombrado"]
                                 else:
                                     nombre_final = f"Factura_Pag_{p_i+1}_{pdf_name}"
-                                    
+
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
                                 pdf_bytes.seek(0)
@@ -1158,7 +1220,7 @@ with tab_compras:
                                     pref_cand = str(r_cand["Prefijo"]).replace("-", "").strip().upper()
                                     fac_cand = str(r_cand["Factura"]).replace("-", "").strip().upper()
                                     nit_cand = str(r_cand["NIT Emisor"]).replace("-", "").strip().upper()
-                                    
+
                                     if pref_cand and fol_cand and (pref_cand + fol_cand) in t_clean:
                                         return r_cand
                                     if fac_cand and len(fac_cand) >= 4 and fac_cand in t_clean:
@@ -1172,15 +1234,15 @@ with tab_compras:
                             for p_idx in range(num_pags):
                                 try: txt_p = reader.pages[p_idx].extract_text() or ""
                                 except: txt_p = ""
-                                
+
                                 # Escaneo automático del Régimen Fiscal en el texto de la página
                                 reg_detectado = escanear_regimen_texto_pdf(txt_p)
-                                
+
                                 m_pag = patron_pag.search(txt_p)
                                 cur_p, tot_p = (int(m_pag.group(1)), int(m_pag.group(2))) if m_pag else (None, None)
-                                
+
                                 inv_encontrada = buscar_coincidencia_factura(txt_p)
-                                
+
                                 es_inicio_nueva_factura = False
                                 if cur_p == 1:
                                     es_inicio_nueva_factura = True
@@ -1247,7 +1309,7 @@ with tab_compras:
             st.session_state["zip_pdfs"] = buffer_zip.getvalue()
             st.session_state["total_zip_pdfs"] = total_generados
             st.session_state["df_procesado"] = df_ref
-            
+
             # Guardar trabajo actualizado con PDFs procesados
             guardar_trabajo_en_historial(
                 empresa, df_ref,
@@ -1269,16 +1331,11 @@ with tab_compras:
                 mime="application/zip",
                 use_container_width=True
             )
-            
-    elif "df_procesado" in st.session_state:
-        st.info("ℹ️ Tienes un trabajo cargado en memoria. Puedes descargar su Excel original o auditar sus facturas.")
-        if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
-            st.download_button(
-                label=f"📥 Descargar Archivo Excel de este Trabajo ({st.session_state.get('excel_nombre', 'Reporte.xlsx')})",
-                data=st.session_state["excel_bytes"],
-                file_name=st.session_state.get("excel_nombre", "Reporte_Guardado.xlsx"),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+
+
+
+    else:
+        st.info("💡 Sube el reporte Excel de la DIAN arriba o carga un trabajo guardado desde el **Historial de Trabajos** para comenzar.")
 
 with tab_auditoria:
     st.markdown("### Modulo de Auditoria Contable y Trazabilidad")
