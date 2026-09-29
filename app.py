@@ -1,3 +1,6 @@
+import pickle
+import shutil
+import json
 import base64
 import streamlit as st
 import streamlit.components.v1 as components
@@ -7,6 +10,7 @@ import io
 import zipfile
 import re
 import datetime
+import os
 from pypdf import PdfReader, PdfWriter
 
 st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
@@ -224,6 +228,127 @@ with col_nav2:
 
 st.markdown("---")
 
+# ==============================================================================
+# PERSISTENCIA Y GUARDADO DE SESIONES
+# ==============================================================================
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "almacenamiento_contable")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def get_empresa_dir(empresa_dict):
+    nit_clean = re.sub(r"\D", "", str(empresa_dict.get("nit", "empresa")))
+    d = os.path.join(DATA_DIR, nit_clean)
+    os.makedirs(d, exist_ok=True)
+    os.makedirs(os.path.join(d, "pdfs"), exist_ok=True)
+    return d
+
+def guardar_trabajo_empresa(empresa_dict, df_procesado, dict_pdfs=None, zip_bytes=None, consecutivo_ini=680):
+    try:
+        d = get_empresa_dir(empresa_dict)
+        with open(os.path.join(d, "df_procesado.pkl"), "wb") as f:
+            pickle.dump(df_procesado, f)
+        if dict_pdfs:
+            pdf_dir = os.path.join(d, "pdfs")
+            for nombre, bdata in dict_pdfs.items():
+                with open(os.path.join(pdf_dir, nombre), "wb") as pf:
+                    pf.write(bdata)
+        if zip_bytes:
+            with open(os.path.join(d, "paquete_facturas.zip"), "wb") as zf:
+                zf.write(zip_bytes)
+        meta = {
+            "empresa": empresa_dict.get("nombre", ""),
+            "nit": empresa_dict.get("nit", ""),
+            "fecha_guardado": datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "total_facturas": len(df_procesado) if df_procesado is not None else 0,
+            "consecutivo_inicial": consecutivo_ini,
+            "total_valor": float(df_procesado["Total"].sum()) if (df_procesado is not None and "Total" in df_procesado) else 0.0,
+            "pdfs_guardados": len(dict_pdfs) if dict_pdfs else 0
+        }
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as mf:
+            json.dump(meta, mf, ensure_ascii=False, indent=2)
+        return True
+    except:
+        return False
+
+def existe_trabajo_guardado(empresa_dict):
+    d = get_empresa_dir(empresa_dict)
+    return os.path.exists(os.path.join(d, "df_procesado.pkl")) and os.path.exists(os.path.join(d, "meta.json"))
+
+def cargar_meta_trabajo(empresa_dict):
+    d = get_empresa_dir(empresa_dict)
+    meta_path = os.path.join(d, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return None
+
+def cargar_trabajo_guardado(empresa_dict):
+    d = get_empresa_dir(empresa_dict)
+    pkl_path = os.path.join(d, "df_procesado.pkl")
+    df = None
+    dict_pdfs = {}
+    zip_bytes = None
+    if os.path.exists(pkl_path):
+        with open(pkl_path, "rb") as f:
+            df = pickle.load(f)
+    pdf_dir = os.path.join(d, "pdfs")
+    if os.path.exists(pdf_dir):
+        for fn in os.listdir(pdf_dir):
+            if fn.endswith(".pdf"):
+                with open(os.path.join(pdf_dir, fn), "rb") as f:
+                    dict_pdfs[fn] = f.read()
+    zip_path = os.path.join(d, "paquete_facturas.zip")
+    if os.path.exists(zip_path):
+        with open(zip_path, "rb") as f:
+            zip_bytes = f.read()
+    return df, dict_pdfs, zip_bytes
+
+def borrar_trabajo_guardado(empresa_dict):
+    d = get_empresa_dir(empresa_dict)
+    if os.path.exists(d):
+        shutil.rmtree(d)
+        os.makedirs(d, exist_ok=True)
+        os.makedirs(os.path.join(d, "pdfs"), exist_ok=True)
+
+# BANNER DE AUTO-RECUPERACIÓN DE TRABAJO GUARDADO
+if existe_trabajo_guardado(empresa):
+    meta_inf = cargar_meta_trabajo(empresa)
+    f_guardado = meta_inf.get("fecha_guardado", "Reciente") if meta_inf else "Reciente"
+    n_fac = meta_inf.get("total_facturas", 0) if meta_inf else 0
+    tot_v = meta_inf.get("total_valor", 0.0) if meta_inf else 0.0
+    n_pdf = meta_inf.get("pdfs_guardados", 0) if meta_inf else 0
+    
+    col_g1, col_g2 = st.columns()
+    with col_g1:
+        st.info(f"💾 **Sesión anterior guardada:** Fecha: **{f_guardado}** | **{n_fac} facturas** (${tot_v:,.2f}) | **{n_pdf} PDFs listos**.")
+    with col_g2:
+        cg1, cg2 = st.columns(2)
+        with cg1:
+            if st.button("📂 Cargar Sesión", key="btn_cargar_sesion_guardada"):
+                df_g, pdfs_g, zip_g = cargar_trabajo_guardado(empresa)
+                if df_g is not None:
+                    st.session_state["df_procesado"] = df_g
+                if pdfs_g:
+                    st.session_state["dict_pdfs"] = pdfs_g
+                if zip_g:
+                    st.session_state["zip_pdfs"] = zip_g
+                    st.session_state["total_zip_pdfs"] = len(pdfs_g)
+                st.success("¡Sesión restaurada con éxito!")
+                st.rerun()
+        with cg2:
+            if st.button("🗑️ Descartar", key="btn_descartar_guardado"):
+                borrar_trabajo_guardado(empresa)
+                if "df_procesado" in st.session_state:
+                    del st.session_state["df_procesado"]
+                if "dict_pdfs" in st.session_state:
+                    del st.session_state["dict_pdfs"]
+                st.warning("Sesión anterior descartada.")
+                st.rerun()
+
+st.markdown("---")
+
 tab_compras, tab_auditoria, tab_siigo = st.tabs([
     "1. Cargar Documentos, Desbloquear y Renombrar PDFs",
     "2. Auditoria y Trazabilidad Fiscal",
@@ -258,14 +383,53 @@ CODIGOS_IMPUESTO_SIIGO = {
 
 AGENTES_ADUANEROS = ["DHL", "ADUANA", "EURO SHIPPING", "PORTUARIA", "ALMACENADORA", "CARGO", "TRADE GLOBAL", "TERMINAL", "BUENAVENTURA"]
 
+def escanear_regimen_texto_pdf(texto):
+    if not texto:
+        return ""
+    codigos = set()
+    txt_lower = texto.lower()
+    
+    # 1. Regex de códigos DIAN oficiales (O-13, O-15, O-23, O-47, etc.)
+    for c in re.findall(r"\b([Oo0]-[0-9]{2}(?:-[A-Za-z0-9]+)?)\b", texto):
+        codigos.add(c.upper().replace("0-", "O-"))
+        
+    # 2. Textos comunes en facturas colombianas
+    if "gran contribuyente" in txt_lower or "grandes contribuyentes" in txt_lower:
+        codigos.add("O-13")
+    if "autorretenedor" in txt_lower or "autoretenedor" in txt_lower or "autorretenedores" in txt_lower:
+        codigos.add("O-15")
+    if "simple" in txt_lower and ("régimen" in txt_lower or "regimen" in txt_lower or "tributación" in txt_lower or "tributacion" in txt_lower):
+        codigos.add("O-47")
+        
+    # 3. Línea explícita Régimen Fiscal: o Responsabilidad Fiscal:
+    m = re.search(r"(?:r[eé]gimen\s*fiscal|responsabilidad(?:es)?\s*(?:fiscal(?:es)?)?)\s*[:\s]*([^\n\r\|\<\>]+)", texto, re.IGNORECASE)
+    if m:
+        val = m.group(1).strip()
+        for c in re.findall(r"([Oo0]-[0-9]{2}(?:-[A-Za-z0-9]+)?)", val):
+            codigos.add(c.upper().replace("0-", "O-"))
+            
+    if codigos:
+        return ";".join(sorted(list(codigos)))
+    elif m:
+        return m.group(1).strip()[:40]
+    return ""
+
 def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_doc, resp_emisor="", empresa_compradora=None):
     nombre = str(nombre_emisor).upper()
     resp = str(resp_emisor).upper()
     if empresa_compradora is None:
         empresa_compradora = {"es_gran_contribuyente": False, "es_autorretenedor": False}
-    es_nc = "CREDITO" in str(tipo_doc).upper() or "CRÉDITO" in str(tipo_doc).upper()
-    t_comp = 17 if es_nc else 10
-    op = "Devolucion Compra" if es_nc else "Compra"
+        
+    tipo_str = str(tipo_doc).upper()
+    if "CREDITO" in tipo_str or "CRÉDITO" in tipo_str or "NC" in tipo_str or "DEVOLUCION" in tipo_str:
+        t_comp = 17
+        op = "Devolucion Compra"
+    elif "NOTA" in tipo_str or "AJUSTE" in tipo_str or "CONTABILIDAD" in tipo_str:
+        t_comp = 14
+        op = "Nota Contabilidad"
+    else:
+        t_comp = 10
+        op = "Compra"
     
     # 1. Agentes Aduaneros e Importaciones
     if any(k in nombre for k in AGENTES_ADUANEROS):
@@ -383,25 +547,24 @@ with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
     st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs para desbloquear y renombrar automáticamente por comprobante.")
     
-    col_u1, col_u2, col_u3 = st.columns([1.5, 1.5, 1.2])
+    col_u1, col_u2 = st.columns(2)
     with col_u1:
         archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo y renombrado)", type=["pdf"], accept_multiple_files=True)
-    with col_u3:
-        consecutivo_inicial = st.number_input(
-            "3. ¿En qué consecutivo vas? (Siigo):",
-            min_value=1,
-            max_value=999999,
-            value=680,
-            step=1,
-            help="Digita el número de comprobante con el que comenzará la primera factura."
-        )
-        clave_pdf_extra = st.text_input(
-            "Contraseña PDFs (opcional):",
-            type="password",
-            help="Si alguna factura viene con contraseña especial, ingrésala aquí."
-        )
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (desbloqueo y escaneo de régimen)", type=["pdf"], accept_multiple_files=True)
+        
+    st.markdown("##### 🔢 3. Consecutivos Iniciales por Tipo de Comprobante Siigo:")
+    st.caption("Cada tipo de comprobante lleva su propia numeración independiente. Digita en qué número vas en cada uno:")
+    
+    c_con1, c_con2, c_con3, c_con4 = st.columns(4)
+    with c_con1:
+        cons_ini_fac = st.number_input("Facturas de Compra (Tipo 10):", min_value=1, max_value=999999, value=680, step=1, help="Consecutivo inicial para facturas de compra normales.")
+    with c_con2:
+        cons_ini_nc = st.number_input("Notas Crédito (Tipo 17):", min_value=1, max_value=999999, value=1, step=1, help="Consecutivo inicial para notas crédito / devoluciones.")
+    with c_con3:
+        cons_ini_nota = st.number_input("Notas de Contabilidad (Tipo 14):", min_value=1, max_value=999999, value=1, step=1, help="Consecutivo inicial para notas contables o ajustes.")
+    with c_con4:
+        clave_pdf_extra = st.text_input("Clave PDF (opcional):", type="password", help="Si algún archivo PDF tiene contraseña específica, ingrésala aquí.")
         
     if archivo_excel is not None:
         df_dian = pd.read_excel(archivo_excel)
@@ -420,6 +583,12 @@ with tab_compras:
         
         st.success(f"Reporte procesado y ordenado cronológicamente (Enero a la fecha): **{len(df_dian)} facturas identificadas**.")
         
+        contadores_consecutivos = {
+            10: int(cons_ini_fac),
+            17: int(cons_ini_nc),
+            14: int(cons_ini_nota),
+            16: int(cons_ini_fac)
+        }
         filas = []
         for idx, r in df_dian.iterrows():
             tipo_doc = r.get("Tipo de documento") or r.get("Tipo documento") or "Factura electrónica"
@@ -457,7 +626,8 @@ with tab_compras:
             t_comp, op, cta_p, cta_c, desc, rfte, rica, riva, cta_rfte, cta_iva, cta_rica, cat, razon, audit_dict = clasificar_factura(
                 nit_e, nom_e, base, iva, tipo_doc, resp_e, empresa
             )
-            consecutivo = int(consecutivo_inicial) + idx
+            consecutivo = contadores_consecutivos.get(t_comp, 1)
+            contadores_consecutivos[t_comp] += 1
             
             nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
             nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
@@ -496,6 +666,7 @@ with tab_compras:
             
         df_proc = pd.DataFrame(filas)
         st.session_state["df_procesado"] = df_proc
+        guardar_trabajo_empresa(empresa, df_proc, st.session_state.get("dict_pdfs", {}), st.session_state.get("zip_pdfs"), cons_ini_fac)
         
         st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
         st.dataframe(df_proc[["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Régimen Fiscal Emisor", "Base", "IVA", "ReteFuente", "ReteICA", "ReteIVA", "Neto a Pagar", "Soporte PDF Renombrado"]], use_container_width=True)
@@ -587,6 +758,30 @@ with tab_compras:
                                         nombre_final = r_mat["Soporte PDF Renombrado"]
                                         break
                             
+                            # Escaneo de régimen fiscal en el texto del PDF
+                            regimen_escaneado = escanear_regimen_texto_pdf(texto_pdf)
+                            if regimen_escaneado and not df_ref.empty:
+                                for r_idx, r_mat in df_ref.iterrows():
+                                    fol_m = str(r_mat["Folio"]).strip()
+                                    nit_m = str(r_mat["NIT Emisor"]).strip()
+                                    if (fol_m and fol_m in texto_pdf) or (nit_m and nit_m in texto_pdf):
+                                        df_ref.at[r_idx, "Régimen Fiscal Emisor"] = regimen_escaneado
+                                        # Recalcular retenciones con el régimen real escaneado del PDF
+                                        _, _, _, _, _, rfte_n, rica_n, riva_n, cta_rf_n, _, cta_ri_n, _, razon_n, audit_n = clasificar_factura(
+                                            df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
+                                            df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
+                                            df_ref.at[r_idx, "Operacion"], regimen_escaneado, empresa
+                                        )
+                                        df_ref.at[r_idx, "ReteFuente"] = rfte_n
+                                        df_ref.at[r_idx, "ReteICA"] = rica_n
+                                        df_ref.at[r_idx, "ReteIVA"] = riva_n
+                                        df_ref.at[r_idx, "Cta ReteFuente"] = cta_rf_n
+                                        df_ref.at[r_idx, "Cta ReteICA"] = cta_ri_n
+                                        df_ref.at[r_idx, "Razón Contable"] = razon_n
+                                        df_ref.at[r_idx, "Audit Info"] = audit_n
+                                        df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
+                                        break
+                                        
                             pdf_bytes = io.BytesIO()
                             writer.write(pdf_bytes)
                             pdf_bytes.seek(0)
@@ -659,69 +854,110 @@ with tab_compras:
 
                         # Caso 5: Detección inteligente por CUFE, Folio o 'Página 1 de N'
                         else:
-                            textos_por_pag = []
-                            for p in reader.pages:
-                                try: textos_por_pag.append(p.extract_text() or "")
-                                except: textos_por_pag.append("")
-                            
-                            inicios_factura = [0]
-                            patron_p1 = re.compile(r'(?:P[ÁAáa]G(?:INA|\.)?|HOJA|PAGE)\s*1\s*(?:DE|\/|OF)\s*(\d+)', re.IGNORECASE)
-                            
-                            for p_idx in range(1, num_pags):
-                                txt_act = textos_por_pag[p_idx]
-                                es_inicio = False
+                            patron_pag = re.compile(r'(?:P[ÁAáa]G(?:INA|\.)?|HOJA|PAGE)\s*(\d+)\s*(?:DE|\/|OF)\s*(\d+)', re.IGNORECASE)
+                            curr_writer = None
+                            curr_inv_row = None
+                            paginas_del_comprobante = 0
+                            facturas_generadas = []
+
+                            def buscar_coincidencia_factura(texto_pagina):
+                                t_clean = texto_pagina.replace("-", "").replace(" ", "").upper()
+                                for _, r_cand in df_ref.iterrows():
+                                    fol_cand = str(r_cand["Folio"]).replace("-", "").strip().upper()
+                                    pref_cand = str(r_cand["Prefijo"]).replace("-", "").strip().upper()
+                                    fac_cand = str(r_cand["Factura"]).replace("-", "").strip().upper()
+                                    nit_cand = str(r_cand["NIT Emisor"]).replace("-", "").strip().upper()
+                                    
+                                    if pref_cand and fol_cand and (pref_cand + fol_cand) in t_clean:
+                                        return r_cand
+                                    if fac_cand and len(fac_cand) >= 4 and fac_cand in t_clean:
+                                        return r_cand
+                                    if nit_cand and fol_cand and len(fol_cand) >= 3 and (nit_cand in t_clean and fol_cand in t_clean):
+                                        return r_cand
+                                    if fol_cand and len(fol_cand) >= 4 and fol_cand in t_clean:
+                                        return r_cand
+                                return None
+
+                            for p_idx in range(num_pags):
+                                try: txt_p = reader.pages[p_idx].extract_text() or ""
+                                except: txt_p = ""
                                 
-                                if patron_p1.search(txt_act):
-                                    es_inicio = True
-                                elif not df_ref.empty:
-                                    for _, r_mat in df_ref.iterrows():
-                                        f_m = str(r_mat["Folio"]).strip()
-                                        if f_m and len(f_m) >= 3 and f_m in txt_act:
-                                            txt_ant = textos_por_pag[p_idx - 1]
-                                            if f_m not in txt_ant:
-                                                es_inicio = True
-                                                break
-                                if es_inicio:
-                                    inicios_factura.append(p_idx)
-                            
-                            inicios_factura.append(num_pags)
-                            
-                            for b_idx in range(len(inicios_factura) - 1):
-                                pag_ini = inicios_factura[b_idx]
-                                pag_fin = inicios_factura[b_idx + 1]
+                                # Escaneo automático del Régimen Fiscal en el texto de la página
+                                reg_detectado = escanear_regimen_texto_pdf(txt_p)
                                 
-                                writer = PdfWriter()
-                                txt_bloque = ""
-                                for p_num in range(pag_ini, pag_fin):
-                                    writer.add_page(reader.pages[p_num])
-                                    txt_bloque += textos_por_pag[p_num] + "\n"
+                                m_pag = patron_pag.search(txt_p)
+                                cur_p, tot_p = (int(m_pag.group(1)), int(m_pag.group(2))) if m_pag else (None, None)
                                 
-                                nombre_final = f"Factura_{b_idx+1}_Pags_{pag_ini+1}-{pag_fin}_{pdf_file.name}"
-                                if not df_ref.empty:
-                                    for _, r_mat in df_ref.iterrows():
-                                        f_m = str(r_mat["Folio"]).strip()
-                                        n_m = str(r_mat["NIT Emisor"]).strip()
-                                        if (f_m and len(f_m) >= 2 and f_m in txt_bloque) or (n_m and n_m in txt_bloque):
-                                            nombre_final = r_mat["Soporte PDF Renombrado"]
-                                            break
-                                    if "Factura_" in nombre_final and b_idx < len(df_ref):
-                                        nombre_final = df_ref.iloc[b_idx]["Soporte PDF Renombrado"]
+                                inv_encontrada = buscar_coincidencia_factura(txt_p)
                                 
-                                pdf_bytes = io.BytesIO()
-                                writer.write(pdf_bytes)
-                                pdf_bytes.seek(0)
-                                b_data = pdf_bytes.getvalue()
-                                zf.writestr(nombre_final, b_data)
-                                st.session_state["dict_pdfs"][nombre_final] = b_data
+                                es_inicio_nueva_factura = False
+                                if cur_p == 1:
+                                    es_inicio_nueva_factura = True
+                                elif cur_p is not None and cur_p > 1:
+                                    es_inicio_nueva_factura = False
+                                elif inv_encontrada is not None:
+                                    if curr_inv_row is None or inv_encontrada["Comprobante Siigo"] != curr_inv_row["Comprobante Siigo"]:
+                                        es_inicio_nueva_factura = True
+                                elif curr_inv_row is None:
+                                    es_inicio_nueva_factura = True
+
+                                if es_inicio_nueva_factura:
+                                    if curr_writer is not None and curr_inv_row is not None:
+                                        out_c = io.BytesIO()
+                                        curr_writer.write(out_c)
+                                        c_bytes = out_c.getvalue()
+                                        doc_nombre = curr_inv_row["Soporte PDF Renombrado"]
+                                        zf.writestr(doc_nombre, c_bytes)
+                                        st.session_state["dict_pdfs"][doc_nombre] = c_bytes
+                                        total_generados += 1
+                                        facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
+
+                                    curr_inv_row = inv_encontrada if inv_encontrada is not None else (df_ref.iloc[len(facturas_generadas)] if len(facturas_generadas) < len(df_ref) else None)
+                                    if curr_inv_row is not None and reg_detectado and not df_ref.empty:
+                                        r_idx = curr_inv_row.name
+                                        df_ref.at[r_idx, "Régimen Fiscal Emisor"] = reg_detectado
+                                        _, _, _, _, _, rfte_n, rica_n, riva_n, cta_rf_n, _, cta_ri_n, _, razon_n, audit_n = clasificar_factura(
+                                            df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
+                                            df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
+                                            df_ref.at[r_idx, "Operacion"], reg_detectado, empresa
+                                        )
+                                        df_ref.at[r_idx, "ReteFuente"] = rfte_n
+                                        df_ref.at[r_idx, "ReteICA"] = rica_n
+                                        df_ref.at[r_idx, "ReteIVA"] = riva_n
+                                        df_ref.at[r_idx, "Cta ReteFuente"] = cta_rf_n
+                                        df_ref.at[r_idx, "Cta ReteICA"] = cta_ri_n
+                                        df_ref.at[r_idx, "Razón Contable"] = razon_n
+                                        df_ref.at[r_idx, "Audit Info"] = audit_n
+                                        df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
+                                    curr_writer = PdfWriter()
+                                    curr_writer.add_page(reader.pages[p_idx])
+                                    paginas_del_comprobante = 1
+                                else:
+                                    if curr_writer is None:
+                                        curr_inv_row = df_ref.iloc[0] if len(df_ref) > 0 else None
+                                        curr_writer = PdfWriter()
+                                    curr_writer.add_page(reader.pages[p_idx])
+                                    paginas_del_comprobante += 1
+
+                            if curr_writer is not None and curr_inv_row is not None:
+                                out_c = io.BytesIO()
+                                curr_writer.write(out_c)
+                                c_bytes = out_c.getvalue()
+                                doc_nombre = curr_inv_row["Soporte PDF Renombrado"]
+                                zf.writestr(doc_nombre, c_bytes)
+                                st.session_state["dict_pdfs"][doc_nombre] = c_bytes
                                 total_generados += 1
-                                
+                                facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
+
                     except Exception as e:
                         st.error(f"Error procesando {pdf_file.name}: {e}")
 
             buffer_zip.seek(0)
             st.session_state["zip_pdfs"] = buffer_zip.getvalue()
             st.session_state["total_zip_pdfs"] = total_generados
-            st.success(f"¡Procesamiento exitoso! Se separaron y renombraron **{total_generados} facturas completas** vinculadas directamente a sus Comprobantes Siigo.")
+            st.session_state["df_procesado"] = df_ref
+            guardar_trabajo_empresa(empresa, df_ref, st.session_state["dict_pdfs"], st.session_state["zip_pdfs"], cons_ini_fac)
+            st.success(f"¡Procesamiento exitoso! Se separaron y renombraron **{total_generados} facturas completas** vinculadas a sus comprobantes y se actualizaron retenciones según el régimen extraído del PDF.")
 
         if "zip_pdfs" in st.session_state:
             st.download_button(
@@ -819,11 +1055,10 @@ with tab_auditoria:
         if pdf_bytes_encontrado:
             b64_pdf = base64.b64encode(pdf_bytes_encontrado).decode('utf-8')
             
-            # Encabezado visual y botón de descarga directa
             col_doc1, col_doc2 = st.columns(2)
             with col_doc1:
                 st.markdown(f"""
-                <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px;">
+                <div style="background:#0070ba; colorwhite; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:14px;">
                     📄 Documento Digitalizado Completo: Factura {fac_sel['Factura']} - {fac_sel['Proveedor']}
                 </div>
                 """, unsafe_allow_html=True)
@@ -836,7 +1071,6 @@ with tab_auditoria:
                     use_container_width=True
                 )
             
-            # Visor HTML5 con Canvas (100% compatible con Chrome, sin bloqueos de seguridad)
             html_visor = f"""
             <!DOCTYPE html>
             <html>
@@ -942,7 +1176,6 @@ with tab_auditoria:
         asiento_filas = []
         es_nc = "Devolucion" in str(fac_sel["Operacion"])
         
-        # 1. Gasto / Costo / Inventario
         asiento_filas.append({
             "Código Cuenta": fac_sel["Cta Principal"],
             "Descripción de la Cuenta": f"{fac_sel['Categoría']} - {fac_sel['Proveedor'][:25]}",
@@ -951,7 +1184,6 @@ with tab_auditoria:
             "Crédito ($)": fac_sel["Base"] if es_nc else 0.0
         })
         
-        # 2. IVA Descontable
         if fac_sel["IVA"] > 0:
             asiento_filas.append({
                 "Código Cuenta": fac_sel["Cta IVA"],
@@ -961,7 +1193,6 @@ with tab_auditoria:
                 "Crédito ($)": fac_sel["IVA"] if es_nc else 0.0
             })
             
-        # 3. Retención en la Fuente
         if fac_sel["ReteFuente"] > 0 and fac_sel["Cta ReteFuente"]:
             asiento_filas.append({
                 "Código Cuenta": fac_sel["Cta ReteFuente"],
@@ -971,7 +1202,6 @@ with tab_auditoria:
                 "Crédito ($)": 0.0 if es_nc else fac_sel["ReteFuente"]
             })
             
-        # 4. ReteICA
         if fac_sel.get("ReteICA", 0.0) > 0 and fac_sel.get("Cta ReteICA"):
             asiento_filas.append({
                 "Código Cuenta": fac_sel["Cta ReteICA"],
@@ -981,7 +1211,6 @@ with tab_auditoria:
                 "Crédito ($)": 0.0 if es_nc else fac_sel["ReteICA"]
             })
             
-        # 5. ReteIVA
         if fac_sel.get("ReteIVA", 0.0) > 0:
             asiento_filas.append({
                 "Código Cuenta": "23670101",
@@ -991,7 +1220,6 @@ with tab_auditoria:
                 "Crédito ($)": 0.0 if es_nc else fac_sel["ReteIVA"]
             })
             
-        # 6. Cuenta por Pagar (Proveedores)
         neto_cxp = round(fac_sel["Total"] - fac_sel["ReteFuente"] - fac_sel.get("ReteICA", 0.0) - fac_sel.get("ReteIVA", 0.0), 2)
         asiento_filas.append({
             "Código Cuenta": fac_sel["Cta Contrapartida"],
@@ -1029,7 +1257,6 @@ with tab_siigo:
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
         
-        # Generar archivo Excel con las 3 hojas completas
         wb = openpyxl.Workbook()
         
         # 1. Hoja matriz_captura
@@ -1197,14 +1424,11 @@ with tab_siigo:
         st.markdown("### 📊 Libro Auxiliar Contable: Facturas Una a Una y Consolidado")
         st.write("Genera el reporte administrativo con el detalle factura a factura y las hojas de consolidado por proveedor y cuentas contables:")
 
-        # Generar libro auxiliar con facturas una a una y consolidado
         out_aux = io.BytesIO()
         with pd.ExcelWriter(out_aux, engine='openpyxl') as writer_aux:
-            # Hoja 1: Factura a Factura (Detalle)
             cols_detalle = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Cta Principal", "Categoría", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Cta Contrapartida", "Razón Contable", "Soporte PDF Renombrado"]
             df_det_export = df_p[cols_detalle].copy()
             
-            # Fila de Totales al final del detalle
             totales_dict = {
                 "Comprobante Siigo": "TOTALES CONSOLIDADOS",
                 "Fecha": "-", "Factura": f"{len(df_det_export)} Docs", "Proveedor": "-", "NIT Emisor": "-",
@@ -1217,9 +1441,9 @@ with tab_siigo:
                 "Cta Contrapartida": "-", "Razón Contable": "-", "Soporte PDF Renombrado": "-"
             }
             df_det_export = pd.concat([df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
+            [df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
             df_det_export.to_excel(writer_aux, sheet_name="Facturas_Una_a_Una", index=False)
             
-            # Hoja 2: Consolidado por Proveedor
             df_cons_prov = df_p.groupby(["NIT Emisor", "Proveedor"]).agg({
                 "Comprobante Siigo": "count",
                 "Base": "sum",
@@ -1232,7 +1456,6 @@ with tab_siigo:
             df_cons_prov = df_cons_prov.sort_values(by="Total", ascending=False).reset_index(drop=True)
             df_cons_prov.to_excel(writer_aux, sheet_name="Consolidado_Proveedores", index=False)
             
-            # Hoja 3: Consolidado por Cuenta Contable
             df_cons_cta = df_p.groupby(["Cta Principal", "Categoría"]).agg({
                 "Comprobante Siigo": "count",
                 "Base": "sum",
