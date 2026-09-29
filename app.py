@@ -537,15 +537,22 @@ def auditar_regimen_desde_facturas_renombradas(df_ref, dict_renombrados, empresa
 
 def identificar_factura_en_texto(texto, df_ref):
     """
-    Motor de correspondencia estricta entre el texto del PDF y el registro contable:
-    Evalúa CUFE, Prefijo, Folio, NIT Emisor (sin puntos) y nombre comercial del proveedor.
-    Garantiza que la factura encontrada coincida 100% con el registro contable seleccionado.
+    Evalúa CUFE, Prefijo, Folio, NIT Emisor y nombre comercial del proveedor.
+    REGLA DE ORO: NUNCA empareja una factura basándose solo en el NIT del proveedor,
+    para evitar confundir múltiples facturas del mismo proveedor (ej. DHL, Claro, Siigo).
+    Debe coincidir obligatoriamente el CUFE o el Número de Factura (Prefijo + Folio).
     """
     if not texto or df_ref.empty:
         return None
     txt_clean = re.sub(r'[^A-Z0-9]', '', texto.upper())
     digits_only = re.sub(r'\D', '', texto)
     
+    # 1. Validación prioritaria por CUFE / Token (certeza absoluta del 100%)
+    for _, r_cand in df_ref.iterrows():
+        cufe_cand = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE / Token", "") or r_cand.get("CUFE", "") or "")).upper()
+        if len(cufe_cand) >= 15 and cufe_cand[:20] in txt_clean:
+            return r_cand
+            
     mejor_cand = None
     mejor_score = 0
     
@@ -559,14 +566,15 @@ def identificar_factura_en_texto(texto, df_ref):
         nit_c = re.sub(r'\D', '', str(r_cand.get("NIT Emisor", "")))
         nit_base = nit_c[:-1] if len(nit_c) >= 10 else nit_c
         
-        # 1. Validación por CUFE / Token (si está en el reporte, certeza total)
-        cufe_cand = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE / Token", "") or r_cand.get("CUFE", "") or "")).upper()
-        if len(cufe_cand) >= 20 and cufe_cand[:20] in txt_clean:
-            return r_cand
-            
         has_nit = (nit_c and len(nit_c) >= 6 and nit_c in digits_only) or (nit_base and len(nit_base) >= 6 and nit_base in digits_only)
         has_fac = (len(fac_full) >= 3 and fac_full in txt_clean) or (len(fac_full_sc) >= 3 and fac_full_sc in txt_clean)
         
+        if not has_fac and len(fol) >= 3:
+            # Buscar el folio explícito precedido por marcadores de factura
+            pat_fol = rf'(?:FACTURA|FAC|NO|NUMERO|N[°º]|VENTA)[\s\:\.\#\-_]*{re.escape(fol)}'
+            if re.search(pat_fol, texto, re.IGNORECASE):
+                has_fac = True
+                
         prov_words = [w for w in re.split(r'[^A-Z0-9]+', str(r_cand.get("Proveedor", "")).upper()) if len(w) >= 4 and w not in ["SAS", "LTDA", "S.A.", "COLOMBIA", "SERVICES", "SOLUTIONS", "SOCIEDAD", "DISTRIBUCIONES", "GLOBAL", "TRADE"]]
         has_prov = any(w in txt_clean for w in prov_words)
         
@@ -575,12 +583,12 @@ def identificar_factura_en_texto(texto, df_ref):
             score = 600
         elif has_fac and has_prov:
             score = 450
-        elif has_nit and has_prov and len(fol) >= 2 and fol in digits_only:
-            score = 350
         elif has_fac and len(fac_full) >= 4:
-            score = 250
+            score = 300
+        else:
+            score = 0
             
-        if score > mejor_score and score >= 250:
+        if score > mejor_score and score >= 300:
             mejor_score = score
             mejor_cand = r_cand
             
@@ -607,11 +615,11 @@ def cache_extraer_textos_pdf(fbytes, nit_receptor="9013464125"):
 
 def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, empresa_compradora=None):
     """
-    Busca y extrae el PDF de la factura seleccionada con máxima precisión:
-    1. Búsqueda por CUFE en el nombre del archivo (para PDFs descargados directamente de la DIAN nombrados con CUFE).
-    2. Búsqueda por Comprobante Siigo o Soporte Renombrado oficial.
-    3. Búsqueda por CUFE en el contenido del texto.
-    4. Búsqueda por Factura + NIT Emisor (desencriptando automáticamente con el NIT del comprador).
+    Busca y extrae el PDF de la factura seleccionada con máxima precisión y validación de contenido:
+    1. Búsqueda por CUFE en el nombre del archivo (para PDFs descargados directamente de la DIAN).
+    2. Búsqueda por CUFE o Factura verificando el CONTENIDO del PDF en dict_renombrados.
+       Si un archivo renombrado contiene una factura distinta a la seleccionada, se descarta.
+    3. Búsqueda en los archivos originales (tanto individuales como páginas de consolidado).
     Retorna: (pdf_bytes, descripcion_origen, lista_paginas)
     """
     comp_siigo = str(fac_sel.get("Comprobante Siigo", "")).strip()
@@ -637,7 +645,7 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
     soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", "")).strip()
     df_una_fac = pd.DataFrame([fac_sel])
 
-    # 1. BÚSQUEDA DIRECTA POR CUFE EN NOMBRE DE ARCHIVO (Archivos DIAN originales)
+    # 1. BÚSQUEDA DIRECTA POR CUFE EN NOMBRE DE ARCHIVO (Archivos DIAN descargados)
     if cufe_clean and len(cufe_clean) >= 15:
         if dict_originales:
             for fname, fbytes in dict_originales.items():
@@ -651,24 +659,24 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
                 if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
                     return fbytes, f"Factura Oficial DIAN ({fname})", None
 
-    # 2. BÚSQUEDA EN FACTURAS RENOMBRADAS
+    # 2. BÚSQUEDA Y VERIFICACIÓN EN FACTURAS RENOMBRADAS
     if dict_renombrados:
+        # A. Prioridad a candidatos con nombre similar (soporte esperado, consecutivo o factura)
         candidatos = []
         if soporte_nom and soporte_nom in dict_renombrados:
             candidatos.append((soporte_nom, dict_renombrados[soporte_nom]))
             
         comp_key = f"Comp_{t_comp}-{consecutivo}".upper()
         for k, v in dict_renombrados.items():
-            if comp_key in k.upper().replace(" ", "_"):
-                if (k, v) not in candidatos:
-                    candidatos.append((k, v))
+            if comp_key in k.upper().replace(" ", "_") and (k, v) not in candidatos:
+                candidatos.append((k, v))
                     
         for k, v in dict_renombrados.items():
             k_clean = k.replace("-", "").replace(" ", "").upper()
-            if fac_full and len(fac_full) >= 3 and fac_full in k_clean:
-                if (k, v) not in candidatos:
-                    candidatos.append((k, v))
+            if fac_full and len(fac_full) >= 3 and fac_full in k_clean and (k, v) not in candidatos:
+                candidatos.append((k, v))
                     
+        # Verificar contenido de los candidatos: SOLO aceptar si el texto realmente pertenece a esta factura
         for c_nom, c_bytes in candidatos:
             try:
                 pgs = cache_extraer_textos_pdf(c_bytes, nit_receptor=nit_comprador)
@@ -677,24 +685,28 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
                     return c_bytes, f"Factura Verificada ({c_nom})", None
             except Exception:
                 pass
-                
-        if candidatos:
-            return candidatos[0][1], f"Factura Renombrada ({candidatos[0][0]})", None
+
+        # B. Si los candidatos por nombre fallan, escanear TODOS los archivos renombrados por contenido
+        for r_nom, r_bytes in dict_renombrados.items():
+            if (r_nom, r_bytes) not in candidatos:
+                try:
+                    pgs = cache_extraer_textos_pdf(r_bytes, nit_receptor=nit_comprador)
+                    txt_r = " ".join(pgs)
+                    if identificar_factura_en_texto(txt_r, df_una_fac) is not None:
+                        return r_bytes, f"Factura Verificada por Contenido ({r_nom})", None
+                except Exception:
+                    pass
 
     # 3. BÚSQUEDA EN ARCHIVOS ORIGINALES INDIVIDUALES Y UNIFICADOS
     if dict_originales:
-        # A. Archivos individuales por nombre o texto
+        # A. Archivos individuales por coincidencia de texto
         for fname, fbytes in dict_originales.items():
             try:
                 f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
-                fn_clean = fname.replace("-", "").replace(" ", "").upper()
-                if fac_full and len(fac_full) >= 3 and fac_full in fn_clean:
-                    return f_des, f"Factura Individual ({fname})", None
-                    
                 pgs = cache_extraer_textos_pdf(f_des, nit_receptor=nit_comprador)
                 txt_ind = " ".join(pgs)
-                if len(pgs) <= 4 and identificar_factura_en_texto(txt_ind, df_una_fac) is not None:
-                    return f_des, f"Factura Individual Verificada ({fname})", None
+                if identificar_factura_en_texto(txt_ind, df_una_fac) is not None:
+                    return f_des, f"Factura Original Verificada ({fname})", None
             except Exception:
                 pass
 
@@ -733,6 +745,7 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
             except Exception:
                 pass
 
+    # 4. Si no se encontró ningún archivo cuyo contenido coincida con esta factura, NO retornar una factura equivocada
     return None, None, None
 
 # PANEL DE HISTORIAL DE TRABAJOS Y AUDITORÍAS PASADAS
@@ -1432,46 +1445,57 @@ with tab_compras:
 
                         num_pags = len(reader.pages)
 
-                        # Caso 1: Archivo de una sola página o modo sin separación
+                        # Caso 1: Archivo individual (sin separar páginas) o de 1 página
                         if num_pags == 1 or "Mantener archivos individuales" in modo_sep:
                             writer = PdfWriter()
                             texto_pdf = ""
                             for page in reader.pages:
                                 writer.add_page(page)
-                                try: texto_pdf += page.extract_text() + "\n"
+                                try: texto_pdf += (page.extract_text() or "") + "\n"
                                 except: pass
 
-                            nombre_final = f"Comprobante_{idx_pdf+1}_{pdf_name}"
+                            r_mat = None
                             if not df_ref.empty:
-                                for _, r_mat in df_ref.iterrows():
-                                    folio_m = str(r_mat["Folio"]).strip()
-                                    nit_m = str(r_mat["NIT Emisor"]).strip()
-                                    if (folio_m and folio_m in texto_pdf) or (nit_m and nit_m in texto_pdf):
-                                        nombre_final = r_mat["Soporte PDF Renombrado"]
-                                        break
+                                # 1. Identificar por texto exacto (CUFE, Factura + Proveedor/NIT)
+                                r_mat = identificar_factura_en_texto(texto_pdf, df_ref)
+                                
+                                # 2. Si no se identificó en el texto, buscar por coincidencia en el nombre del archivo
+                                if r_mat is None:
+                                    fn_clean = re.sub(r'[^A-Za-z0-9]', '', pdf_name).lower()
+                                    for _, r_cand in df_ref.iterrows():
+                                        cufe_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE", "") or "")).lower()
+                                        if cufe_c and len(cufe_c) >= 15 and cufe_c[:20] in fn_clean:
+                                            r_mat = r_cand
+                                            break
+                                        pref_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("Prefijo", "") or "")).upper()
+                                        fol_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("Folio", "") or "")).upper()
+                                        fac_f = (pref_c + fol_c) if pref_c else fol_c
+                                        if fac_f and len(fac_f) >= 4 and fac_f in fn_clean.upper():
+                                            r_mat = r_cand
+                                            break
 
-                            # Escaneo de régimen fiscal en el texto del PDF
-                            regimen_escaneado = escanear_regimen_texto_pdf(texto_pdf)
-                            if regimen_escaneado and not df_ref.empty:
-                                for r_idx, r_mat in df_ref.iterrows():
-                                    fol_m = str(r_mat["Folio"]).strip()
-                                    nit_m = str(r_mat["NIT Emisor"]).strip()
-                                    if (fol_m and fol_m in texto_pdf) or (nit_m and nit_m in texto_pdf):
-                                        df_ref.at[r_idx, "Régimen Fiscal Emisor"] = regimen_escaneado
-                                        _, _, _, _, _, rfte_n, rica_n, riva_n, cta_rf_n, _, cta_ri_n, _, razon_n, audit_n = clasificar_factura(
-                                            df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
-                                            df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
-                                            df_ref.at[r_idx, "Operacion"], regimen_escaneado, empresa
-                                        )
-                                        df_ref.at[r_idx, "ReteFuente"] = rfte_n
-                                        df_ref.at[r_idx, "ReteICA"] = rica_n
-                                        df_ref.at[r_idx, "ReteIVA"] = riva_n
-                                        df_ref.at[r_idx, "Cta ReteFuente"] = cta_rf_n
-                                        df_ref.at[r_idx, "Cta ReteICA"] = cta_ri_n
-                                        df_ref.at[r_idx, "Razón Contable"] = razon_n
-                                        df_ref.at[r_idx, "Audit Info"] = audit_n
-                                        df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
-                                        break
+                            if r_mat is not None:
+                                nombre_final = r_mat["Soporte PDF Renombrado"]
+                                # Escaneo de régimen fiscal sólo para la factura que realmente coincidió
+                                regimen_escaneado = escanear_regimen_texto_pdf(texto_pdf)
+                                if regimen_escaneado:
+                                    r_idx = r_mat.name
+                                    df_ref.at[r_idx, "Régimen Fiscal Emisor"] = regimen_escaneado
+                                    _, _, _, _, _, rfte_n, rica_n, riva_n, cta_rf_n, _, cta_ri_n, _, razon_n, audit_n = clasificar_factura(
+                                        df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
+                                        df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
+                                        df_ref.at[r_idx, "Operacion"], regimen_escaneado, empresa
+                                    )
+                                    df_ref.at[r_idx, "ReteFuente"] = rfte_n
+                                    df_ref.at[r_idx, "ReteICA"] = rica_n
+                                    df_ref.at[r_idx, "ReteIVA"] = riva_n
+                                    df_ref.at[r_idx, "Cta ReteFuente"] = cta_rf_n
+                                    df_ref.at[r_idx, "Cta ReteICA"] = cta_ri_n
+                                    df_ref.at[r_idx, "Razón Contable"] = razon_n
+                                    df_ref.at[r_idx, "Audit Info"] = audit_n
+                                    df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
+                            else:
+                                nombre_final = f"Soporte_{idx_pdf+1}_{pdf_name}"
 
                             pdf_bytes = io.BytesIO()
                             writer.write(pdf_bytes)
@@ -1485,15 +1509,19 @@ with tab_compras:
                         elif "Agrupación fija de 2 páginas" in modo_sep:
                             for p_i in range(0, num_pags, 2):
                                 writer = PdfWriter()
-                                writer.add_page(reader.pages[p_i])
-                                if p_i + 1 < num_pags:
-                                    writer.add_page(reader.pages[p_i + 1])
+                                txt_grp = ""
+                                for off in range(2):
+                                    if p_i + off < num_pags:
+                                        writer.add_page(reader.pages[p_i + off])
+                                        try: txt_grp += (reader.pages[p_i + off].extract_text() or "") + "\n"
+                                        except: pass
 
-                                fac_idx = p_i // 2
-                                if not df_ref.empty and fac_idx < len(df_ref):
-                                    nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"]
+                                r_mat = identificar_factura_en_texto(txt_grp, df_ref)
+                                if r_mat is not None:
+                                    nombre_final = r_mat["Soporte PDF Renombrado"]
                                 else:
-                                    nombre_final = f"Factura_Pags_{p_i+1}-{p_i+2}_{pdf_name}"
+                                    fac_idx = p_i // 2
+                                    nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"] if not df_ref.empty and fac_idx < len(df_ref) else f"Factura_Pags_{p_i+1}-{p_i+2}_{pdf_name}"
 
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
@@ -1507,15 +1535,19 @@ with tab_compras:
                         elif "Agrupación fija de 3 páginas" in modo_sep:
                             for p_i in range(0, num_pags, 3):
                                 writer = PdfWriter()
+                                txt_grp = ""
                                 for off in range(3):
                                     if p_i + off < num_pags:
                                         writer.add_page(reader.pages[p_i + off])
+                                        try: txt_grp += (reader.pages[p_i + off].extract_text() or "") + "\n"
+                                        except: pass
 
-                                fac_idx = p_i // 3
-                                if not df_ref.empty and fac_idx < len(df_ref):
-                                    nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"]
+                                r_mat = identificar_factura_en_texto(txt_grp, df_ref)
+                                if r_mat is not None:
+                                    nombre_final = r_mat["Soporte PDF Renombrado"]
                                 else:
-                                    nombre_final = f"Factura_Pags_{p_i+1}-{p_i+3}_{pdf_name}"
+                                    fac_idx = p_i // 3
+                                    nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"] if not df_ref.empty and fac_idx < len(df_ref) else f"Factura_Pags_{p_i+1}-{p_i+3}_{pdf_name}"
 
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
@@ -1530,10 +1562,14 @@ with tab_compras:
                             for p_i in range(num_pags):
                                 writer = PdfWriter()
                                 writer.add_page(reader.pages[p_i])
-                                if not df_ref.empty and p_i < len(df_ref):
-                                    nombre_final = df_ref.iloc[p_i]["Soporte PDF Renombrado"]
+                                try: txt_pag = (reader.pages[p_i].extract_text() or "") + "\n"
+                                except: txt_pag = ""
+
+                                r_mat = identificar_factura_en_texto(txt_pag, df_ref)
+                                if r_mat is not None:
+                                    nombre_final = r_mat["Soporte PDF Renombrado"]
                                 else:
-                                    nombre_final = f"Factura_Pag_{p_i+1}_{pdf_name}"
+                                    nombre_final = df_ref.iloc[p_i]["Soporte PDF Renombrado"] if not df_ref.empty and p_i < len(df_ref) else f"Factura_Pag_{p_i+1}_{pdf_name}"
 
                                 pdf_bytes = io.BytesIO()
                                 writer.write(pdf_bytes)
@@ -1558,7 +1594,6 @@ with tab_compras:
                                 try: txt_p = reader.pages[p_idx].extract_text() or ""
                                 except: txt_p = ""
 
-                                # Escaneo automático del Régimen Fiscal en el texto de la página
                                 reg_detectado = escanear_regimen_texto_pdf(txt_p)
 
                                 m_pag = patron_pag.search(txt_p)
@@ -1610,7 +1645,7 @@ with tab_compras:
                                     paginas_del_comprobante = 1
                                 else:
                                     if curr_writer is None:
-                                        curr_inv_row = df_ref.iloc[0] if len(df_ref) > 0 else None
+                                        curr_inv_row = inv_encontrada
                                         curr_writer = PdfWriter()
                                     curr_writer.add_page(reader.pages[p_idx])
                                     paginas_del_comprobante += 1
