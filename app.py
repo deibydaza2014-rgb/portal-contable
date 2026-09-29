@@ -297,14 +297,37 @@ def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, e
         with open(os.path.join(job_dir, "meta.json"), "w", encoding="utf-8") as mf:
             json.dump(meta, mf, ensure_ascii=False, indent=2)
             
+        # Actualizar índice general de la empresa para carga inmediata
+        idx_file = os.path.join(base_dir, "historial_index.json")
+        try:
+            with open(idx_file, "r", encoding="utf-8") as f_idx:
+                index_data = json.load(f_idx)
+        except Exception:
+            index_data = []
+        index_data = [x for x in index_data if x.get("id") != job_id]
+        index_data.append(meta)
+        index_data.sort(key=lambda x: x.get("id", ""), reverse=True)
+        try:
+            with open(idx_file, "w", encoding="utf-8") as f_idx:
+                json.dump(index_data, f_idx, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+            
         return job_id
-    except:
+    except Exception:
         return None
 
 def listar_trabajos_historial(empresa_dict):
     base_dir = get_empresa_trabajos_dir(empresa_dict)
     lista = []
-    if os.path.exists(base_dir):
+    idx_file = os.path.join(base_dir, "historial_index.json")
+    if os.path.exists(idx_file):
+        try:
+            with open(idx_file, "r", encoding="utf-8") as f_idx:
+                lista = json.load(f_idx)
+        except Exception:
+            lista = []
+    if not lista and os.path.exists(base_dir):
         for jid in os.listdir(base_dir):
             jdir = os.path.join(base_dir, jid)
             meta_file = os.path.join(jdir, "meta.json")
@@ -313,7 +336,7 @@ def listar_trabajos_historial(empresa_dict):
                     with open(meta_file, "r", encoding="utf-8") as mf:
                         meta = json.load(mf)
                         lista.append(meta)
-                except:
+                except Exception:
                     pass
     lista.sort(key=lambda x: x.get("id", ""), reverse=True)
     return lista
@@ -376,7 +399,17 @@ def eliminar_trabajo_historial(empresa_dict, job_id):
     base_dir = get_empresa_trabajos_dir(empresa_dict)
     jdir = os.path.join(base_dir, job_id)
     if os.path.exists(jdir):
-        shutil.rmtree(jdir)
+        shutil.rmtree(jdir, ignore_errors=True)
+    idx_file = os.path.join(base_dir, "historial_index.json")
+    if os.path.exists(idx_file):
+        try:
+            with open(idx_file, "r", encoding="utf-8") as f_idx:
+                index_data = json.load(f_idx)
+            index_data = [x for x in index_data if x.get("id") != job_id]
+            with open(idx_file, "w", encoding="utf-8") as f_idx:
+                json.dump(index_data, f_idx, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
 # ==============================================================================
 # MOTOR DE BÚSQUEDA Y EXTRACCIÓN INTELIGENTE DE PDF (UNIFICADO O SEPARADO)
@@ -469,7 +502,7 @@ with st.expander("📂 Consultar y Cargar Trabajos Pasados de esta Empresa", exp
     if trabajos_guardados:
         st.caption("Selecciona cualquier trabajo realizado previamente para auditar facturas, ver PDFs o exportar:")
         for tb in trabajos_guardados:
-            c_h1, c_h2, c_h3 = st.columns()
+            c_h1, c_h2, c_h3 = st.columns([3, 1, 1])
             with c_h1:
                 n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
                 n_orig = tb.get("total_pdfs_originales", 0)
@@ -1501,7 +1534,7 @@ with tab_auditoria:
 
         elif dict_orig or dict_renom:
             # Hay PDFs subidos pero no se identificó automáticamente esta factura
-            st.warning("⚠ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
+            st.warning("⚠️ No se identificó automáticamente el número de esta factura dentro del PDF. Puedes seleccionar manualmente cualquier PDF subido para visualizarlo:")
             todos_los_pdfs = {**dict_orig, **dict_renom}
             pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()))
             if pdf_elegido:
