@@ -431,6 +431,15 @@ def eliminar_trabajo_historial(empresa_dict, job_id):
 # ==============================================================================
 # MOTOR DE BÚSQUEDA Y EXTRACCIÓN INTELIGENTE DE PDF (UNIFICADO O SEPARADO)
 # ==============================================================================
+@st.cache_data(show_spinner=False)
+def cache_extraer_textos_pdf(fbytes):
+    """Extrae el texto de todas las páginas de un PDF y lo almacena en caché en RAM para búsqueda ultrarrápida."""
+    try:
+        reader = PdfReader(io.BytesIO(fbytes))
+        return [(p.extract_text() or "") for p in reader.pages]
+    except Exception:
+        return []
+
 def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
     """
     Busca y extrae los bytes del PDF de la factura seleccionada con coincidencia inteligente:
@@ -466,14 +475,12 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
             if (fac_clean and len(fac_clean) >= 4 and fac_clean in fn_clean) or (folio_clean and len(folio_clean) >= 3 and folio_clean in fn_clean):
                 return fbytes, f"PDF Original Individual ({fname})", None
 
-        # 3. Escaneo inteligente página por página en PDFs originales (PDFs unificados como Todas_Licadas.pdf)
+        # 3. Escaneo ultrarrápido página por página con caché en RAM (PDFs unificados)
         for fname, fbytes in dict_originales.items():
             try:
-                reader = PdfReader(io.BytesIO(fbytes))
-                total_p = len(reader.pages)
+                paginas_txt = cache_extraer_textos_pdf(fbytes)
                 pags_coincidentes = []
-                for p_idx in range(total_p):
-                    txt = reader.pages[p_idx].extract_text() or ""
+                for p_idx, txt in enumerate(paginas_txt):
                     txt_clean = txt.replace("-", "").replace(" ", "").upper()
                     
                     # Criterio de coincidencia robusta
@@ -499,6 +506,7 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None):
                         pags_coincidentes.append(p_idx)
                 
                 if pags_coincidentes:
+                    reader = PdfReader(io.BytesIO(fbytes))
                     writer = PdfWriter()
                     for p in pags_coincidentes:
                         writer.add_page(reader.pages[p])
@@ -798,142 +806,148 @@ with tab_compras:
     with c_con4:
         clave_pdf_extra = st.text_input("Clave PDF (opcional):", type="password", help="Si algún archivo PDF tiene contraseña específica, ingrésala aquí.")
         
-    # Almacenar PDFs originales subidos en session_state y en el historial de inmediato
+    # Almacenar PDFs originales subidos en session_state y en el historial de inmediato (solo una vez por subida)
     if archivos_pdfs:
-        if "raw_uploaded_pdfs" not in st.session_state:
-            st.session_state["raw_uploaded_pdfs"] = {}
-        for p in archivos_pdfs:
-            st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
-            
-        st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
-            empresa,
-            st.session_state.get("df_procesado"),
-            excel_bytes=st.session_state.get("excel_bytes"),
-            excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-            dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-            dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-            zip_bytes=st.session_state.get("zip_pdfs"),
-            consecutivo_ini=cons_ini_fac,
-            job_id=st.session_state.get("job_actual_id")
-        )
-        st.success(f"💾 **{len(archivos_pdfs)} archivo(s) PDF guardados** en el Historial de {empresa['nombre']}.")
+        pdfs_sig = f"{len(archivos_pdfs)}_" + "_".join(f"{p.name}_{p.size}" for p in archivos_pdfs[:5])
+        if st.session_state.get("_ultimo_pdfs_proc_sig") != pdfs_sig:
+            if "raw_uploaded_pdfs" not in st.session_state:
+                st.session_state["raw_uploaded_pdfs"] = {}
+            for p in archivos_pdfs:
+                st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
+                
+            st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
+                empresa,
+                st.session_state.get("df_procesado"),
+                excel_bytes=st.session_state.get("excel_bytes"),
+                excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+                dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+                zip_bytes=st.session_state.get("zip_pdfs"),
+                consecutivo_ini=cons_ini_fac,
+                job_id=st.session_state.get("job_actual_id")
+            )
+            st.session_state["_ultimo_pdfs_proc_sig"] = pdfs_sig
+            st.success(f"💾 **{len(archivos_pdfs)} archivo(s) PDF guardados** en el Historial de {empresa['nombre']}.")
 
     if archivo_excel is not None:
-        st.session_state["excel_bytes"] = archivo_excel.getvalue()
-        st.session_state["excel_nombre"] = archivo_excel.name
-        
-        df_dian = pd.read_excel(io.BytesIO(st.session_state["excel_bytes"]))
-        
-        # Identificar columna de fecha y ordenar cronológicamente de Enero a la fecha actual
-        col_fecha = None
-        for col_cand in ["Fecha Emisión", "Fecha Emision", "Fecha", "Fecha de Emisión"]:
-            if col_cand in df_dian.columns:
-                col_fecha = col_cand
-                break
-        if col_fecha is None:
-            col_fecha = df_dian.columns[0]
+        excel_sig = f"{archivo_excel.name}_{archivo_excel.size}_{cons_ini_fac}_{cons_ini_nc}_{cons_ini_nota}"
+        if st.session_state.get("_ultimo_excel_proc_sig") != excel_sig or "df_procesado" not in st.session_state:
+            st.session_state["excel_bytes"] = archivo_excel.getvalue()
+            st.session_state["excel_nombre"] = archivo_excel.name
+            st.session_state["_ultimo_excel_proc_sig"] = excel_sig
             
-        df_dian["_fecha_dt"] = pd.to_datetime(df_dian[col_fecha], dayfirst=True, errors="coerce")
-        df_dian = df_dian.sort_values(by="_fecha_dt", ascending=True).reset_index(drop=True)
-        
-        st.success(f"Reporte procesado y ordenado cronológicamente (Enero a la fecha): **{len(df_dian)} facturas identificadas**.")
-        
-        contadores_consecutivos = {
-            10: int(cons_ini_fac),
-            17: int(cons_ini_nc),
-            14: int(cons_ini_nota),
-            16: int(cons_ini_fac)
-        }
-        filas = []
-        for idx, r in df_dian.iterrows():
-            tipo_doc = r.get("Tipo de documento") or r.get("Tipo documento") or "Factura electrónica"
-            folio = str(r.get("Folio") or r.get("Factura") or r.get("Factura Num") or f"Doc_{idx+1}").strip()
-            if folio.endswith(".0"):
-                folio = folio[:-2]
-            prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
-            if prefijo == "nan" or prefijo == "None":
-                prefijo = ""
-                
-            fecha_val = r.get(col_fecha)
-            if pd.notna(fecha_val):
-                try:
-                    fecha_dt = pd.to_datetime(fecha_val, dayfirst=True)
-                    fecha_str = fecha_dt.strftime("%d/%m/%Y")
-                except:
-                    fecha_str = str(fecha_val).split()[0]
-            else:
-                fecha_str = "01/01/2026"
-                
-            nit_e = str(r.get("NIT Emisor") or r.get("NIT") or "").strip()
-            if nit_e.endswith(".0"):
-                nit_e = nit_e[:-2]
-            nom_e = str(r.get("Nombre Emisor") or r.get("Proveedor (Emisor)") or r.get("Proveedor") or "Proveedor").strip()
-            
-            try: iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
-            except: iva = 0.0
-            try: tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
-            except: tot = 0.0
-            base = round(tot - iva, 2)
-            
-            col_resp = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["régimen", "regimen", "responsabilidad", "obligacion"])), None)
-            resp_e = str(r.get(col_resp, "")).strip() if col_resp and pd.notna(r.get(col_resp)) else ""
-            
-            t_comp, op, cta_p, cta_c, desc, rfte, rica, riva, cta_rfte, cta_iva, cta_rica, cat, razon, audit_dict = clasificar_factura(
-                nit_e, nom_e, base, iva, tipo_doc, resp_e, empresa
+            df_dian = pd.read_excel(io.BytesIO(st.session_state["excel_bytes"]))
+
+            # Identificar columna de fecha y ordenar cronológicamente de Enero a la fecha actual
+            col_fecha = None
+            for col_cand in ["Fecha Emisión", "Fecha Emision", "Fecha", "Fecha de Emisión"]:
+                if col_cand in df_dian.columns:
+                    col_fecha = col_cand
+                    break
+            if col_fecha is None:
+                col_fecha = df_dian.columns[0]
+
+            df_dian["_fecha_dt"] = pd.to_datetime(df_dian[col_fecha], dayfirst=True, errors="coerce")
+            df_dian = df_dian.sort_values(by="_fecha_dt", ascending=True).reset_index(drop=True)
+
+            st.success(f"Reporte procesado y ordenado cronológicamente (Enero a la fecha): **{len(df_dian)} facturas identificadas**.")
+
+            contadores_consecutivos = {
+                10: int(cons_ini_fac),
+                17: int(cons_ini_nc),
+                14: int(cons_ini_nota),
+                16: int(cons_ini_fac)
+            }
+            filas = []
+            for idx, r in df_dian.iterrows():
+                tipo_doc = r.get("Tipo de documento") or r.get("Tipo documento") or "Factura electrónica"
+                folio = str(r.get("Folio") or r.get("Factura") or r.get("Factura Num") or f"Doc_{idx+1}").strip()
+                if folio.endswith(".0"):
+                    folio = folio[:-2]
+                prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
+                if prefijo == "nan" or prefijo == "None":
+                    prefijo = ""
+
+                fecha_val = r.get(col_fecha)
+                if pd.notna(fecha_val):
+                    try:
+                        fecha_dt = pd.to_datetime(fecha_val, dayfirst=True)
+                        fecha_str = fecha_dt.strftime("%d/%m/%Y")
+                    except:
+                        fecha_str = str(fecha_val).split()[0]
+                else:
+                    fecha_str = "01/01/2026"
+
+                nit_e = str(r.get("NIT Emisor") or r.get("NIT") or "").strip()
+                if nit_e.endswith(".0"):
+                    nit_e = nit_e[:-2]
+                nom_e = str(r.get("Nombre Emisor") or r.get("Proveedor (Emisor)") or r.get("Proveedor") or "Proveedor").strip()
+
+                try: iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
+                except: iva = 0.0
+                try: tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
+                except: tot = 0.0
+                base = round(tot - iva, 2)
+
+                col_resp = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["régimen", "regimen", "responsabilidad", "obligacion"])), None)
+                resp_e = str(r.get(col_resp, "")).strip() if col_resp and pd.notna(r.get(col_resp)) else ""
+
+                t_comp, op, cta_p, cta_c, desc, rfte, rica, riva, cta_rfte, cta_iva, cta_rica, cat, razon, audit_dict = clasificar_factura(
+                    nit_e, nom_e, base, iva, tipo_doc, resp_e, empresa
+                )
+                consecutivo = contadores_consecutivos.get(t_comp, 1)
+                contadores_consecutivos[t_comp] += 1
+
+                nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
+                nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
+
+                filas.append({
+                    "N°": idx + 1,
+                    "Tipo Comp": t_comp,
+                    "Consecutivo": consecutivo,
+                    "Comprobante Siigo": f"Comp {t_comp}-{consecutivo}",
+                    "Fecha": fecha_str,
+                    "Prefijo": prefijo,
+                    "Folio": folio,
+                    "Factura": f"{prefijo}-{folio}" if prefijo else folio,
+                    "Proveedor": nom_e,
+                    "NIT Emisor": nit_e,
+                    "Régimen Fiscal Emisor": resp_e if resp_e else "O-48 (Estándar)",
+                    "Descripcion": desc,
+                    "Operacion": op,
+                    "Cta Principal": cta_p,
+                    "Categoría": cat,
+                    "Base": base,
+                    "IVA": iva,
+                    "ReteFuente": rfte,
+                    "ReteICA": rica,
+                    "ReteIVA": riva,
+                    "Neto a Pagar": round(tot - rfte - rica - riva, 2),
+                    "Audit Info": audit_dict,
+                    "Cta Contrapartida": cta_c,
+                    "Cta IVA": cta_iva,
+                    "Cta ReteFuente": cta_rfte,
+                    "Cta ReteICA": cta_rica,
+                    "Total": tot,
+                    "Razón Contable": razon,
+                    "Soporte PDF Renombrado": nombre_pdf_esperado
+                })
+
+            df_proc = pd.DataFrame(filas)
+            st.session_state["df_procesado"] = df_proc
+
+            # Guardar automáticamente en historial de trabajos (Excel + PDFs + Registros)
+            st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
+                empresa, df_proc,
+                excel_bytes=st.session_state.get("excel_bytes"),
+                excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+                dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+                zip_bytes=st.session_state.get("zip_pdfs"),
+                consecutivo_ini=cons_ini_fac,
+                job_id=st.session_state.get("job_actual_id")
             )
-            consecutivo = contadores_consecutivos.get(t_comp, 1)
-            contadores_consecutivos[t_comp] += 1
-            
-            nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
-            nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
-            
-            filas.append({
-                "N°": idx + 1,
-                "Tipo Comp": t_comp,
-                "Consecutivo": consecutivo,
-                "Comprobante Siigo": f"Comp {t_comp}-{consecutivo}",
-                "Fecha": fecha_str,
-                "Prefijo": prefijo,
-                "Folio": folio,
-                "Factura": f"{prefijo}-{folio}" if prefijo else folio,
-                "Proveedor": nom_e,
-                "NIT Emisor": nit_e,
-                "Régimen Fiscal Emisor": resp_e if resp_e else "O-48 (Estándar)",
-                "Descripcion": desc,
-                "Operacion": op,
-                "Cta Principal": cta_p,
-                "Categoría": cat,
-                "Base": base,
-                "IVA": iva,
-                "ReteFuente": rfte,
-                "ReteICA": rica,
-                "ReteIVA": riva,
-                "Neto a Pagar": round(tot - rfte - rica - riva, 2),
-                "Audit Info": audit_dict,
-                "Cta Contrapartida": cta_c,
-                "Cta IVA": cta_iva,
-                "Cta ReteFuente": cta_rfte,
-                "Cta ReteICA": cta_rica,
-                "Total": tot,
-                "Razón Contable": razon,
-                "Soporte PDF Renombrado": nombre_pdf_esperado
-            })
-            
-        df_proc = pd.DataFrame(filas)
-        st.session_state["df_procesado"] = df_proc
-        
-        # Guardar automáticamente en historial de trabajos (Excel + PDFs + Registros)
-        st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
-            empresa, df_proc,
-            excel_bytes=st.session_state.get("excel_bytes"),
-            excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-            dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-            dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-            zip_bytes=st.session_state.get("zip_pdfs"),
-            consecutivo_ini=cons_ini_fac,
-            job_id=st.session_state.get("job_actual_id")
-        )
-        st.success(f"💾 **Reporte Excel '{archivo_excel.name}' guardado** exitosamente en el Historial de {empresa['nombre']}.")
+            st.success(f"💾 **Reporte Excel '{archivo_excel.name}' guardado** exitosamente en el Historial de {empresa['nombre']}.")
 
     if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
         df_proc = st.session_state["df_procesado"]
@@ -970,20 +984,51 @@ with tab_compras:
         with c_aud_btn1:
             st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
         with c_aud_btn2:
-            if st.button("🔎 Auditar y Escanear Régimen Fiscal de los PDFs (Factura por Factura)", key="btn_escanear_regimen_todos"):
+            if st.button("⚡ Auditar y Escanear Régimen Fiscal de los PDFs (Ultrarrápido)", key="btn_escanear_regimen_todos"):
                 dict_renom_s = st.session_state.get("dict_pdfs", {})
                 dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
                 total_modificados = 0
                 if dict_renom_s or dict_orig_s:
-                    for r_idx, r_mat in df_proc.iterrows():
-                        p_bytes, p_desc, _ = buscar_y_extraer_pdf(r_mat, dict_renom_s, dict_orig_s)
-                        if p_bytes:
-                            try:
-                                r_pdf = PdfReader(io.BytesIO(p_bytes))
-                                txt_f = ""
-                                for pg in r_pdf.pages:
-                                    txt_f += (pg.extract_text() or "") + "\n"
-                                reg_f = escanear_regimen_texto_pdf(txt_f)
+                    with st.spinner("⚡ Extrayendo texto en memoria y cruzando regímenes fiscales..."):
+                        # 1. Pre-cargar textos en caché de todos los PDFs una sola vez
+                        mapa_textos = []
+                        for fn, fb in dict_renom_s.items():
+                            mapa_textos.append((fn, [txt.replace("-", "").replace(" ", "").upper() for txt in cache_extraer_textos_pdf(fb)], cache_extraer_textos_pdf(fb)))
+                        for fn, fb in dict_orig_s.items():
+                            mapa_textos.append((fn, [txt.replace("-", "").replace(" ", "").upper() for txt in cache_extraer_textos_pdf(fb)], cache_extraer_textos_pdf(fb)))
+                        
+                        # 2. Cruzar en milisegundos cada factura directamente en memoria RAM
+                        for r_idx, r_mat in df_proc.iterrows():
+                            fol = str(r_mat.get("Folio", "")).replace("-", "").strip().upper()
+                            fol_sc = fol.lstrip("0")
+                            pref = str(r_mat.get("Prefijo", "")).replace("-", "").strip().upper()
+                            fac_full = (pref + fol) if pref else fol
+                            fac_full_sc = (pref + fol_sc) if pref else fol_sc
+                            nit_d = re.sub(r"\D", "", str(r_mat.get("NIT Emisor", "")))
+                            nit_b = nit_d[:-1] if len(nit_d) >= 10 else nit_d
+                            
+                            texto_factura_encontrado = ""
+                            
+                            # Buscar en textos pre-extraídos
+                            for _, list_clean, list_raw in mapa_textos:
+                                for p_idx, t_clean in enumerate(list_clean):
+                                    m = False
+                                    if len(fac_full) >= 4 and fac_full in t_clean:
+                                        m = True
+                                    elif len(fac_full_sc) >= 3 and fac_full_sc in t_clean:
+                                        m = True
+                                    elif (nit_d and len(nit_d) >= 6 and nit_d in t_clean) or (nit_b and len(nit_b) >= 6 and nit_b in t_clean):
+                                        if len(fol) >= 2 and fol in t_clean:
+                                            m = True
+                                        elif len(fol_sc) >= 2 and fol_sc in t_clean:
+                                            m = True
+                                    if m:
+                                        texto_factura_encontrado += list_raw[p_idx] + "\n"
+                                if texto_factura_encontrado:
+                                    break
+                            
+                            if texto_factura_encontrado:
+                                reg_f = escanear_regimen_texto_pdf(texto_factura_encontrado)
                                 if reg_f and reg_f != r_mat.get("Régimen Fiscal Emisor"):
                                     df_proc.at[r_idx, "Régimen Fiscal Emisor"] = reg_f
                                     t_c_n, op_n, c_p_n, c_c_n, desc_n, rfte_n, rica_n, riva_n, c_rf_n, c_iv_n, c_ri_n, cat_n, razon_n, audit_n = clasificar_factura(
@@ -1000,8 +1045,7 @@ with tab_compras:
                                     df_proc.at[r_idx, "Audit Info"] = audit_n
                                     df_proc.at[r_idx, "Neto a Pagar"] = round(df_proc.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
                                     total_modificados += 1
-                            except:
-                                pass
+
                     st.session_state["df_procesado"] = df_proc
                     guardar_trabajo_en_historial(
                         empresa, df_proc,
@@ -1012,7 +1056,7 @@ with tab_compras:
                         zip_bytes=st.session_state.get("zip_pdfs"),
                         job_id=st.session_state.get("job_actual_id")
                     )
-                    st.success(f"Auditoría de PDFs completada: se revisaron todas las facturas y se actualizaron {total_modificados} con su régimen oficial extraído del PDF.")
+                    st.success(f"⚡ Auditoría completada en segundos: se revisaron {len(df_proc)} facturas y se actualizaron {total_modificados} con su régimen oficial del PDF.")
                     st.rerun()
                 else:
                     st.warning("Primero sube los PDFs en el campo 2 para poder escanearlos.")
@@ -1931,3 +1975,4 @@ with tab_siigo:
         )
     else:
         st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
+
