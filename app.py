@@ -501,6 +501,229 @@ def importar_respaldo_sesion_zip(zip_bytes, empresa_dict):
         return None, {}, {}, None, "", None
 
 # ==============================================================================
+# MOTOR DE TRIANGULACIÓN Y CRUCES DE IMPORTACIÓN (ADUANAS Y PAGOS A TERCEROS)
+# ==============================================================================
+CUENTA_RETENCION_ASUMIDA = "53152001"
+CUENTA_NO_DEDUCIBLE = "53950501"
+CUENTA_IVA_IMPORTACION = "24081501"
+CUENTA_IMPORTACION_TRANSITO = "14650501"
+CUENTA_CXP_AGENCIA_EXTERIOR = "22050505"
+CUENTA_CXP_DHL_NACIONAL = "23359501"
+CUENTA_CXP_EURO_SHIPPING = "22050501"
+
+def analizar_estado_filas_excel(excel_bytes):
+    """
+    Lee las celdas del archivo Excel DIAN (token) con openpyxl para detectar:
+    1. Celdas rojas (facturas ya causadas/registradas en Siigo).
+    2. Columna1 con número de comprobante 10-XXX o texto 'registrada'.
+    3. Columna3 con asignación de Grupo de Importación (1, 2, 3...).
+    4. Columna4 con cuenta contable de pasivo específica (22050505, 23359501, etc.).
+    """
+    estados = {}
+    if not excel_bytes:
+        return estados
+        
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
+        ws = wb.active
+        headers = [str(cell.value or '').strip() for cell in ws[1]]
+        
+        col_c1 = next((i for i, h in enumerate(headers) if any(k in h.lower() for k in ['columna1', 'comprobante', 'estado'])), None)
+        col_grp = next((i for i, h in enumerate(headers) if any(k in h.lower() for k in ['columna3', 'grupo', 'paquete'])), None)
+        col_cta = next((i for i, h in enumerate(headers) if any(k in h.lower() for k in ['columna4', 'cuenta', 'cta'])), None)
+        col_cufe = next((i for i, h in enumerate(headers) if any(k in h.lower() for k in ['cufe', 'token', 'uuid', 'cude'])), None)
+        col_folio = next((i for i, h in enumerate(headers) if any(k in h.lower() for k in ['folio', 'factura'])), None)
+        col_pref = next((i for i, h in enumerate(headers) if 'prefijo' in h.lower()), None)
+        
+        for row_idx in range(2, ws.max_row + 1):
+            row_cells = ws[row_idx]
+            es_roja = False
+            
+            # Revisar color de relleno de las celdas
+            for cell in row_cells:
+                fill = cell.fill
+                if fill and fill.fill_type:
+                    color = fill.start_color
+                    if color:
+                        rgb = str(getattr(color, 'rgb', '') or getattr(color, 'value', '')).upper()
+                        if any(r in rgb for r in ['FF0000', 'C00000', 'FFC7CE', 'EF4444', 'DC2626', 'B91C1C', '991B1B', 'F87171', 'FF6666', 'FF4D4D', 'E11D48']):
+                            es_roja = True
+                            break
+                        if len(rgb) == 8:
+                            try:
+                                r_v = int(rgb[2:4], 16)
+                                g_v = int(rgb[4:6], 16)
+                                b_v = int(rgb[6:8], 16)
+                                if (r_v > 180 and g_v < 130 and b_v < 130) or (r_v > 220 and g_v < 210 and b_v < 215 and r_v - g_v > 30):
+                                    es_roja = True
+                                    break
+                            except:
+                                pass
+                                
+            val_c1 = str(row_cells[col_c1].value or '').strip() if col_c1 is not None and col_c1 < len(row_cells) else ''
+            if '10-' in val_c1 or 'registrad' in val_c1.lower() or 'causad' in val_c1.lower():
+                es_roja = True
+                
+            val_grp = str(row_cells[col_grp].value or '').strip() if col_grp is not None and col_grp < len(row_cells) else ''
+            val_cta = str(row_cells[col_cta].value or '').strip() if col_cta is not None and col_cta < len(row_cells) else ''
+            if val_cta.endswith('.0'):
+                val_cta = val_cta[:-2]
+                
+            cufe_k = str(row_cells[col_cufe].value or '').strip() if col_cufe is not None and col_cufe < len(row_cells) else ''
+            fol_k = str(row_cells[col_folio].value or '').strip() if col_folio is not None and col_folio < len(row_cells) else ''
+            if fol_k.endswith('.0'):
+                fol_k = fol_k[:-2]
+            pref_k = str(row_cells[col_pref].value or '').strip() if col_pref is not None and col_pref < len(row_cells) else ''
+            if pref_k == 'nan' or pref_k == 'None':
+                pref_k = ''
+                
+            fac_key = f"{pref_k}-{fol_k}" if pref_k else fol_k
+            
+            info_fila = {
+                'row_idx': row_idx,
+                'es_roja': es_roja,
+                'comprobante_existente': val_c1 if '10-' in val_c1 else ('10-Previa' if es_roja else ''),
+                'grupo_importacion': val_grp,
+                'cuenta_especifica': val_cta
+            }
+            if cufe_k:
+                estados[cufe_k] = info_fila
+            if fac_key:
+                estados[fac_key] = info_fila
+            estados[row_idx - 2] = info_fila
+    except Exception as e:
+        pass
+        
+    return estados
+
+def generar_asiento_triangulacion_paquete(agente_row, terceros_df):
+    """
+    Calcula el asiento contable de partida doble para un paquete de importación triangulado:
+    1. Débito a CxP Terceros (22050505/23359501) por el neto causado si ya estaban registradas (rojas).
+    2. Débito a Retenciones Asumidas (53152001) por las retenciones que Euro cobró al 100%.
+    3. Débito a Importación en Tránsito (14650501) e IVA (24081501) para facturas blancas pendientes.
+    4. Débito a IVA de Importación si la factura del agente lo discrimina.
+    5. Débito a Gastos No Deducibles (53950501) por la diferencia sin factura DIAN.
+    6. Crédito a CxP Agente Aduanero (22050501/22050505) por el 100% de la factura del agente.
+    """
+    tot_agente = float(agente_row.get("Total", 0.0))
+    iva_agente = float(agente_row.get("IVA", 0.0))
+    
+    asiento = []
+    suma_cxp_canceladas = 0.0
+    suma_ret_asumidas = 0.0
+    suma_costo_blancas = 0.0
+    suma_iva_blancas = 0.0
+    
+    for _, t in terceros_df.iterrows():
+        t_tot = float(t.get("Total", 0.0))
+        t_iva = float(t.get("IVA", 0.0))
+        t_base = round(t_tot - t_iva, 2)
+        prov_nom = str(t.get("Proveedor", "")).upper()
+        nit_t = str(t.get("NIT Emisor", ""))
+        fac_num = str(t.get("Factura", ""))
+        es_roja = bool(t.get("Ya Registrada", False))
+        cta_cxp = str(t.get("Cuenta Pasivo Especifica", "")).strip()
+        
+        if not cta_cxp:
+            if any(k in prov_nom for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL"]):
+                cta_cxp = CUENTA_CXP_AGENCIA_EXTERIOR
+            else:
+                cta_cxp = CUENTA_CXP_DHL_NACIONAL
+                
+        if es_roja:
+            # Factura roja (ya registrada en Siigo)
+            # Calcular las retenciones que se le habian practicado (Rfte 4% servicios o 2.5% compras)
+            rfte_t = round(t_base * 0.04, 2) if t_base >= 210000 or "DHL" in prov_nom or "CARGO" in prov_nom else 0.0
+            rica_t = round(t_base * 0.00966, 2) if t_base >= 210000 else 0.0
+            tot_ret = rfte_t + rica_t
+            
+            cxp_neta = round(t_tot - tot_ret, 2)
+            suma_cxp_canceladas += cxp_neta
+            suma_ret_asumidas += tot_ret
+            
+            asiento.append({
+                "Código Cuenta": cta_cxp,
+                "Descripción Cuenta": f"Cancela CxP {prov_nom[:20]} (Fac {fac_num})",
+                "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
+                "Débito ($)": cxp_neta,
+                "Crédito ($)": 0.0
+            })
+            if tot_ret > 0:
+                asiento.append({
+                    "Código Cuenta": CUENTA_RETENCION_ASUMIDA,
+                    "Descripción Cuenta": f"Retención Asumida Fac {fac_num} ({prov_nom[:18]})",
+                    "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
+                    "Débito ($)": tot_ret,
+                    "Crédito ($)": 0.0
+                })
+        else:
+            # Factura blanca (pendiente por registrar)
+            costo_neto = t_base
+            suma_costo_blancas += costo_neto
+            suma_iva_blancas += t_iva
+            
+            asiento.append({
+                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                "Descripción Cuenta": f"Importación en Tránsito (Fac {fac_num})",
+                "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
+                "Débito ($)": costo_neto,
+                "Crédito ($)": 0.0
+            })
+            if t_iva > 0:
+                asiento.append({
+                    "Código Cuenta": CUENTA_IVA_IMPORTACION,
+                    "Descripción Cuenta": f"IVA Descontable Fac {fac_num}",
+                    "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
+                    "Débito ($)": t_iva,
+                    "Crédito ($)": 0.0
+                })
+
+    # Si la factura del agente discrimina IVA o IVA de Importación
+    if iva_agente > 0:
+        asiento.append({
+            "Código Cuenta": CUENTA_IVA_IMPORTACION,
+            "Descripción Cuenta": f"IVA de Importación / Servicios Fac {agente_row.get('Factura', '')}",
+            "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+            "Débito ($)": iva_agente,
+            "Crédito ($)": 0.0
+        })
+
+    # Calcular la diferencia no deducible sin factura DIAN (Cuenta 53950501)
+    suma_justificada = suma_cxp_canceladas + suma_ret_asumidas + suma_costo_blancas + suma_iva_blancas + iva_agente
+    diferencia_no_deducible = round(tot_agente - suma_justificada, 2)
+    
+    if diferencia_no_deducible > 0:
+        asiento.append({
+            "Código Cuenta": CUENTA_NO_DEDUCIBLE,
+            "Descripción Cuenta": f"Gastos de Terceros Sin Soporte DIAN (Fac {agente_row.get('Factura', '')})",
+            "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+            "Débito ($)": diferencia_no_deducible,
+            "Crédito ($)": 0.0
+        })
+    elif diferencia_no_deducible < 0:
+        asiento.append({
+            "Código Cuenta": CUENTA_NO_DEDUCIBLE,
+            "Descripción Cuenta": f"Ajuste Diferencia Aduanera (Fac {agente_row.get('Factura', '')})",
+            "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+            "Débito ($)": 0.0,
+            "Crédito ($)": abs(diferencia_no_deducible)
+        })
+
+    # Crédito a la Cuenta por Pagar del Agente Aduanero (Euro Shipping / Trade Global)
+    cta_agente = CUENTA_CXP_EURO_SHIPPING
+    asiento.append({
+        "Código Cuenta": cta_agente,
+        "Descripción Cuenta": f"Cuenta por Pagar Agente Fac {agente_row.get('Factura', '')}",
+        "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+        "Débito ($)": 0.0,
+        "Crédito ($)": tot_agente
+    })
+    
+    df_asiento = pd.DataFrame(asiento)
+    return df_asiento, diferencia_no_deducible, suma_ret_asumidas
+
+# ==============================================================================
 # MOTOR DE BÚSQUEDA Y EXTRACCIÓN INTELIGENTE DE PDF (UNIFICADO O SEPARADO)
 # ==============================================================================
 def desbloquear_pdf_bytes(fbytes, nit_receptor=None, claves_extra=None, nits_emisores=None):
@@ -980,10 +1203,11 @@ with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", exp
 
 st.markdown("---")
 
-tab_compras, tab_auditoria, tab_siigo = st.tabs([
-    "1. Cargar Documentos, Desbloquear y Renombrar PDFs",
+tab_compras, tab_auditoria, tab_triangulacion, tab_siigo = st.tabs([
+    "1. Cargar Documentos y Desbloquear PDFs",
     "2. Auditoria y Trazabilidad Fiscal",
-    "3. Exportar Planilla Oficial a Siigo"
+    "3. 🔀 Triangulación y Cruces de Importación (Aduanas)",
+    "4. Exportar Planilla Oficial a Siigo"
 ])
 
 CODIGOS_IMPUESTO_SIIGO = {
@@ -1337,6 +1561,9 @@ with tab_compras:
                 14: int(cons_ini_nota),
                 16: int(cons_ini_fac)
             }
+            # Analizar celdas rojas (ya registradas), grupos y cuentas específicas del Excel
+            estados_excel = analizar_estado_filas_excel(st.session_state.get("excel_bytes"))
+
             filas = []
             for idx, r in df_dian.iterrows():
                 tipo_doc = r.get("Tipo de documento") or r.get("Tipo documento") or "Factura electrónica"
@@ -1382,6 +1609,16 @@ with tab_compras:
                 nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
                 nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
 
+                # Identificar si la fila estaba marcada en rojo (ya registrada en Siigo), su grupo y cuenta
+                fac_k_full = f"{prefijo}-{folio}" if prefijo else folio
+                info_est = estados_excel.get(cufe_val) or estados_excel.get(fac_k_full) or estados_excel.get(folio) or estados_excel.get(idx, {})
+                es_roja_reg = bool(info_est.get("es_roja", False))
+                comp_prev = str(info_est.get("comprobante_existente", ""))
+                grp_imp = str(info_est.get("grupo_importacion", "")).strip()
+                cta_esp = str(info_est.get("cuenta_especifica", "")).strip()
+                
+                es_aduanera_flag = any(k in nom_e.upper() for k in AGENTES_ADUANEROS) or any(k in nom_e.upper() for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL", "BUENAVENTURA", "CARTAGENA", "CONSOLCARGO", "EURO SHIPPING", "TRADE GLOBAL"])
+
                 filas.append({
                     "N°": idx + 1,
                     "Tipo Comp": t_comp,
@@ -1390,9 +1627,15 @@ with tab_compras:
                     "Fecha": fecha_str,
                     "Prefijo": prefijo,
                     "Folio": folio,
-                    "Factura": f"{prefijo}-{folio}" if prefijo else folio,
+                    "Factura": fac_k_full,
                     "Proveedor": nom_e,
                     "NIT Emisor": nit_e,
+                    "Ya Registrada": es_roja_reg,
+                    "Comprobante Previo": comp_prev,
+                    "Grupo Importación": grp_imp,
+                    "Cuenta Pasivo Especifica": cta_esp,
+                    "Es Aduanera": es_aduanera_flag,
+                    "Estado Registro": f"🔴 Ya Registrada ({comp_prev})" if es_roja_reg else ("🟡 Agente Aduanero" if any(k in nom_e.upper() for k in ["EURO SHIPPING", "TRADE GLOBAL"]) else ("🟢 Aduanera" if es_aduanera_flag else "⚪ Compra Pendiente")),
                     "Régimen Fiscal Emisor": resp_e if resp_e else "O-48 (Estándar)",
                     "Descripcion": desc,
                     "Operacion": op,
@@ -2391,13 +2634,242 @@ with tab_auditoria:
     else:
         st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
 
+with tab_triangulacion:
+    st.markdown("### 🔀 Triangulación y Cruce de Cuentas por Pagar (Importaciones y Aduanas)")
+    st.caption("Resuelve la sustitución de acreedores: cruza los pagos realizados por agentes aduaneros (Euro Shipping, Trade Global) contra las facturas ya causadas (DHL, Cargo Aduana), reconociendo retenciones asumidas (53152001) y diferencias no deducibles (53950501).")
+
+    if "df_procesado" in st.session_state:
+        df_total = st.session_state["df_procesado"]
+        
+        # Identificar facturas del gremio aduanero
+        cond_aduanera = (df_total.get("Es Aduanera", False) == True) | df_total["Proveedor"].str.upper().str.contains("EURO|TRADE|CARGO|ADUANA|DHL|PORTUARIA|ALMACENADORA|TERMINAL|CONSOLCARGO")
+        df_adu = df_total[cond_aduanera].copy()
+        
+        # Facturas de Agentes Principales (Amarillas)
+        df_agentes_all = df_adu[df_adu["Proveedor"].str.upper().str.contains("EURO SHIPPING|TRADE GLOBAL")].copy()
+        
+        # Facturas de Terceros Soporte (Rojas y Blancas)
+        df_terceros_all = df_adu[~df_adu.index.isin(df_agentes_all.index)].copy()
+
+        # Resumen general de importaciones
+        m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+        with m_c1:
+            st.metric("Facturas Agentes (Amarillas)", len(df_agentes_all))
+        with m_c2:
+            st.metric("Terceros Soporte (DHL / Aduanas)", len(df_terceros_all))
+        with m_c3:
+            n_rojas_adu = len(df_terceros_all[df_terceros_all.get("Ya Registrada", False) == True])
+            st.metric("Terceros Ya Causados (Rojas)", n_rojas_adu)
+        with m_c4:
+            n_blancas_adu = len(df_terceros_all[df_terceros_all.get("Ya Registrada", False) == False])
+            st.metric("Terceros Nuevos (Blancas)", n_blancas_adu)
+
+        st.markdown("---")
+
+        # Agrupación y Selección de Paquetes de Importación
+        # Cada factura de agente aduanero (Euro Shipping, Trade Global) representa una operación de cobro global
+        lista_opciones_agente = []
+        mapa_agentes = {}
+        for idx_ag, (_, ag) in enumerate(df_agentes_all.iterrows()):
+            key_ag = f"{ag['Proveedor'][:18]} (Fac {ag['Factura']}) — Total: ${ag['Total']:,.2f} [{ag['Fecha']}]"
+            lista_opciones_agente.append(key_ag)
+            mapa_agentes[key_ag] = ag
+
+        if not lista_opciones_agente:
+            st.warning("⚠️ No se encontraron facturas de agentes aduaneros principales (Euro Shipping o Trade Global) en este reporte.")
+        else:
+            col_sel_g1, col_sel_g2 = st.columns([2.5, 1])
+            with col_sel_g1:
+                sel_ag_key = st.selectbox("1. Selecciona la Factura del Agente Aduanero (Cobro Global):", lista_opciones_agente, key="sel_agente_triangulacion")
+                agente_actual = mapa_agentes[sel_ag_key]
+                tot_agente_actual = float(agente_actual["Total"])
+
+            with col_sel_g2:
+                st.write("")
+                st.write("")
+                st.info(f"📅 **Fecha:** {agente_actual['Fecha']} | Total: **${tot_agente_actual:,.2f}**")
+
+            # Identificar qué facturas de terceros corresponden a este paquete
+            # A. Si el Excel trae Grupo Importación definido (ej. grupo '1', '2', etc.), tomar esas
+            grp_id_ag = str(agente_actual.get("Grupo Importación", "")).strip()
+            terceros_predefinidos = []
+            if grp_id_ag and grp_id_ag != 'nan':
+                for _, tr in df_terceros_all[df_terceros_all["Grupo Importación"] == grp_id_ag].iterrows():
+                    terceros_predefinidos.append(tr["Factura"])
+
+            # B. Si no hay grupo predefinido en Excel, buscar sugerencias automáticas por ventana de fecha y aproximación
+            if not terceros_predefinidos:
+                try:
+                    f_ag_dt = pd.to_datetime(agente_actual["Fecha"], dayfirst=True)
+                    # Candidatos en ventana de +/- 25 días
+                    candidatos_periodo = []
+                    for _, tr in df_terceros_all.iterrows():
+                        try:
+                            f_tr_dt = pd.to_datetime(tr["Fecha"], dayfirst=True)
+                            diff_dias = (f_ag_dt - f_tr_dt).days
+                            if -5 <= diff_dias <= 35 and tr["Total"] < tot_agente_actual:
+                                candidatos_periodo.append(tr["Factura"])
+                        except:
+                            pass
+                    terceros_predefinidos = candidatos_periodo[:4]
+                except:
+                    terceros_predefinidos = []
+
+            # Selector interactivo para que el usuario pueda marcar/desmarcar con total libertad
+            opciones_terceros_lista = []
+            mapa_terceros = {}
+            for _, tr in df_terceros_all.iterrows():
+                es_r = tr.get("Ya Registrada", False)
+                comp_txt = f"🔴 [Ya Registrada en Siigo: {tr.get('Comprobante Previo', '10-Prev')}]" if es_r else "⚪ [Pendiente]"
+                tag_t = f"[{tr['Factura']}] {tr['Fecha']} - {tr['Proveedor'][:24]} (${tr['Total']:,.2f}) — {comp_txt}"
+                opciones_terceros_lista.append(tag_t)
+                mapa_terceros[tr["Factura"]] = tag_t
+
+            # Valores por defecto para el multiselect
+            defaults_sel = [mapa_terceros[fac] for fac in terceros_predefinidos if fac in mapa_terceros]
+
+            st.markdown("##### 2. Selecciona las facturas de terceros que van trianguladas en este paquete:")
+            st.caption("Marca o desmarca las facturas de terceros (Cargo Aduana, DHL, Almacenadoras, Puertos). Puedes incluir las facturas rojas (ya causadas) para cruzar sus cuentas por pagar:")
+
+            terceros_elegidos_tags = st.multiselect(
+                "Facturas de terceros incluidas:",
+                opciones_terceros_lista,
+                default=defaults_sel,
+                key=f"multisel_terceros_{agente_actual['Factura']}"
+            )
+
+            # Filtrar DataFrame de terceros seleccionados
+            facs_seleccionadas = [t.split("]")[0].replace("[", "").strip() for t in terceros_elegidos_tags]
+            terceros_actual = df_terceros_all[df_terceros_all["Factura"].isin(facs_seleccionadas)].copy()
+
+            # Resumen del Paquete Seleccionado
+            col_pq1, col_pq2 = st.columns([1.3, 2.5])
+            with col_pq1:
+                st.markdown(f"""
+                <div style="background:#fffbeb; border:1px solid #fde68a; border-left:5px solid #d97706; border-radius:8px; padding:14px; margin-bottom:12px;">
+                    <h4 style="margin:0 0 6px 0; color:#92400e;">🟡 Factura del Agente (Cobro Total)</h4>
+                    <p style="margin:0; font-size:14px; color:#78350f;">
+                        <b>Proveedor:</b> {agente_actual['Proveedor']}<br>
+                        <b>NIT:</b> {agente_actual['NIT Emisor']}<br>
+                        <b>Factura:</b> {agente_actual['Factura']}<br>
+                        <b>Total Facturado:</b> <span style="font-size:16px; font-weight:bold; color:#b45309;">${tot_agente_actual:,.2f}</span><br>
+                        <b>IVA de Importación / Serv:</b> ${float(agente_actual.get('IVA', 0.0)):,.2f}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col_pq2:
+                if not terceros_actual.empty:
+                    filas_terc_disp = []
+                    for _, tr in terceros_actual.iterrows():
+                        es_r = tr.get("Ya Registrada", False)
+                        badge_est = f"🔴 Ya en Siigo ({tr.get('Comprobante Previo', '10-Prev')})" if es_r else "⚪ Pendiente"
+                        filas_terc_disp.append({
+                            "Estado": badge_est,
+                            "Proveedor Tercero": tr["Proveedor"],
+                            "Factura": tr["Factura"],
+                            "Fecha": tr["Fecha"],
+                            "Valor Total": tr["Total"],
+                            "Cuenta Pasivo": tr.get("Cuenta Pasivo Especifica", "22050505" if "CARGO" in tr["Proveedor"] else "23359501")
+                        })
+                    df_terc_disp = pd.DataFrame(filas_terc_disp)
+                    st.dataframe(df_terc_disp.style.format({"Valor Total": "${:,.2f}"}), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("⚠️ No has seleccionado facturas de terceros para este paquete aún. Selecciona arriba las que correspondan.")
+
+        # CALCULAR ASIENTO CONTABLE CUADRADO DEL PAQUETE
+        df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual)
+
+        st.markdown("#### ⚖️ Asiento Contable Cuadrado del Cruce (Para Siigo):")
+        st.caption("Detalle de partida doble: cancela las cuentas por pagar a terceros, asume las retenciones y manda la diferencia a no deducible:")
+
+        st.dataframe(
+            df_asiento_paquete.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        c_cuad1, c_cuad2, c_cuad3, c_cuad4 = st.columns(4)
+        sum_deb_pq = df_asiento_paquete["Débito ($)"].sum()
+        sum_cred_pq = df_asiento_paquete["Crédito ($)"].sum()
+        dif_cuad_pq = abs(sum_deb_pq - sum_cred_pq)
+        
+        with c_cuad1:
+            st.metric("Total Débito", f"${sum_deb_pq:,.2f}")
+        with c_cuad2:
+            st.metric("Total Crédito", f"${sum_cred_pq:,.2f}")
+        with c_cuad3:
+            st.metric("Retenciones Asumidas (53152001)", f"${ret_asum:,.2f}")
+        with c_cuad4:
+            st.metric("Diferencia No Deducible (53950501)", f"${dif_no_ded:,.2f}")
+
+        if dif_cuad_pq < 0.05:
+            st.success("✅ **Comprobante de Cruce Verificado:** Partida doble cuadrada con sumas iguales al centavo ($0.00).")
+        else:
+            st.error(f"Diferencia de cuadre: ${dif_cuad_pq:,.2f}")
+
+        st.markdown("---")
+        st.markdown("#### 📥 Exportar Todos los Cruces de Importación para Siigo:")
+        st.caption("Genera una planilla formulada con todos los paquetes de importación triangulados listos para importar a Siigo:")
+
+        # Generar Excel de todos los cruces triangulados
+        todos_asientos_lista = []
+        consecutivo_cruce = 1
+        for g_k, g_v in grupos_dict.items():
+            df_as_p, _, _ = generar_asiento_triangulacion_paquete(g_v["agente"], g_v["terceros"])
+            for _, fila_as in df_as_p.iterrows():
+                todos_asientos_lista.append({
+                    "Paquete": f"Paquete #{g_k}",
+                    "Tipo Comprobante": 14,
+                    "Consecutivo": consecutivo_cruce,
+                    "Fecha Elaboración": g_v["agente"]["Fecha"],
+                    "Sigla Moneda": "COP",
+                    "Tasa Cambio": 1,
+                    "Código Cuenta": fila_as["Código Cuenta"],
+                    "Identificación Tercero": fila_as["Tercero / NIT"].split("-")[0].strip(),
+                    "Sucursal": 0,
+                    "Descripción": fila_as["Descripción Cuenta"],
+                    "Débito": fila_as["Débito ($)"],
+                    "Crédito": fila_as["Crédito ($)"]
+                })
+            consecutivo_cruce += 1
+
+        if todos_asientos_lista:
+            df_export_cruces = pd.DataFrame(todos_asientos_lista)
+            buf_cruce_ex = io.BytesIO()
+            with pd.ExcelWriter(buf_cruce_ex, engine="openpyxl") as wr_cr:
+                df_export_cruces.to_excel(wr_cr, sheet_name="interfaz_siigo_cruces", index=False)
+            buf_cruce_ex.seek(0)
+            
+            st.download_button(
+                label=f"📥 Descargar Planilla Siigo de Cruces de Importación ({len(grupos_dict)} Paquetes Triangulados)",
+                data=buf_cruce_ex.getvalue(),
+                file_name=f"Cruces_Importacion_Siigo_{empresa['nombre'].replace(' ', '_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+    else:
+        st.info("💡 Sube el reporte Excel de la DIAN en la Pestaña 1 para habilitar la triangulación y cruce de importaciones.")
+
+
 with tab_siigo:
     st.markdown("### Descargar Planilla Oficial Siigo Nube (3 Hojas)")
     st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' y 'Parametrización'.")
     
     if "df_procesado" in st.session_state:
-        df_p = st.session_state["df_procesado"]
+        df_full = st.session_state["df_procesado"]
         
+        # FILTRO DE PROTECCIÓN: Excluir facturas rojas (ya causadas en Siigo) y facturas que van por triangulación aduanera
+        n_rojas = len(df_full[df_full.get("Ya Registrada", False) == True])
+        df_p = df_full[
+            (df_full.get("Ya Registrada", False) == False) & 
+            (~((df_full.get("Es Aduanera", False) == True) & (df_full.get("Grupo Importación", "") != "")))
+        ].copy()
+        
+        if n_rojas > 0:
+            st.info(f"🛡️ **Protección contra duplicados:** Se excluyeron {n_rojas} facturas marcadas en rojo que ya estaban causadas en Siigo. Solo se están exportando las facturas nuevas.")
+            
         wb = openpyxl.Workbook()
         
         # 1. Hoja matriz_captura
