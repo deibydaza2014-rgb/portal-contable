@@ -330,7 +330,9 @@ def listar_trabajos_historial(empresa_dict):
     if os.path.exists(idx_file):
         try:
             with open(idx_file, "r", encoding="utf-8") as f_idx:
-                lista = json.load(f_idx)
+                raw_l = json.load(f_idx)
+                if isinstance(raw_l, list):
+                    lista = raw_l
         except Exception:
             lista = []
     if not lista and os.path.exists(base_dir):
@@ -344,8 +346,20 @@ def listar_trabajos_historial(empresa_dict):
                         lista.append(meta)
                 except Exception:
                     pass
-    lista.sort(key=lambda x: x.get("id", ""), reverse=True)
-    return lista
+
+    # Normalizar campos y verificar que exista df_procesado.pkl
+    valida = []
+    for item in lista:
+        if isinstance(item, dict) and "id" in item:
+            jdir = os.path.join(base_dir, item["id"])
+            if os.path.exists(os.path.join(jdir, "df_procesado.pkl")):
+                item.setdefault("total_facturas", 0)
+                item.setdefault("total_valor", 0.0)
+                item.setdefault("nombre_trabajo", f"Trabajo {item['id']}")
+                valida.append(item)
+                
+    valida.sort(key=lambda x: x.get("id", ""), reverse=True)
+    return valida
 
 def cargar_trabajo_historial(empresa_dict, job_id):
     base_dir = get_empresa_trabajos_dir(empresa_dict)
@@ -427,6 +441,64 @@ def eliminar_trabajo_historial(empresa_dict, job_id):
                 json.dump(index_data, f_idx, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+def exportar_respaldo_sesion_zip(empresa_dict, df_proc, dict_renom, dict_orig, excel_b, excel_n, zip_p=None):
+    """Empaqueta toda la sesión contable en un archivo ZIP descargable para respaldo indestructible."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if df_proc is not None:
+            zf.writestr("df_procesado.pkl", pickle.dumps(df_proc))
+        if excel_b:
+            zf.writestr("excel_original.xlsx", excel_b)
+        if zip_p:
+            zf.writestr("paquete_facturas.zip", zip_p)
+        meta = {
+            "empresa": empresa_dict.get("nombre", ""),
+            "nit": empresa_dict.get("nit", ""),
+            "excel_nombre": excel_n or "Reporte.xlsx",
+            "fecha_respaldo": datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p"),
+            "total_facturas": len(df_proc) if df_proc is not None else 0,
+            "total_pdfs_renombrados": len(dict_renom) if dict_renom else 0,
+            "total_pdfs_originales": len(dict_orig) if dict_orig else 0
+        }
+        zf.writestr("meta_sesion.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        if dict_renom:
+            for fn, bdata in dict_renom.items():
+                zf.writestr(f"pdfs_renombrados/{fn}", bdata)
+        if dict_orig:
+            for fn, bdata in dict_orig.items():
+                zf.writestr(f"pdfs_originales/{fn}", bdata)
+    buf.seek(0)
+    return buf.getvalue()
+
+def importar_respaldo_sesion_zip(zip_bytes, empresa_dict):
+    """Restaura una sesión contable completa desde un archivo ZIP de respaldo."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+            df_proc = None
+            if "df_procesado.pkl" in zf.namelist():
+                df_proc = pickle.loads(zf.read("df_procesado.pkl"))
+            excel_b = zf.read("excel_original.xlsx") if "excel_original.xlsx" in zf.namelist() else None
+            zip_p = zf.read("paquete_facturas.zip") if "paquete_facturas.zip" in zf.namelist() else None
+            excel_n = "Reporte_Restaurado.xlsx"
+            if "meta_sesion.json" in zf.namelist():
+                try:
+                    m = json.loads(zf.read("meta_sesion.json").decode("utf-8"))
+                    excel_n = m.get("excel_nombre", excel_n)
+                except:
+                    pass
+            dict_renom = {}
+            dict_orig = {}
+            for name in zf.namelist():
+                if name.startswith("pdfs_renombrados/") and name.endswith(".pdf"):
+                    fn = name.replace("pdfs_renombrados/", "")
+                    dict_renom[fn] = zf.read(name)
+                elif name.startswith("pdfs_originales/") and name.endswith(".pdf"):
+                    fn = name.replace("pdfs_originales/", "")
+                    dict_orig[fn] = zf.read(name)
+            return df_proc, dict_renom, dict_orig, excel_b, excel_n, zip_p
+    except Exception as e:
+        return None, {}, {}, None, "", None
 
 # ==============================================================================
 # MOTOR DE BÚSQUEDA Y EXTRACCIÓN INTELIGENTE DE PDF (UNIFICADO O SEPARADO)
@@ -748,43 +820,163 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
     # 4. Si no se encontró ningún archivo cuyo contenido coincida con esta factura, NO retornar una factura equivocada
     return None, None, None
 
-# PANEL DE HISTORIAL DE TRABAJOS Y AUDITORÍAS PASADAS
-st.markdown("### 🗂️ Historial de Trabajos y Auditorías Pasadas")
-with st.expander("📂 Consultar y Cargar Trabajos Pasados de esta Empresa", expanded=False):
-    trabajos_guardados = listar_trabajos_historial(empresa)
-    if trabajos_guardados:
-        st.caption("Selecciona cualquier trabajo realizado previamente para auditar facturas, ver PDFs o exportar:")
-        for tb in trabajos_guardados:
-            c_h1, c_h2, c_h3 = st.columns([3, 1, 1])
-            with c_h1:
-                n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
-                n_orig = tb.get("total_pdfs_originales", 0)
-                info_pdf_str = f"{n_renom} PDFs procesados" if n_renom > 0 else (f"{n_orig} PDFs subidos" if n_orig > 0 else "Sin PDFs")
-                st.markdown(f"📄 **{tb['nombre_trabajo']}** — {tb['total_facturas']} facturas (${tb['total_valor']:,.2f}) — **{info_pdf_str}**")
-            with c_h2:
-                if st.button("📂 Cargar este Trabajo", key=f"btn_h_load_{tb['id']}"):
-                    df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, tb["id"])
-                    if df_g is not None:
-                        st.session_state["df_procesado"] = df_g
-                    if pdfs_r_g:
-                        st.session_state["dict_pdfs"] = pdfs_r_g
-                    if pdfs_o_g:
-                        st.session_state["raw_uploaded_pdfs"] = pdfs_o_g
-                    if ex_b_g:
-                        st.session_state["excel_bytes"] = ex_b_g
-                        st.session_state["excel_nombre"] = ex_n_g
-                    if zip_g:
-                        st.session_state["zip_pdfs"] = zip_g
-                        st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
-                    st.session_state["job_actual_id"] = tb["id"]
-                    st.success(f"¡Trabajo '{tb['nombre_trabajo']}' cargado! Puedes ir a Auditoría o Siigo.")
+# AVISO DE TRABAJO PREVIO DISPONIBLE (SOLO SE CARGA SI EL USUARIO OPRIME EL BOTÓN)
+trabajos_existentes = listar_trabajos_historial(empresa)
+
+if "df_procesado" not in st.session_state and trabajos_existentes:
+    ultimo = trabajos_existentes[0]
+    nom_ult = ultimo.get("nombre_trabajo", f"Trabajo {ultimo.get('id', '')}")
+    n_fac = ultimo.get("total_facturas", 0)
+    val_tot = ultimo.get("total_valor", 0.0)
+    
+    st.markdown(f"""
+    <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:14px 18px; margin-bottom:14px;">
+        <h4 style="margin:0 0 6px 0; color:#166534;">📂 Tienes un trabajo guardado disponible</h4>
+        <p style="margin:0; color:#14532d; font-size:14px;">
+            Tienes guardado en memoria tu trabajo previo: <b>'{nom_ult}'</b> con <b>{n_fac} facturas</b> (${val_tot:,.2f}) y sus PDFs vinculados.<br>
+            • Si deseas continuar con este trabajo, haz clic en el botón verde.<br>
+            • Si hoy vas a implementar <b>facturas nuevas</b>, no tienes que oprimir nada y puedes subir tus nuevos archivos directamente abajo en la Pestaña 1.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    c_btn_c1, c_btn_c2 = st.columns([1.6, 3])
+    with c_btn_c1:
+        if st.button("📂 Cargar mi trabajo anterior", key="btn_cargar_trabajo_previo_on_demand", use_container_width=True):
+            df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, ultimo["id"])
+            if df_g is not None and not df_g.empty:
+                st.session_state["df_procesado"] = df_g
+                st.session_state["dict_pdfs"] = pdfs_r_g or {}
+                st.session_state["raw_uploaded_pdfs"] = pdfs_o_g or {}
+                st.session_state["excel_bytes"] = ex_b_g
+                st.session_state["excel_nombre"] = ex_n_g
+                st.session_state["zip_pdfs"] = zip_g
+                st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
+                st.session_state["job_actual_id"] = ultimo["id"]
+                st.session_state["_sesion_cargada_nombre"] = nom_ult
+                st.success(f"¡Trabajo '{nom_ult}' cargado con éxito!")
+                st.rerun()
+    with c_btn_c2:
+        st.caption("👈 Oprime aquí **únicamente** cuando desees restaurar el trabajo anterior. De lo contrario, continúa abajo con tus facturas nuevas.")
+
+# BANNER DE SESIÓN ACTIVA EN PANTALLA
+if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+    c_bnr1, c_bnr2 = st.columns([4, 1.4])
+    with c_bnr1:
+        nom_ses = st.session_state.get("_sesion_cargada_nombre", st.session_state.get("excel_nombre", "Reporte de Facturas"))
+        st.info(f"📋 **Trabajo Activo en Pantalla:** '{nom_ses}' ({len(st.session_state['df_procesado'])} facturas cargadas). Puedes auditar o exportar a Siigo.")
+    with c_bnr2:
+        if st.button("🆕 Limpiar / Subir Facturas Nuevas", key="btn_nuevo_trabajo_top", help="Limpia la pantalla para procesar un nuevo mes o facturas nuevas."):
+            for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_sesion_cargada_nombre", "_sesion_auto_recuperada", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
+# PANEL DE HISTORIAL DE TRABAJOS Y RESPALDOS INDESTRUCTIBLES
+trabajos_guardados = listar_trabajos_historial(empresa)
+panel_expanded = False
+
+with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", expanded=panel_expanded):
+    col_h_left, col_h_right = st.columns([1.5, 1])
+    
+    with col_h_left:
+        st.markdown("#### 📂 Trabajos Guardados en esta Empresa:")
+        if trabajos_guardados:
+            st.caption("Haz clic en 'Cargar' para recuperar de inmediato cualquier auditoría o mes previo:")
+            for tb in trabajos_guardados:
+                c_h1, c_h2, c_h3 = st.columns([3, 1.2, 0.5])
+                with c_h1:
+                    nom_tb = tb.get("nombre_trabajo", f"Trabajo {tb.get('id', '')}")
+                    n_facs = tb.get("total_facturas", 0)
+                    val_tot = tb.get("total_valor", 0.0)
+                    n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
+                    n_orig = tb.get("total_pdfs_originales", 0)
+                    info_pdf_str = f"{n_renom} PDFs procesados" if n_renom > 0 else (f"{n_orig} PDFs subidos" if n_orig > 0 else "Sin PDFs")
+                    st.markdown(f"📄 **{nom_tb}** — {n_facs} facturas (${val_tot:,.2f}) — **{info_pdf_str}**")
+                with c_h2:
+                    if st.button("📂 Cargar", key=f"btn_h_load_{tb['id']}"):
+                        df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, tb["id"])
+                        if df_g is not None:
+                            st.session_state["df_procesado"] = df_g
+                        if pdfs_r_g:
+                            st.session_state["dict_pdfs"] = pdfs_r_g
+                        if pdfs_o_g:
+                            st.session_state["raw_uploaded_pdfs"] = pdfs_o_g
+                        if ex_b_g:
+                            st.session_state["excel_bytes"] = ex_b_g
+                            st.session_state["excel_nombre"] = ex_n_g
+                        if zip_g:
+                            st.session_state["zip_pdfs"] = zip_g
+                            st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
+                        st.session_state["job_actual_id"] = tb["id"]
+                        st.session_state["_sesion_auto_recuperada"] = nom_tb
+                        st.success(f"¡Trabajo '{nom_tb}' cargado! Todo tu avance está listo.")
+                        st.rerun()
+                with c_h3:
+                    if st.button("🗑️", key=f"btn_h_del_{tb['id']}"):
+                        eliminar_trabajo_historial(empresa, tb["id"])
+                        st.rerun()
+        else:
+            st.info("💡 Aún no tienes trabajos guardados en el disco local para esta empresa.")
+
+    with col_h_right:
+        st.markdown("#### 🛡️ Respaldo Portable (.zip):")
+        st.caption("Guarda o restaura todo tu trabajo en un solo archivo, ideal si cambias de PC o si el servidor se reinicia:")
+        
+        # 1. Botón para exportar respaldo de la sesión activa
+        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+            zip_respaldo_bytes = exportar_respaldo_sesion_zip(
+                empresa,
+                st.session_state.get("df_procesado"),
+                st.session_state.get("dict_pdfs", {}),
+                st.session_state.get("raw_uploaded_pdfs", {}),
+                st.session_state.get("excel_bytes"),
+                st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                st.session_state.get("zip_pdfs")
+            )
+            nom_respaldo = f"Respaldo_Sesion_{empresa['nombre'].replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d')}.zip"
+            st.download_button(
+                label="💾 Descargar Respaldo Completo de esta Sesión (.zip)",
+                data=zip_respaldo_bytes,
+                file_name=nom_respaldo,
+                mime="application/zip",
+                use_container_width=True,
+                help="Descarga un solo archivo con TODO (Excel, cálculos, retenciones y PDFs vinculados)."
+            )
+        
+        # 2. Uploader para restaurar desde un archivo ZIP de respaldo previo
+        archivo_zip_restaurar = st.file_uploader(
+            "📥 Restaurar Sesión desde Archivo de Respaldo (.zip):",
+            type=["zip"],
+            key="upl_zip_restore_historial"
+        )
+        if archivo_zip_restaurar is not None:
+            with st.spinner("Restaurando sesión completa desde el respaldo..."):
+                df_res, renom_res, orig_res, ex_b_res, ex_n_res, zip_res = importar_respaldo_sesion_zip(
+                    archivo_zip_restaurar.getvalue(), empresa
+                )
+                if df_res is not None:
+                    st.session_state["df_procesado"] = df_res
+                    st.session_state["dict_pdfs"] = renom_res or {}
+                    st.session_state["raw_uploaded_pdfs"] = orig_res or {}
+                    st.session_state["excel_bytes"] = ex_b_res
+                    st.session_state["excel_nombre"] = ex_n_res
+                    st.session_state["zip_pdfs"] = zip_res
+                    st.session_state["total_zip_pdfs"] = len(renom_res) if renom_res else 0
+                    
+                    # Guardar también en el disco local
+                    guardar_trabajo_en_historial(
+                        empresa, df_res,
+                        excel_bytes=ex_b_res,
+                        excel_nombre=ex_n_res,
+                        dict_pdfs_renombrados=renom_res,
+                        dict_pdfs_originales=orig_res,
+                        zip_bytes=zip_res
+                    )
+                    st.session_state["_sesion_auto_recuperada"] = f"Respaldo {archivo_zip_restaurar.name}"
+                    st.success(f"¡Sesión restaurada con éxito! Se recuperaron {len(df_res)} facturas y {len(renom_res)} PDFs.")
                     st.rerun()
-            with c_h3:
-                if st.button("🗑️", key=f"btn_h_del_{tb['id']}"):
-                    eliminar_trabajo_historial(empresa, tb["id"])
-                    st.rerun()
-    else:
-        st.info("💡 Aún no tienes trabajos guardados para esta empresa. Cada vez que subas un archivo Excel o proceses PDFs, se guardará aquí como un trabajo pasado para que nunca tengas que empezar desde cero.")
+                else:
+                    st.error("El archivo ZIP no contiene un respaldo válido de sesión contable.")
 
 st.markdown("---")
 
@@ -1244,7 +1436,7 @@ with tab_compras:
     if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
         df_proc = st.session_state["df_procesado"]
         
-        c_job1, c_job2, c_job3 = st.columns([2.5, 1, 1])
+        c_job1, c_job2, c_job3, c_job4 = st.columns([2.2, 0.9, 0.9, 1.2])
         with c_job1:
             n_orig_mem = len(st.session_state.get("raw_uploaded_pdfs", {}))
             n_renom_mem = len(st.session_state.get("dict_pdfs", {}))
@@ -1253,7 +1445,7 @@ with tab_compras:
         with c_job2:
             if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
                 st.download_button(
-                    label="📥 Descargar Excel",
+                    label="📥 Excel",
                     data=st.session_state["excel_bytes"],
                     file_name=st.session_state.get("excel_nombre", "Reporte_Guardado.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1263,13 +1455,31 @@ with tab_compras:
         with c_job3:
             if "zip_pdfs" in st.session_state and st.session_state["zip_pdfs"]:
                 st.download_button(
-                    label="📦 Descargar ZIP Facturas",
+                    label="📦 ZIP Facturas",
                     data=st.session_state["zip_pdfs"],
                     file_name=f"Facturas_{empresa['nombre'].replace(' ', '_')}.zip",
                     mime="application/zip",
                     key="btn_dl_zip_tab_compras",
                     use_container_width=True
                 )
+        with c_job4:
+            zip_respaldo_b = exportar_respaldo_sesion_zip(
+                empresa, df_proc,
+                st.session_state.get("dict_pdfs", {}),
+                st.session_state.get("raw_uploaded_pdfs", {}),
+                st.session_state.get("excel_bytes"),
+                st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                st.session_state.get("zip_pdfs")
+            )
+            st.download_button(
+                label="💾 Guardar Sesión (.zip)",
+                data=zip_respaldo_b,
+                file_name=f"Respaldo_Sesion_{empresa['nombre'].replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d')}.zip",
+                mime="application/zip",
+                key="btn_dl_respaldo_bar",
+                use_container_width=True,
+                help="Guarda toda la sesión (Excel + Cuentas + PDFs) en un solo archivo para restaurar mañana en 1 segundo."
+            )
 
     
         c_aud_btn1, c_aud_btn2 = st.columns(2)
