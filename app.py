@@ -1491,8 +1491,8 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
 
 def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view"):
     """
-    Visor HTML5 con Canvas (PDF.js 3.11.174) — 100% compatible con Chrome, Edge y Streamlit Cloud,
-    sin bloqueos de iframe ni dependencias complejas.
+    Visor oficial integrado comprobado mediante Blob URL nativo en memoria.
+    Carga de forma inmediata la factura en pantalla sin depender de librerías externas o scripts que puedan ser bloqueados.
     """
     if not pdf_bytes or not isinstance(pdf_bytes, (bytes, bytearray)):
         st.error("⚠️ El archivo PDF no contiene datos válidos.")
@@ -1529,126 +1529,40 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
 
     st.write("")
 
-    visor_height = max(700, min(3200, num_pags_tot * 780))
-    
-    html_visor = f"""
+    # Visor integrado nativo mediante Blob URL directo (método comprobado sin dependencias externas)
+    html_blob = f"""
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset="utf-8">
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.min.js"></script>
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.worker.min.js"></script>
       <style>
-        body {{
-          margin: 0;
-          padding: 14px;
-          background: #f8fafc;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }}
-        .page-box {{
-          margin-bottom: 20px;
-          box-shadow: 0 4px 14px rgba(0,0,0,0.12);
-          border-radius: 6px;
-          background: white;
-          overflow: hidden;
-          border: 1px solid #cbd5e1;
-          width: 100%;
-          max-width: 860px;
-        }}
-        .page-header {{
-          background: #0f172a;
-          color: #f8fafc;
-          font-size: 13px;
-          font-weight: 600;
-          padding: 8px 14px;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-        }}
-        canvas {{
-          display: block;
-          width: 100%;
-          height: auto;
-        }}
-        #status {{
-          color: #0284c7;
-          padding: 20px;
-          font-size: 15px;
-          text-align: center;
-          font-weight: 600;
-        }}
+        body {{ margin: 0; padding: 0; background: #f8fafc; font-family: -apple-system, sans-serif; }}
+        #frame-wrap {{ width: 100%; height: 820px; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; background: white; }}
+        iframe {{ width: 100%; height: 100%; border: none; }}
       </style>
     </head>
     <body>
-      <div id="status">⏳ Renderizando factura ({num_pags_tot} página(s))...</div>
-      <div id="viewer-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
-      
+      <div id="frame-wrap">
+        <iframe id="native-pdf-frame"></iframe>
+      </div>
       <script>
         try {{
           const b64 = "{b64_pdf}";
-          const binStr = atob(b64);
-          const len = binStr.length;
-          const bytes = new Uint8Array(len);
-          for (let i = 0; i < len; i++) {{
-            bytes[i] = binStr.charCodeAt(i);
+          const bin = atob(b64);
+          const bArr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) {{
+            bArr[i] = bin.charCodeAt(i);
           }}
-
-          if (typeof pdfjsLib !== 'undefined') {{
-            pdfjsLib.GlobalWorkerOptions.workerSrc = '';
-
-            const loadingTask = pdfjsLib.getDocument({{ data: bytes }});
-            loadingTask.promise.then(function(pdf) {{
-              document.getElementById('status').style.display = 'none';
-              const container = document.getElementById('viewer-container');
-              container.innerHTML = '';
-              
-              for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
-                (function(num) {{
-                  pdf.getPage(num).then(function(page) {{
-                    const scale = 1.5;
-                    const viewport = page.getViewport({{ scale: scale }});
-                    
-                    const pageBox = document.createElement('div');
-                    pageBox.className = 'page-box';
-                    
-                    const pageHeader = document.createElement('div');
-                    pageHeader.className = 'page-header';
-                    pageHeader.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:#0284c7; color:white; padding:2px 8px; border-radius:4px; font-size:11px;">Hoja ' + num + ' de ' + pdf.numPages + '</span>';
-                    pageBox.appendChild(pageHeader);
-                    
-                    const canvas = document.createElement('canvas');
-                    const ctx = canvas.getContext('2d');
-                    canvas.height = viewport.height;
-                    canvas.width = viewport.width;
-                    
-                    pageBox.appendChild(canvas);
-                    container.appendChild(pageBox);
-                    
-                    page.render({{ canvasContext: ctx, viewport: viewport }});
-                  }}).catch(function(pErr) {{
-                    console.error('Error renderizando página ' + num, pErr);
-                  }});
-                }})(pNum);
-              }}
-            }}).catch(function(err) {{
-              console.error('Error al cargar PDF:', err);
-              document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>📄 Factura lista para abrir</h4><p style="color:#64748b;">Abre el documento directamente o descárgalo:</p><a href="data:application/pdf;base64,' + b64 + '" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
-            }});
-          }} else {{
-            document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>📄 Factura lista</h4><a href="data:application/pdf;base64,' + b64 + '" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
-          }}
+          const bUrl = URL.createObjectURL(new Blob([bArr], {{ type: 'application/pdf' }}));
+          document.getElementById('native-pdf-frame').src = bUrl + '#toolbar=1&navpanes=1';
         }} catch (e) {{
-          console.error('Excepción general en visor:', e);
-          document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>Error al decodificar documento</h4></div>';
+          console.error('Error cargando Blob PDF:', e);
         }}
       </script>
     </body>
     </html>
     """
-    components.html(html_visor, height=visor_height, scrolling=True)
+    components.html(html_blob, height=840, scrolling=True)
 
 
 # AVISO DE TRABAJO PREVIO DISPONIBLE (SOLO SE CARGA SI EL USUARIO OPRIME EL BOTÓN)
