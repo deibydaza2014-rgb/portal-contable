@@ -1,3 +1,7 @@
+
+app_corregido.py
+
+100%
 import pickle
 import shutil
 import json
@@ -1502,7 +1506,7 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
     """
     Visor oficial 100% blindado y garantizado:
     1. Desbloquea y desencripta el PDF primero para que no pida contraseña.
-    2. Renderizado en lienzo HTML5 Canvas mediante PDF.js con Blob Worker (100% inmune al bloqueo de Chrome).
+    2. Renderizado de alta definición nativo en imágenes mediante pypdfium2 (CERO caras tristes 📄🙁, CERO bloqueos de Chrome).
     3. Botón para abrir a pantalla completa en pestaña nueva y botón de descarga directa.
     4. Cuadro formal con resumen contable de la factura.
     """
@@ -1557,117 +1561,121 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
 
     st.write("")
 
-    # 3. VISOR NATIVO CANVAS HTML5 (PDF.js con Blob Worker — CERO CARAS TRISTES, CERO BLOQUEOS DE CHROME)
-    visor_height = max(680, min(3600, num_pags_tot * 850))
-    html_canvas_viewer = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-      <style>
-        body {{
-          margin: 0;
-          padding: 10px;
-          background: #f1f5f9;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }}
-        .page-card {{
-          margin-bottom: 18px;
-          background: white;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.12);
-          border-radius: 6px;
-          overflow: hidden;
-          width: 100%;
-          max-width: 860px;
-          border: 1px solid #cbd5e1;
-        }}
-        .page-title {{
-          background: #0070ba;
-          color: white;
-          padding: 8px 14px;
-          font-size: 13px;
-          font-weight: 600;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-        }}
-        canvas {{
-          display: block;
-          width: 100%;
-          height: auto;
-        }}
-        #msg {{
-          font-size: 14px;
-          color: #0284c7;
-          padding: 20px;
-          text-align: center;
-          font-weight: 600;
-        }}
-      </style>
-    </head>
-    <body>
-      <div id="msg">⏳ Cargando y renderizando factura ({num_pags_tot} página(s))...</div>
-      <div id="pages-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
+    # 3. RENDERIZADO VISUAL DIRECTO EN IMÁGENES NATIVAS (CERO CARAS TRISTES, CERO BLOQUEOS DE CHROME)
+    imgs_paginas = []
+    if HAS_PDFIUM:
+        try:
+            doc_p = pdfium.PdfDocument(pdf_usar)
+            for idx_pg in range(len(doc_p)):
+                imgs_paginas.append(doc_p[idx_pg].render(scale=1.75).to_pil())
+        except Exception:
+            imgs_paginas = []
 
-      <script>
-        (async function() {{
-          try {{
-            const b64 = "{b64_pdf}";
-            const raw = atob(b64);
-            const uint8Array = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) {{
-              uint8Array[i] = raw.charCodeAt(i);
+    if imgs_paginas:
+        for idx_p, img in enumerate(imgs_paginas):
+            st.markdown(f"""
+            <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:13.5px; display:flex; justify-content:space-between; align-items:center; margin-top:14px;">
+                <span>📄 Factura: {fac_num_str} — {prov_str}</span>
+                <span style="background:rgba(255,255,255,0.25); padding:2px 10px; border-radius:10px; font-size:12px;">Hoja {idx_p + 1} de {len(imgs_paginas)}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            st.image(img, use_container_width=True)
+    else:
+        # Fallback a Canvas HTML5 si pypdfium no estuviera disponible
+        visor_height = max(680, min(3600, num_pags_tot * 850))
+        html_canvas_viewer = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+          <style>
+            body {{
+              margin: 0;
+              padding: 10px;
+              background: #f1f5f9;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             }}
-
-            // Cargar el worker mediante Blob para evitar bloqueos de origen cruzado en iframes
-            try {{
-              const resp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js');
-              const workerScript = await resp.text();
-              const workerBlob = new Blob([workerScript], {{ type: 'text/javascript' }});
-              pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
-            }} catch (wErr) {{
-              pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+            .page-card {{
+              margin-bottom: 18px;
+              background: white;
+              box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+              border-radius: 6px;
+              overflow: hidden;
+              width: 100%;
+              max-width: 860px;
+              border: 1px solid #cbd5e1;
             }}
-
-            const pdf = await pdfjsLib.getDocument({{ data: uint8Array }}).promise;
-            document.getElementById('msg').style.display = 'none';
-            const container = document.getElementById('pages-container');
-
-            for (let num = 1; num <= pdf.numPages; num++) {{
-              const page = await pdf.getPage(num);
-              const viewport = page.getViewport({{ scale: 1.5 }});
-
-              const card = document.createElement('div');
-              card.className = 'page-card';
-
-              const title = document.createElement('div');
-              title.className = 'page-title';
-              title.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:10px; font-size:11px;">Hoja ' + num + ' de ' + pdf.numPages + '</span>';
-              card.appendChild(title);
-
-              const canvas = document.createElement('canvas');
-              const ctx = canvas.getContext('2d');
-              canvas.height = viewport.height;
-              canvas.width = viewport.width;
-              card.appendChild(canvas);
-
-              container.appendChild(card);
-              await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
+            .page-title {{
+              background: #0070ba;
+              color: white;
+              padding: 8px 14px;
+              font-size: 13px;
+              font-weight: 600;
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
             }}
-          }} catch (err) {{
-            console.error('Error renderizando:', err);
-            document.getElementById('msg').innerHTML = '<div style="background:white; padding:20px; border-radius:8px; border:2px solid #0070ba; text-align:center;"><h4>📄 Factura Lista</h4><p style="color:#64748b;">Haz clic abajo para abrir el documento a pantalla completa:</p><a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
-          }}
-        }})();
-      </script>
-    </body>
-    </html>
-    """
-    components.html(html_canvas_viewer, height=visor_height, scrolling=True)
+            canvas {{
+              display: block;
+              width: 100%;
+              height: auto;
+            }}
+            #msg {{
+              font-size: 14px;
+              color: #0284c7;
+              padding: 20px;
+              text-align: center;
+              font-weight: 600;
+            }}
+          </style>
+        </head>
+        <body>
+          <div id="msg">⏳ Cargando y renderizando factura ({num_pags_tot} página(s))...</div>
+          <div id="pages-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
+          <script>
+            (async function() {{
+              try {{
+                const b64 = "{b64_pdf}";
+                const raw = atob(b64);
+                const uint8Array = new Uint8Array(raw.length);
+                for (let i = 0; i < raw.length; i++) {{
+                  uint8Array[i] = raw.charCodeAt(i);
+                }}
+                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+                const pdf = await pdfjsLib.getDocument({{ data: uint8Array }}).promise;
+                document.getElementById('msg').style.display = 'none';
+                const container = document.getElementById('pages-container');
+
+                for (let num = 1; num <= pdf.numPages; num++) {{
+                  const page = await pdf.getPage(num);
+                  const viewport = page.getViewport({{ scale: 1.5 }});
+                  const card = document.createElement('div');
+                  card.className = 'page-card';
+                  const title = document.createElement('div');
+                  title.className = 'page-title';
+                  title.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:10px; font-size:11px;">Hoja ' + num + ' de ' + pdf.numPages + '</span>';
+                  card.appendChild(title);
+                  const canvas = document.createElement('canvas');
+                  const ctx = canvas.getContext('2d');
+                  canvas.height = viewport.height;
+                  canvas.width = viewport.width;
+                  card.appendChild(canvas);
+                  container.appendChild(card);
+                  await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
+                }}
+              }} catch (err) {{
+                document.getElementById('msg').innerHTML = '<div style="background:white; padding:20px; border-radius:8px; border:2px solid #0070ba; text-align:center;"><h4>📄 Factura Lista</h4><p style="color:#64748b;">Utiliza el botón de descarga o abrir en otra ventana.</p></div>';
+              }}
+            }})();
+          </script>
+        </body>
+        </html>
+        """
+        components.html(html_canvas_viewer, height=visor_height, scrolling=True)
 
     # 4. CUADRO RESUMEN OFICIAL CON VALORES CONTABLES
     st.markdown(f"""
@@ -1678,6 +1686,7 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
         </div>
     </div>
     """, unsafe_allow_html=True)
+
 
 
 # AVISO DE TRABAJO PREVIO DISPONIBLE (SOLO SE CARGA SI EL USUARIO OPRIME EL BOTÓN)
@@ -2938,9 +2947,39 @@ with tab_triangulacion:
     if "df_procesado" in st.session_state:
         df_total = st.session_state["df_procesado"]
         
-        # Identificar facturas del gremio aduanero
-        cond_aduanera = (df_total.get("Es Aduanera", False) == True) | df_total["Proveedor"].str.upper().str.contains("EURO|TRADE|CARGO|ADUANA|DHL|PORTUARIA|ALMACENADORA|TERMINAL|CONSOLCARGO")
-        df_adu = df_total[cond_aduanera].copy()
+        # Identificar facturas del gremio aduanero / logístico y de importación
+        cond_aduanera = (
+            (df_total.get("Es Aduanera", False) == True) | 
+            (df_total.get("Grupo Importación", "").astype(str).str.strip() != "") | 
+            df_total["Proveedor"].str.upper().str.contains("EURO|TRADE|CARGO|ADUANA|DHL|PORTUARIA|ALMACENADORA|TERMINAL|CONSOLCARGO|LOGISTICA|LOGISTICS|TRANSPORTE|BODEGA|ALMACEN|DEPOSITO|MARITIMA|AEREA|FEDEX|UPS|SERVIENTREGA|DEPRISA|COORDINADORA|COLTRANS|COLMAS|HUBEMAR|TIBA|DSV|PANALPINA|KUEHNE|SCHENKER|BLUE LOGISTICS|AGUNSA|MEDITERRANEAN|MAERSK|HAPAG|SEABOARD|HAMBURG|CMA CGM|EVERGREEN|COSCO|ONE|YANG MING")
+        )
+
+        c_inc1, c_inc2 = st.columns([2.8, 1.2])
+        with c_inc1:
+            incluir_todas_blancas = st.checkbox(
+                "⚪ **Relacionar también facturas NO contabilizadas (Pendientes / Blancas)** junto con las ya contabilizadas (🔴)",
+                value=True,
+                help="Cruza y relaciona tanto facturas de terceros ya causadas en Siigo (rojas) como las que aún no están contabilizadas (blancas), respetando fechas cronológicas de Enero a Diciembre y valor concorde al cobro del Agente.",
+                key="chk_triang_inc_todas_blancas"
+            )
+        with c_inc2:
+            solo_logistica_blancas = st.checkbox(
+                "Filtrar solo logísticas en pendientes",
+                value=False,
+                help="Si no se marca, cualquier factura pendiente libre podrá entrar a conciliar los cobros de Euro/Trade.",
+                key="chk_triang_solo_logistica_blancas"
+            )
+
+        if incluir_todas_blancas:
+            if solo_logistica_blancas:
+                cond_pool = cond_aduanera
+            else:
+                # Incluye tanto facturas aduaneras como cualquier factura pendiente (blanca)
+                cond_pool = cond_aduanera | (df_total.get("Ya Registrada", False) == False)
+        else:
+            cond_pool = cond_aduanera
+
+        df_adu = df_total[cond_pool].copy()
         
         # Configuración dinámica y extensible de Agentes Coordinadores (Forwarders)
         AGENTES_COORDINADORES_BASE = ["EURO SHIPPING", "TRADE GLOBAL", "CONSOLCARGO", "BLUE LOGISTICS", "KUEHNE", "PANALPINA", "DSV", "EXPEDITORS", "TIBA", "HUBEMAR"]
@@ -2967,17 +3006,20 @@ with tab_triangulacion:
         df_terceros_all = df_adu[~df_adu.index.isin(df_agentes_all.index)].copy()
 
         # Resumen superior
-        m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+        m_c1, m_c2, m_c3, m_c4, m_c5 = st.columns(5)
         with m_c1:
             st.metric("Operaciones Agente (Euro / Trade)", len(df_agentes_all))
         with m_c2:
-            st.metric("Facturas Soporte (DHL / Aduana / Garaje)", len(df_terceros_all))
+            st.metric("Facturas Soporte en Pool", len(df_terceros_all), help="Total de facturas candidatas para cruce")
         with m_c3:
             n_rojas_adu = len(df_terceros_all[df_terceros_all.get("Ya Registrada", False) == True])
-            st.metric("Terceros Ya Causados (🔴)", n_rojas_adu)
+            st.metric("Terceros Contabilizados (🔴)", n_rojas_adu, help="Causadas previamente en Siigo")
         with m_c4:
             n_blancas_adu = len(df_terceros_all[df_terceros_all.get("Ya Registrada", False) == False])
-            st.metric("Terceros Nuevos (⚪)", n_blancas_adu)
+            st.metric("Terceros Pendientes (⚪)", n_blancas_adu, help="No contabilizadas aún (Nuevas)")
+        with m_c5:
+            n_cuad_prev = sum([1 for p in st.session_state.get("paquetes_importacion", {}).values() if p.get("diferencia", 999) < 1.0])
+            st.metric("Paquetes Cuadrados ($0.00)", f"{n_cuad_prev} ✅")
 
         st.markdown("---")
 
@@ -2987,91 +3029,161 @@ with tab_triangulacion:
             # 1. FUNCIÓN DE AUTO-EMPAQUETAMIENTO INTELIGENTE
             # Algoritmo de combinación: encuentra para cada Euro Shipping el subconjunto de DHL + Agencia + Garaje que suma su valor
             def auto_empaquetar_inteligente(df_ag, df_terc):
+                """
+                Algoritmo cronológico de alta precisión para Agencias Aduaneras (Euro Shipping / Trade Global):
+                1. Ordena cronológicamente de Enero hacia Diciembre.
+                2. Cruza y relaciona tanto facturas de terceros YA contabilizadas (🔴) como NO contabilizadas (⚪).
+                3. Para cada factura de agente (ej. 19 de Enero), busca facturas de terceros (DHL, Agencia, Garaje, etc.):
+                   - Prioritariamente en fechas anteriores o el mismo día (-30 a 0 días de diferencia).
+                   - O en una fecha ligeramente superior (+1 a +12 días de diferencia).
+                   - Descarta o penaliza fechas lejanas de otros meses.
+                4. Exige concordancia estricta de precio: la suma del Saldo Cruce (Base + IVA) debe concordar
+                   exactamente con el valor total facturado por el agente aduanero.
+                """
                 import itertools
                 pqs_res = {}
+                
+                # 1. Asegurar orden cronológico estricto de Enero hacia Diciembre
+                df_ag_ord = df_ag.copy()
+                df_ag_ord["_dt"] = pd.to_datetime(df_ag_ord["Fecha"], dayfirst=True, errors="coerce")
+                df_ag_ord = df_ag_ord.sort_values(by="_dt", ascending=True)
+                
                 pool_t = df_terc.copy()
+                pool_t["_dt"] = pd.to_datetime(pool_t["Fecha"], dayfirst=True, errors="coerce")
+                pool_t = pool_t.sort_values(by="_dt", ascending=True)
                 pool_t["_asignado_pq"] = 0
                 
-                for idx_ag_i, (_, ag_i) in enumerate(df_ag.iterrows()):
+                for idx_ag_i, (_, ag_i) in enumerate(df_ag_ord.iterrows()):
                     pq_id_i = idx_ag_i + 1
                     target_i = float(ag_i["Total"])
-                    f_ag_dt_i = pd.to_datetime(ag_i["Fecha"], dayfirst=True, errors="coerce")
+                    f_ag_dt_i = ag_i["_dt"]
                     
                     cands_i = pool_t[pool_t["_asignado_pq"] == 0].copy()
                     if cands_i.empty:
                         pqs_res[pq_id_i] = {"agente": ag_i, "terceros": pd.DataFrame(), "diferencia": target_i}
                         continue
                         
-                    # Priorizar coincidencia directa por NIT Facturado a / Nombre Facturado a (Mandato)
-                    nit_ag_clean = re.sub(r'\D', '', str(ag_i.get("NIT Emisor", "")))
-                    nom_ag_u = str(ag_i.get("Proveedor", "")).upper()
-                    
-                    # Identificar terceros que traen explícitamente el NIT o Nombre de este agente en notas
-                    cands_i["_score_agente"] = 0
+                    # Evaluar concordancia cronológica y de mandato para cada factura de tercero
+                    cand_l = []
                     for c_idx_k, c_row_k in cands_i.iterrows():
+                        tb_k = float(c_row_k.get("Base", 0.0))
+                        tiv_k = float(c_row_k.get("IVA", 0.0))
+                        sc_k = float(c_row_k.get("Total Neto", 0.0)) or (tb_k + tiv_k if tb_k > 0 else float(c_row_k.get("Total", 0.0)))
+                        p_u_k = str(c_row_k["Proveedor"]).upper()
+                        rol_k = "DHL" if "DHL" in p_u_k else ("AGENCIA" if any(k in p_u_k for k in ["CARGO", "ADUANA"]) else "GARAJE")
+                        
+                        # 2. Análisis de fechas: concordancia de Enero a Diciembre
+                        c_dt = c_row_k["_dt"]
+                        score_tiempo = 0
+                        diff_dias = 0
+                        relacion_fecha_txt = "Sin fecha"
+                        
+                        if pd.notna(f_ag_dt_i) and pd.notna(c_dt):
+                            diff_dias = int((c_dt - f_ag_dt_i).days)
+                            if diff_dias == 0:
+                                score_tiempo = 120
+                                relacion_fecha_txt = "🟢 Mismo día (0d)"
+                            elif -30 <= diff_dias < 0:
+                                # Fechas anteriores en la misma ventana de despacho (ej. 1 a 19 de enero)
+                                score_tiempo = 100 - abs(diff_dias) * 2
+                                relacion_fecha_txt = f"⬅️ Anterior ({abs(diff_dias)}d antes)"
+                            elif 0 < diff_dias <= 12:
+                                # Fechas ligeramente superiores (ej. 20 a 25 de enero)
+                                score_tiempo = 85 - (diff_dias * 3)
+                                relacion_fecha_txt = f"➡️ Superior (+{diff_dias}d desp)"
+                            elif -60 <= diff_dias < -30:
+                                score_tiempo = 30 - abs(diff_dias)
+                                relacion_fecha_txt = f"⚠️ Anterior lejano ({abs(diff_dias)}d antes)"
+                            else:
+                                score_tiempo = -abs(diff_dias) * 5
+                                relacion_fecha_txt = f"⛔ Fuera de rango ({diff_dias:+d}d)"
+                        
+                        # Coincidencia directa por Mandato (NIT o Nombre del agente en notas)
                         nit_fact = re.sub(r'\D', '', str(c_row_k.get("NIT Facturado A", "") or c_row_k.get("nit_facturado_a", "")))
                         nom_fact = str(c_row_k.get("Facturado A", "") or c_row_k.get("nombre_facturado_a", "")).upper()
+                        nit_ag_clean = re.sub(r'\D', '', str(ag_i.get("NIT Emisor", "")))
+                        nom_ag_u = str(ag_i.get("Proveedor", "")).upper()
+                        
+                        score_mandato = 0
                         if nit_ag_clean and nit_fact and nit_ag_clean[:8] in nit_fact:
-                            cands_i.at[c_idx_k, "_score_agente"] += 100
+                            score_mandato += 150
                         elif any(w in nom_fact for w in nom_ag_u.split() if len(w) >= 4):
-                            cands_i.at[c_idx_k, "_score_agente"] += 50
+                            score_mandato += 80
                             
-                    # Priorizar por coincidencia de agente y ventana de fechas
-                    if pd.notna(f_ag_dt_i):
-                        cands_i["_diff_d"] = (pd.to_datetime(cands_i["Fecha"], dayfirst=True, errors="coerce") - f_ag_dt_i).dt.days.abs()
-                        cands_i = cands_i.sort_values(by=["_score_agente", "_diff_d"], ascending=[False, True])
+                        c_row_k_copy = c_row_k.copy()
+                        c_row_k_copy["Relación Fecha"] = relacion_fecha_txt
+                        c_row_k_copy["Diferencia Días"] = diff_dias
                         
-                    cand_l = []
-                    for c_idx_i, c_row_i in cands_i.iterrows():
-                        tb_i = float(c_row_i.get("Base", 0.0))
-                        tiv_i = float(c_row_i.get("IVA", 0.0))
-                        sc_i = float(c_row_i.get("Total Neto", 0.0)) or (tb_i + tiv_i if tb_i > 0 else float(c_row_i.get("Total", 0.0)))
-                        p_u_i = str(c_row_i["Proveedor"]).upper()
-                        rol_i = "DHL" if "DHL" in p_u_i else ("AGENCIA" if any(k in p_u_i for k in ["CARGO", "ADUANA"]) else "GARAJE")
-                        cand_l.append({"index": c_idx_i, "fac": c_row_i["Factura"], "saldo": sc_i, "rol": rol_i, "row": c_row_i})
+                        cand_l.append({
+                            "index": c_idx_k,
+                            "fac": c_row_k["Factura"],
+                            "saldo": sc_k,
+                            "rol": rol_k,
+                            "diff_dias": diff_dias,
+                            "score_total": score_tiempo + score_mandato,
+                            "row": c_row_k_copy
+                        })
                         
+                    # Ordenar candidatos dando prioridad a concordancia de fecha y mandato
+                    cand_l.sort(key=lambda x: x["score_total"], reverse=True)
+                    
+                    # 3. Búsqueda de combinación con precio concorde exacto (target_i)
+                    # Busca combinaciones de 1 a 4 facturas de terceros (tanto 🔴 contabilizadas como ⚪ pendientes)
                     best_combo_i = []
                     best_diff_i = float("inf")
+                    best_score_i = -float("inf")
                     
-                    dhls_i = [c for c in cand_l if c["rol"] == "DHL"]
-                    agencias_i = [c for c in cand_l if c["rol"] == "AGENCIA"]
-                    garajes_i = [c for c in cand_l if c["rol"] == "GARAJE"]
-                    
-                    # 1. Probar 1 DHL + 1 Agencia + 1 Garaje / Almacenadora
-                    for d_i in dhls_i[:12]:
-                        for a_i in agencias_i[:10]:
-                            s_da_i = d_i["saldo"] + a_i["saldo"]
-                            diff_da_i = abs(s_da_i - target_i)
-                            if diff_da_i < best_diff_i:
-                                best_diff_i = diff_da_i
-                                best_combo_i = [d_i, a_i]
-                                if diff_da_i < 1.0: break
-                                
-                            for g_i in garajes_i[:8]:
-                                s_dag_i = s_da_i + g_i["saldo"]
-                                diff_dag_i = abs(s_dag_i - target_i)
-                                if diff_dag_i < best_diff_i:
-                                    best_diff_i = diff_dag_i
-                                    best_combo_i = [d_i, a_i, g_i]
-                                    if diff_dag_i < 1.0: break
-                            if best_diff_i < 1.0: break
-                        if best_diff_i < 1.0: break
+                    # Ventana cronológica concorde (-35 días antes a +14 días después)
+                    cands_ventana = [c for c in cand_l if -35 <= c["diff_dias"] <= 14]
+                    if len(cands_ventana) < 5:
+                        cands_ventana = cand_l[:25]
+                    else:
+                        cands_ventana = cands_ventana[:25]
                         
-                    # 2. Si la diferencia es mayor a 50k, probar combinatoria general de 1 a 4 facturas
-                    if best_diff_i > 50000:
-                        for k_c in range(1, min(5, len(cand_l) + 1)):
-                            for combo_i in itertools.combinations(cand_l[:16], k_c):
-                                s_c_i = sum(c["saldo"] for c in combo_i)
+                    # Probar combinaciones de 1 a 4 facturas (DHL, Agencia, Garaje, rojas o blancas)
+                    for k_c in range(1, min(5, len(cands_ventana) + 1)):
+                        for combo_i in itertools.combinations(cands_ventana, k_c):
+                            s_c_i = round(sum(c["saldo"] for c in combo_i), 2)
+                            d_c_i = abs(s_c_i - target_i)
+                            score_c = sum(c["score_total"] for c in combo_i) / len(combo_i)
+                            
+                            if d_c_i < 0.05:
+                                # Coincidencia exacta de precio
+                                if score_c > best_score_i or best_diff_i >= 0.05:
+                                    best_diff_i = d_c_i
+                                    best_combo_i = list(combo_i)
+                                    best_score_i = score_c
+                            elif best_diff_i >= 0.05 and d_c_i < best_diff_i:
+                                best_diff_i = d_c_i
+                                best_combo_i = list(combo_i)
+                                best_score_i = score_c
+                                
+                        if best_diff_i < 0.05 and best_score_i > 70:
+                            break
+                            
+                    # Si no dio cuadre exacto en la ventana cercana, ampliar búsqueda sobre todos los candidatos
+                    if best_diff_i > 1.0 and len(cand_l) > len(cands_ventana):
+                        cands_ampliados = cand_l[:30]
+                        for k_c in range(1, min(5, len(cands_ampliados) + 1)):
+                            for combo_i in itertools.combinations(cands_ampliados, k_c):
+                                s_c_i = round(sum(c["saldo"] for c in combo_i), 2)
                                 d_c_i = abs(s_c_i - target_i)
+                                score_c = sum(c["score_total"] for c in combo_i) / len(combo_i)
+                                
                                 if d_c_i < best_diff_i:
                                     best_diff_i = d_c_i
                                     best_combo_i = list(combo_i)
-                                    if d_c_i < 1.0: break
-                            if best_diff_i < 1.0: break
-                            
+                                    best_score_i = score_c
+                                    if d_c_i < 0.05:
+                                        break
+                            if best_diff_i < 0.05:
+                                break
+                                
                     sel_idxs_i = [c["index"] for c in best_combo_i]
                     pool_t.loc[sel_idxs_i, "_asignado_pq"] = pq_id_i
-                    terc_pq_i = df_terc.loc[sel_idxs_i].copy()
+                    
+                    filas_terc_pq = [c["row"] for c in best_combo_i]
+                    terc_pq_i = pd.DataFrame(filas_terc_pq) if filas_terc_pq else pd.DataFrame()
                     
                     pqs_res[pq_id_i] = {
                         "agente": ag_i,
@@ -3146,7 +3258,7 @@ with tab_triangulacion:
                     tot_s_terceros = 0.0
                     for _, tr in terceros_actual.iterrows():
                         es_r = tr.get("Ya Registrada", False)
-                        badge_est = f"🔴 Ya en Siigo ({tr.get('Comprobante Previo', '10-Prev')})" if es_r else "⚪ Pendiente"
+                        badge_est = f"🔴 Ya en Siigo ({tr.get('Comprobante Previo', '10-Prev')})" if es_r else "⚪ No Contabilizada (Pendiente)"
                         t_b = float(tr.get("Base", 0.0))
                         t_iv = float(tr.get("IVA", 0.0))
                         s_cruce = float(tr.get("Total Neto", 0.0)) or round(t_b + t_iv, 2)
@@ -3156,13 +3268,15 @@ with tab_triangulacion:
                         rol_dsp = "🚚 DHL (Flete)" if "DHL" in p_nom else ("🏢 Agencia (Aduana)" if any(k in p_nom for k in ["CARGO", "ADUANA"]) else "🏬 Garaje / Almacén")
                         filas_terc_disp.append({
                             "Rol": rol_dsp,
-                            "Estado": badge_est,
+                            "Fecha Factura": tr.get("Fecha", "-"),
+                            "Concordancia Fecha": tr.get("Relación Fecha", "Concorde"),
+                            "Estado Contable": badge_est,
                             "Proveedor Tercero": tr["Proveedor"][:22],
                             "Factura": tr["Factura"],
                             "Subtotal (Base)": t_b,
                             "IVA": t_iv,
                             "Saldo Cruce": s_cruce,
-                            "Cuenta Pasivo (CxP)": f"⚠️ {cta_actual_tr}" if es_r else cta_actual_tr
+                            "Cuenta Contable": f"⚠️ {cta_actual_tr} (CxP)" if es_r else "14650501 (Tránsito)"
                         })
                     df_terc_disp = pd.DataFrame(filas_terc_disp)
                     st.dataframe(df_terc_disp.style.format({
@@ -3282,12 +3396,18 @@ with tab_triangulacion:
                 
                 # 2. SECCIÓN PARA AGREGAR NUEVAS FACTURAS
                 st.markdown("##### ➕ Añadir una factura a este paquete:")
-                # Facturas de terceros que no están en este paquete
+                # Facturas de terceros disponibles (tanto de df_terceros_all como de df_total no asignadas)
                 opciones_agregar = []
                 mapa_agregar = {}
-                for _, tr_cand in df_terceros_all.iterrows():
-                    if tr_cand["Factura"] not in facs_en_este:
-                        tag_c = f"[{tr_cand['Factura']}] {tr_cand['Proveedor'][:20]} (${float(tr_cand['Total']):,.2f})"
+                cands_disp_agregar = pd.concat([df_terceros_all, df_total]).drop_duplicates(subset=["Factura"])
+                
+                for _, tr_cand in cands_disp_agregar.iterrows():
+                    f_cand_num = tr_cand["Factura"]
+                    if f_cand_num not in facs_en_este:
+                        es_reg_c = bool(tr_cand.get("Ya Registrada", False))
+                        tag_est = f"🔴 Registrada ({tr_cand.get('Comprobante Previo', '10-Prev')})" if es_reg_c else "⚪ No Contabilizada (Pendiente)"
+                        sc_cand = float(tr_cand.get("Total Neto", 0.0)) or (float(tr_cand.get("Base", 0.0)) + float(tr_cand.get("IVA", 0.0)))
+                        tag_c = f"[{tag_est}] [{f_cand_num}] {tr_cand['Proveedor'][:22]} (Saldo: ${sc_cand:,.2f})"
                         opciones_agregar.append(tag_c)
                         mapa_agregar[tag_c] = tr_cand
                         
@@ -3505,8 +3625,17 @@ with tab_siigo:
         
         # FILTRO DE PROTECCIÓN: Excluir facturas rojas (ya causadas en Siigo) y facturas que van por triangulación aduanera
         n_rojas = len(df_full[df_full.get("Ya Registrada", False) == True])
+        
+        # Facturas que ya están en un paquete de triangulación aduanera
+        facs_en_pqs_import = []
+        if "paquetes_importacion" in st.session_state:
+            for _, p_val in st.session_state["paquetes_importacion"].items():
+                if isinstance(p_val, dict) and "terceros" in p_val and not p_val["terceros"].empty:
+                    facs_en_pqs_import.extend(p_val["terceros"]["Factura"].tolist())
+                    
         df_p = df_full[
             (df_full.get("Ya Registrada", False) == False) & 
+            (~df_full["Factura"].isin(facs_en_pqs_import)) &
             (~((df_full.get("Es Aduanera", False) == True) & (df_full.get("Grupo Importación", "") != "")))
         ].copy()
         
@@ -3731,4 +3860,4 @@ with tab_siigo:
         )
     else:
         st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
-
+Mostrando app_corregido.py
