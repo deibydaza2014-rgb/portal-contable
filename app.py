@@ -1529,14 +1529,15 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
 
     st.write("")
 
-    visor_height = max(680, min(3200, num_pags_tot * 800))
+    visor_height = max(700, min(3200, num_pags_tot * 780))
     
     html_visor = f"""
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset="utf-8">
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.min.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.worker.min.js"></script>
       <style>
         body {{
           margin: 0;
@@ -1554,6 +1555,8 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
           background: white;
           overflow: hidden;
           border: 1px solid #cbd5e1;
+          width: 100%;
+          max-width: 860px;
         }}
         .page-header {{
           background: #0f172a;
@@ -1567,7 +1570,7 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
         }}
         canvas {{
           display: block;
-          max-width: 100%;
+          width: 100%;
           height: auto;
         }}
         #status {{
@@ -1580,52 +1583,66 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
       </style>
     </head>
     <body>
-      <div id="status">⏳ Renderizando vista previa de la factura ({num_pags_tot} página(s))...</div>
+      <div id="status">⏳ Renderizando factura ({num_pags_tot} página(s))...</div>
       <div id="viewer-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
       
       <script>
         try {{
-          const rawPdf = atob("{b64_pdf}");
-          const pdfjsLib = window['pdfjs-dist/build/pdf'];
-          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+          const b64 = "{b64_pdf}";
+          const binStr = atob(b64);
+          const len = binStr.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) {{
+            bytes[i] = binStr.charCodeAt(i);
+          }}
 
-          const loadingTask = pdfjsLib.getDocument({{ data: rawPdf }});
-          loadingTask.promise.then(function(pdf) {{
-            document.getElementById('status').style.display = 'none';
-            const container = document.getElementById('viewer-container');
-            container.innerHTML = '';
-            
-            for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
-              (function(num) {{
-                pdf.getPage(num).then(function(page) {{
-                  const scale = 1.45;
-                  const viewport = page.getViewport({{ scale: scale }});
-                  
-                  const pageBox = document.createElement('div');
-                  pageBox.className = 'page-box';
-                  
-                  const pageHeader = document.createElement('div');
-                  pageHeader.className = 'page-header';
-                  pageHeader.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:#0284c7; color:white; padding:2px 8px; border-radius:4px; font-size:11px;">Hoja ' + num + ' de ' + pdf.numPages + '</span>';
-                  pageBox.appendChild(pageHeader);
-                  
-                  const canvas = document.createElement('canvas');
-                  const ctx = canvas.getContext('2d');
-                  canvas.height = viewport.height;
-                  canvas.width = viewport.width;
-                  
-                  pageBox.appendChild(canvas);
-                  container.appendChild(pageBox);
-                  
-                  page.render({{ canvasContext: ctx, viewport: viewport }});
-                }});
-              }})(pNum);
-            }}
-          }}).catch(function(err) {{
-            document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>📄 Factura lista para abrir</h4><p style="color:#64748b;">Utiliza los botones superiores de descarga o abre el documento directamente:</p><a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
-          }});
+          if (typeof pdfjsLib !== 'undefined') {{
+            pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+
+            const loadingTask = pdfjsLib.getDocument({{ data: bytes }});
+            loadingTask.promise.then(function(pdf) {{
+              document.getElementById('status').style.display = 'none';
+              const container = document.getElementById('viewer-container');
+              container.innerHTML = '';
+              
+              for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
+                (function(num) {{
+                  pdf.getPage(num).then(function(page) {{
+                    const scale = 1.5;
+                    const viewport = page.getViewport({{ scale: scale }});
+                    
+                    const pageBox = document.createElement('div');
+                    pageBox.className = 'page-box';
+                    
+                    const pageHeader = document.createElement('div');
+                    pageHeader.className = 'page-header';
+                    pageHeader.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:#0284c7; color:white; padding:2px 8px; border-radius:4px; font-size:11px;">Hoja ' + num + ' de ' + pdf.numPages + '</span>';
+                    pageBox.appendChild(pageHeader);
+                    
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    canvas.height = viewport.height;
+                    canvas.width = viewport.width;
+                    
+                    pageBox.appendChild(canvas);
+                    container.appendChild(pageBox);
+                    
+                    page.render({{ canvasContext: ctx, viewport: viewport }});
+                  }}).catch(function(pErr) {{
+                    console.error('Error renderizando página ' + num, pErr);
+                  }});
+                }})(pNum);
+              }}
+            }}).catch(function(err) {{
+              console.error('Error al cargar PDF:', err);
+              document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>📄 Factura lista para abrir</h4><p style="color:#64748b;">Abre el documento directamente o descárgalo:</p><a href="data:application/pdf;base64,' + b64 + '" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
+            }});
+          }} else {{
+            document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>📄 Factura lista</h4><a href="data:application/pdf;base64,' + b64 + '" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
+          }}
         }} catch (e) {{
-          document.getElementById('status').innerHTML = '<span style="color:#ef4444;">Error al decodificar: ' + e.message + '</span>';
+          console.error('Excepción general en visor:', e);
+          document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>Error al decodificar documento</h4></div>';
         }}
       </script>
     </body>
