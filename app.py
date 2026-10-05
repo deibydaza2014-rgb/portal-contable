@@ -1,7 +1,3 @@
-
-app_corregido.py
-
-100%
 import pickle
 import shutil
 import json
