@@ -1491,8 +1491,11 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
 
 def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view"):
     """
-    Visor oficial integrado comprobado mediante Blob URL nativo en memoria.
-    Carga de forma inmediata la factura en pantalla sin depender de librerías externas o scripts que puedan ser bloqueados.
+    Visor oficial con renderizado nativo en servidor:
+    1. Convierte las hojas a imágenes de alta definición y las muestra con st.image().
+       100% libre de la cara triste de Chrome (📄 🙁), sin dependencias de plugins de navegador ni bloqueos de iframe.
+    2. Si el motor de renderizado no está activo, muestra el cuadro formal del comprobante con enlace directo.
+    3. Botones superiores para Descargar el PDF original o Abrir en pestaña nueva a pantalla completa.
     """
     if not pdf_bytes or not isinstance(pdf_bytes, (bytes, bytearray)):
         st.error("⚠️ El archivo PDF no contiene datos válidos.")
@@ -1522,47 +1525,55 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
         st.markdown(f"""
         <a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="text-decoration:none;">
             <div style="background:#0284c7; color:white; text-align:center; padding:9px 12px; border-radius:6px; font-weight:600; font-size:14px; box-shadow:0 1px 2px rgba(0,0,0,0.05); cursor:pointer;">
-                🗗 Abrir / Descargar Factura en Otra Ventana
+                🗗 Abrir Factura en Otra Ventana
             </div>
         </a>
         """, unsafe_allow_html=True)
 
     st.write("")
 
-    # Visor integrado nativo mediante Blob URL directo (método comprobado sin dependencias externas)
-    html_blob = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <style>
-        body {{ margin: 0; padding: 0; background: #f8fafc; font-family: -apple-system, sans-serif; }}
-        #frame-wrap {{ width: 100%; height: 820px; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; background: white; }}
-        iframe {{ width: 100%; height: 100%; border: none; }}
-      </style>
-    </head>
-    <body>
-      <div id="frame-wrap">
-        <iframe id="native-pdf-frame"></iframe>
-      </div>
-      <script>
-        try {{
-          const b64 = "{b64_pdf}";
-          const bin = atob(b64);
-          const bArr = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) {{
-            bArr[i] = bin.charCodeAt(i);
-          }}
-          const bUrl = URL.createObjectURL(new Blob([bArr], {{ type: 'application/pdf' }}));
-          document.getElementById('native-pdf-frame').src = bUrl + '#toolbar=1&navpanes=1';
-        }} catch (e) {{
-          console.error('Error cargando Blob PDF:', e);
-        }}
-      </script>
-    </body>
-    </html>
-    """
-    components.html(html_blob, height=840, scrolling=True)
+    # 1. RENDERIZADO NATIVO POR IMÁGENES (Cero bloqueos, cero caras tristes)
+    renderizado_exitoso = False
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(pdf_bytes)
+        tot_pags = len(doc)
+        
+        for p_idx in range(tot_pags):
+            page = doc[p_idx]
+            pil_img = page.render(scale=1.75).to_pil()
+            st.markdown(f"""
+            <div style="background:#0f172a; color:#f8fafc; padding:7px 14px; border-radius:6px 6px 0 0; font-size:13px; font-weight:600; margin-top:14px; display:flex; justify-content:space-between; align-items:center;">
+                <span>📄 {nombre_archivo}</span>
+                <span style="background:#0284c7; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">Hoja {p_idx + 1} de {tot_pags}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            st.image(pil_img, use_container_width=True, caption=f"Hoja {p_idx + 1} de {tot_pags}")
+        renderizado_exitoso = True
+    except Exception:
+        renderizado_exitoso = False
+
+    # 2. CUADRO ELEGANTE DE FALLBACK SI NO ESTÁ ACTIVO PYPDFIUM2
+    if not renderizado_exitoso:
+        st.markdown(f"""
+        <div style="background: white; border: 2px solid #0070ba; border-radius: 8px; padding: 22px; margin-top: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);">
+            <div style="border-bottom: 2px solid #0070ba; padding-bottom: 10px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;">
+                <h4 style="margin:0; color:#0f172a;">📄 Factura Electrónica: {fac_sel.get('Factura', '') if fac_sel is not None else nombre_archivo}</h4>
+                <span style="background:#eff6ff; color:#1d4ed8; padding:4px 12px; border-radius:4px; font-weight:bold; font-family:monospace;">{fac_sel.get('Comprobante Siigo', '') if fac_sel is not None else ''}</span>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; font-size: 14px; color: #334155;">
+                <div><b>Proveedor:</b> {fac_sel.get('Proveedor', '') if fac_sel is not None else ''}<br><b>NIT Emisor:</b> {fac_sel.get('NIT Emisor', '') if fac_sel is not None else ''}</div>
+                <div><b>Fecha Emisión:</b> {fac_sel.get('Fecha', '') if fac_sel is not None else ''}<br><b>Régimen:</b> {fac_sel.get('Régimen Fiscal Emisor', 'O-48') if fac_sel is not None else ''}</div>
+                <div><b>Base Gravable:</b> ${float(fac_sel.get('Base', 0)):,.2f if fac_sel is not None else 0}</div>
+                <div><b>Total Factura:</b> <span style="font-size:16px; font-weight:bold; color:#0f172a;">${float(fac_sel.get('Total', 0)):,.2f if fac_sel is not None else 0}</span></div>
+            </div>
+            <div style="margin-top: 20px; text-align: center;">
+                <a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:12px 24px; border-radius:6px; font-weight:bold; text-decoration:none; font-size:15px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+                    🗗 Abrir Documento PDF Completo en Otra Pestaña
+                </a>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 # AVISO DE TRABAJO PREVIO DISPONIBLE (SOLO SE CARGA SI EL USUARIO OPRIME EL BOTÓN)
