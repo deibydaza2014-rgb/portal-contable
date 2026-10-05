@@ -2283,12 +2283,15 @@ with tab_compras:
             msg_reg = f" y se auditó el régimen de cada factura ({total_auditados} actualizadas)" if total_auditados > 0 else " y se validó el régimen de cada factura"
             st.success(f"¡Procesamiento exitoso! Se desbloquearon y renombraron **{total_generados} facturas completas**{msg_reg} directamente desde las facturas PDF desbloqueadas.")
 
-        if "zip_pdfs" in st.session_state:
+        zip_data_b = st.session_state.get("zip_pdfs")
+        if zip_data_b and isinstance(zip_data_b, (bytes, bytearray)) and len(zip_data_b) > 22:
+            n_tot_z = st.session_state.get("total_zip_pdfs", len(st.session_state.get("dict_pdfs", {})))
             st.download_button(
-                label=f"📦 Descargar Archivos PDF Renombrados ({st.session_state['total_zip_pdfs']} facturas completas en ZIP)",
-                data=st.session_state["zip_pdfs"],
+                label=f"📦 Descargar Archivos PDF Renombrados ({n_tot_z} facturas completas en ZIP)",
+                data=zip_data_b,
                 file_name=f"Facturas_Renombradas_Comprobantes_{empresa['nombre'].replace(' ', '_')}.zip",
                 mime="application/zip",
+                key="btn_dl_zip_pdfs_renombrados_action_main",
                 use_container_width=True
             )
 
@@ -2489,13 +2492,15 @@ with tab_auditoria:
                 </div>
                 """, unsafe_allow_html=True)
             with col_doc2:
-                st.download_button(
-                    label=f"📥 Descargar Factura Completa ({num_pags_tot} págs)",
-                    data=pdf_bytes_encontrado,
-                    file_name=fac_sel["Soporte PDF Renombrado"],
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                if pdf_bytes_encontrado and isinstance(pdf_bytes_encontrado, (bytes, bytearray)) and len(pdf_bytes_encontrado) > 0:
+                    st.download_button(
+                        label=f"📥 Descargar Factura Completa ({num_pags_tot} págs)",
+                        data=pdf_bytes_encontrado,
+                        file_name=fac_sel["Soporte PDF Renombrado"],
+                        mime="application/pdf",
+                        key=f"btn_dl_factura_completa_{fac_sel['Comprobante Siigo']}",
+                        use_container_width=True
+                    )
                 
             # Opciones de visualización de páginas
             if num_pags_tot > 1:
@@ -2685,12 +2690,15 @@ with tab_auditoria:
                 f_bytes_sel, _ = desbloquear_pdf_bytes(f_bytes_sel, nit_receptor=re.sub(r"\D", "", str(empresa.get("nit", "9013464125"))))
                 b64_m = base64.b64encode(f_bytes_sel).decode('utf-8')
                 
-                st.download_button(
-                    label=f"📥 Descargar {pdf_elegido}",
-                    data=f_bytes_sel,
-                    file_name=pdf_elegido,
-                    mime="application/pdf"
-                )
+                if f_bytes_sel and isinstance(f_bytes_sel, (bytes, bytearray)) and len(f_bytes_sel) > 0:
+                    clean_pdf_k = re.sub(r'[^a-zA-Z0-9]', '_', str(pdf_elegido))
+                    st.download_button(
+                        label=f"📥 Descargar {pdf_elegido}",
+                        data=f_bytes_sel,
+                        file_name=pdf_elegido,
+                        mime="application/pdf",
+                        key=f"btn_dl_manual_pdf_{clean_pdf_k}"
+                    )
                 
                 html_blob_manual = f"""
                 <!DOCTYPE html>
