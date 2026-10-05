@@ -1106,11 +1106,11 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
 def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view"):
     """
     Renderiza la previsualización del PDF de la manera más robusta y compatible posible:
-    1. Modo Nativo de Alta Definición (pypdfium2): Convierte cada página en imagen y la muestra con st.image().
-       100% inmune a bloqueos de iframes, sandbox, plugins o navegadores móviles.
-    2. Botón de Descarga directa (st.download_button) y enlace directo para abrir en otra ventana.
-    3. Visor Incrustado directo en el DOM (st.markdown iframe).
-    4. Visor Canvas PDF.js con fondo claro y tarjeta de respaldo (fallback) limpia y funcional.
+    1. Si 'pypdfium2' está instalado: convierte cada página a imagen y la muestra nativamente con st.image().
+       100% inmune a bloqueos de navegador, sandboxes, plugins de PDF y dispositivos móviles.
+    2. Si 'pypdfium2' aún no está activo: utiliza el visor Canvas (PDF.js) con worker seguro en Blob.
+       NUNCA utiliza <iframe src="data:application/pdf"> porque los navegadores Chromium bloquean data URLs en subframes.
+    3. Botón de Descarga directa (st.download_button) y botón directo para abrir en otra ventana.
     """
     if not pdf_bytes or not isinstance(pdf_bytes, (bytes, bytearray)):
         st.error("⚠️ El archivo PDF no contiene datos válidos.")
@@ -1154,27 +1154,6 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
         has_pdfium = False
 
     if has_pdfium:
-        opciones_modo = [
-            "🖼️ Ver Hojas en Alta Definición (Recomendado - 100% Compatible)",
-            "🖨️ Visor Incrustado de Navegador (iframe)",
-            "📜 Visor Continuo Canvas (PDF.js)"
-        ]
-    else:
-        opciones_modo = [
-            "🖨️ Visor Incrustado de Navegador (iframe - Recomendado)",
-            "📜 Visor Continuo Canvas (PDF.js)"
-        ]
-        st.info("💡 **Recomendación para visualización instantánea:** Añade `pypdfium2` a tu archivo `requirements.txt` en GitHub para que Streamlit renderice las facturas directamente con calidad fotográfica y compatibilidad total en cualquier navegador o celular.")
-
-    modo_sel = st.radio(
-        "Modo de visualización:",
-        opciones_modo,
-        index=0,
-        horizontal=True,
-        key=f"radio_modo_pdf_{key_prefix}"
-    )
-
-    if "Alta Definición" in modo_sel and has_pdfium:
         try:
             doc = pdfium.PdfDocument(pdf_bytes)
             tot_pags = len(doc)
@@ -1204,22 +1183,11 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
                 st.image(pil_img, use_container_width=True, caption=f"Hoja {p_idx + 1} de {tot_pags}")
             return
         except Exception as e_pdfium:
-            st.warning(f"Nota: No se pudo renderizar como imagen ({e_pdfium}). Mostrando visor alternativo...")
+            st.warning(f"Nota: Falló renderizado de imagen ({e_pdfium}). Mostrando visor alternativo...")
 
-    elif "Incrustado" in modo_sel:
-        st.markdown(f"""
-        <div style="border:1px solid #cbd5e1; border-radius:8px; overflow:hidden; background:#ffffff; margin-top:10px;">
-            <iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=0" width="100%" height="820px" type="application/pdf" style="border:none;">
-                <div style="padding:24px; text-align:center; color:#475569;">
-                    <p>Tu navegador no admite la incrustación directa de PDFs en esta vista.</p>
-                    <p>Por favor utiliza los botones superiores de <b>Descargar Factura</b> o <b>Abrir en Otra Ventana</b>.</p>
-                </div>
-            </iframe>
-        </div>
-        """, unsafe_allow_html=True)
-        return
+    st.info("💡 **Para activar la visualización nativa en Streamlit Cloud:** Como ya agregaste `pypdfium2` a tu `requirements.txt`, haz clic en el menú superior derecho de Streamlit Cloud (los 3 puntos `...`) y selecciona **'Reboot app'** para que instale la librería. Abajo se muestra el visor continuo Canvas:")
 
-    # Modo Canvas PDF.js con fondo claro
+    # Modo Canvas PDF.js con fondo claro y worker seguro en Blob
     visor_height = max(700, min(2400, num_pags_tot * 640))
     html_canvas = f"""
     <!DOCTYPE html>
@@ -1227,7 +1195,6 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
     <head>
       <meta charset="utf-8">
       <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js"></script>
       <style>
         body {{
           margin: 0;
@@ -1311,9 +1278,25 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
             document.getElementById('fallback-card').style.display = 'block';
         }}
 
-        try {{
-            if (typeof pdfjsLib !== 'undefined') {{
-                pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+        async function initPdfJs() {{
+            try {{
+                if (typeof pdfjsLib === 'undefined') {{
+                    showFallback();
+                    return;
+                }}
+
+                try {{
+                    const wResp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js');
+                    if (wResp.ok) {{
+                        const wCode = await wResp.text();
+                        const wBlob = new Blob([wCode], {{ type: 'application/javascript' }});
+                        pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(wBlob);
+                    }} else {{
+                        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+                    }}
+                }} catch (eW) {{
+                    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+                }}
                 
                 const uint8Pdf = base64ToUint8Array(b64Data);
                 const loadingTask = pdfjsLib.getDocument({{
@@ -1321,48 +1304,44 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
                     disableFontFace: false
                 }});
 
-                loadingTask.promise.then(async function(pdf) {{
-                    document.getElementById('status').style.display = 'none';
-                    const container = document.getElementById('viewer-container');
-                    container.innerHTML = '';
-                    
-                    for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
-                        try {{
-                            const page = await pdf.getPage(pNum);
-                            const scale = 1.5;
-                            const viewport = page.getViewport({{ scale: scale }});
-                            
-                            const pageBox = document.createElement('div');
-                            pageBox.className = 'page-box';
-                            
-                            const pageHeader = document.createElement('div');
-                            pageHeader.className = 'page-header';
-                            pageHeader.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:#0284c7; padding:2px 8px; border-radius:4px;">Hoja ' + pNum + ' de ' + pdf.numPages + '</span>';
-                            pageBox.appendChild(pageHeader);
-                            
-                            const canvas = document.createElement('canvas');
-                            const ctx = canvas.getContext('2d');
-                            canvas.height = viewport.height;
-                            canvas.width = viewport.width;
-                            pageBox.appendChild(canvas);
-                            
-                            container.appendChild(pageBox);
-                            await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
-                        }} catch (renderErr) {{
-                            console.error('Error renderizando página ' + pNum, renderErr);
-                        }}
+                const pdf = await loadingTask.promise;
+                document.getElementById('status').style.display = 'none';
+                const container = document.getElementById('viewer-container');
+                container.innerHTML = '';
+                
+                for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
+                    try {{
+                        const page = await pdf.getPage(pNum);
+                        const scale = 1.5;
+                        const viewport = page.getViewport({{ scale: scale }});
+                        
+                        const pageBox = document.createElement('div');
+                        pageBox.className = 'page-box';
+                        
+                        const pageHeader = document.createElement('div');
+                        pageHeader.className = 'page-header';
+                        pageHeader.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:#0284c7; padding:2px 8px; border-radius:4px;">Hoja ' + pNum + ' de ' + pdf.numPages + '</span>';
+                        pageBox.appendChild(pageHeader);
+                        
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.height = viewport.height;
+                        canvas.width = viewport.width;
+                        pageBox.appendChild(canvas);
+                        
+                        container.appendChild(pageBox);
+                        await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
+                    }} catch (renderErr) {{
+                        console.error('Error renderizando página ' + pNum, renderErr);
                     }}
-                }}).catch(function(err) {{
-                    console.error('Error cargando documento PDF:', err);
-                    showFallback();
-                }});
-            }} else {{
+                }}
+            }} catch (e) {{
+                console.error('Excepción general en visor:', e);
                 showFallback();
             }}
-        }} catch (e) {{
-            console.error('Excepción general en visor:', e);
-            showFallback();
         }}
+
+        initPdfJs();
       </script>
     </body>
     </html>
