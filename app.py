@@ -3099,11 +3099,109 @@ with tab_triangulacion:
                     st.warning(f"⚠️ El Paquete #{pq_id_sel} no tiene facturas de terceros asignadas todavía.")
 
             # Expander para agregar/quitar facturas manualmente a este paquete
-            with st.expander(f"➕ Modificar / Agregar Facturas de Terceros a este Paquete #{pq_id_sel}:", expanded=False):
-                st.caption("Si deseas añadir otra factura de DHL, Agencia o Garaje a este paquete, selecciónala aquí:")
+            with st.expander(f"⚙️ Modificar este Paquete #{pq_id_sel} (Sacar Facturas o Agregar Nuevas):", expanded=False):
+                st.caption("Administra las facturas asignadas a esta importación: saca las que no correspondan o añade nuevas facturas de DHL, Agencia o Garaje:")
                 
-                # Identificar facturas que no están en este paquete
+                # 1. SECCIÓN PARA SACAR / REDIRIGIR FACTURAS
+                st.markdown("##### ➖ Sacar y Redirigir una factura de este paquete:")
+                st.caption("Si ves una factura que no corresponde a este paquete, sácala y el sistema la reubicará automáticamente o la enviará a compras directas para que no quede pendiente:")
                 facs_en_este = list(terceros_actual["Factura"].unique()) if not terceros_actual.empty else []
+                
+                if facs_en_este:
+                    opciones_quitar = []
+                    mapa_quitar_row = {}
+                    for _, tr_k in terceros_actual.iterrows():
+                        tb_k = float(tr_k.get("Base", 0.0))
+                        tiv_k = float(tr_k.get("IVA", 0.0))
+                        sc_k = float(tr_k.get("Total Neto", 0.0)) or round(tb_k + tiv_k, 2)
+                        tag_q = f"[{tr_k['Factura']}] {tr_k['Proveedor'][:24]} (Saldo: ${sc_k:,.2f})"
+                        opciones_quitar.append(tag_q)
+                        mapa_quitar_row[tag_q] = tr_k
+                        
+                    sel_para_quitar = st.selectbox("1. Selecciona la factura que deseas SACAR de este paquete:", ["(Seleccionar...)"] + opciones_quitar, key=f"sel_rem_tr_{pq_id_sel}")
+                    
+                    if sel_para_quitar != "(Seleccionar...)":
+                        fila_a_mover = mapa_quitar_row[sel_para_quitar]
+                        fac_nom_mover = fila_a_mover["Factura"]
+                        sc_mover = float(fila_a_mover.get("Total Neto", 0.0)) or (float(fila_a_mover.get("Base", 0.0)) + float(fila_a_mover.get("IVA", 0.0)))
+                        
+                        otros_pqs = [p for p in pqs_actuales.keys() if p != pq_id_sel]
+                        
+                        # Calcular cuál otro paquete tiene un faltante más cercano a esta factura
+                        mejor_pq_sug = None
+                        mejor_diff_sug = float("inf")
+                        for p_cand_id in otros_pqs:
+                            p_cand = pqs_actuales[p_cand_id]
+                            tot_ag_c = float(p_cand["agente"]["Total"])
+                            tot_terc_c = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in p_cand["terceros"].iterrows()])
+                            faltante_c = tot_ag_c - tot_terc_c
+                            diff_c = abs(faltante_c - sc_mover)
+                            if diff_c < mejor_diff_sug:
+                                mejor_diff_sug = diff_c
+                                mejor_pq_sug = p_cand_id
+                                
+                        sug_txt = f" (Sugerencia: Paquete #{mejor_pq_sug})" if mejor_pq_sug else ""
+                        opciones_destino = [
+                            f"🎯 Auto-Reubicar automáticamente donde mejor encaje{sug_txt}",
+                            "📦 Mover a otro Paquete específico...",
+                            "🛒 Redirigir a Compras Directas Ordinarias (Pestaña 1 y 4 - Se pagó directo)",
+                            "⚪ Dejar libre en inventario (Sin asignar)"
+                        ]
+                        
+                        c_dest1, c_dest2 = st.columns([2.6, 1.2])
+                        with c_dest1:
+                            dest_sel = st.radio(f"2. ¿A dónde deseas redirigir la factura {fac_nom_mover}?:", opciones_destino, key=f"rad_dest_{pq_id_sel}_{fac_nom_mover}")
+                            destino_pq_manual = None
+                            if "Mover a otro Paquete específico" in dest_sel:
+                                opciones_otros_pqs = [f"Paquete #{p}: {pqs_actuales[p]['agente']['Proveedor'][:16]} (Fac {pqs_actuales[p]['agente']['Factura']})" for p in otros_pqs]
+                                if opciones_otros_pqs:
+                                    sel_otro_pq_str = st.selectbox("Selecciona el paquete de destino:", opciones_otros_pqs, key=f"sel_otro_pq_{pq_id_sel}")
+                                    destino_pq_manual = int(sel_otro_pq_str.split(":")[0].replace("Paquete #", "").strip())
+                                else:
+                                    st.info("No hay otros paquetes de forwarders disponibles en este archivo.")
+                                    
+                        with c_dest2:
+                            st.write("")
+                            st.write("")
+                            if st.button("🚀 Sacar y Redirigir Factura", key=f"btn_ejecutar_reubicar_{pq_id_sel}", help="Retira la factura de este paquete y la redirige al destino seleccionado."):
+                                # 1. Retirar del paquete actual
+                                terceros_remanente = terceros_actual[terceros_actual["Factura"] != fac_nom_mover].copy()
+                                st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_remanente
+                                
+                                # 2. Redirigir al destino
+                                if "Auto-Reubicar" in dest_sel and mejor_pq_sug is not None:
+                                    dest_pq = st.session_state["paquetes_importacion"][mejor_pq_sug]["terceros"]
+                                    dest_nuevo = pd.concat([dest_pq, pd.DataFrame([fila_a_mover])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
+                                    st.session_state["paquetes_importacion"][mejor_pq_sug]["terceros"] = dest_nuevo
+                                    st.success(f"¡Factura {fac_nom_mover} retirada del Paquete #{pq_id_sel} y auto-reubicada en el Paquete #{mejor_pq_sug}!")
+                                elif "Mover a otro Paquete" in dest_sel and destino_pq_manual is not None:
+                                    dest_pq = st.session_state["paquetes_importacion"][destino_pq_manual]["terceros"]
+                                    dest_nuevo = pd.concat([dest_pq, pd.DataFrame([fila_a_mover])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
+                                    st.session_state["paquetes_importacion"][destino_pq_manual]["terceros"] = dest_nuevo
+                                    st.success(f"¡Factura {fac_nom_mover} movida con éxito al Paquete #{destino_pq_manual}!")
+                                elif "Compras Directas Ordinarias" in dest_sel:
+                                    if "df_procesado" in st.session_state:
+                                        df_glob = st.session_state["df_procesado"]
+                                        m_idx = df_glob[df_glob["Factura"] == fac_nom_mover].index
+                                        if not m_idx.empty:
+                                            df_glob.at[m_idx[0], "Es Aduanera"] = False
+                                            df_glob.at[m_idx[0], "Grupo Importación"] = ""
+                                            df_glob.at[m_idx[0], "Estado Registro"] = "⚪ Compra Directa Ordinaria"
+                                            df_glob.at[m_idx[0], "Cta Contrapartida"] = "22050501"
+                                            st.session_state["df_procesado"] = df_glob
+                                    st.success(f"¡Factura {fac_nom_mover} retirada de importaciones y enviada a Compras Directas Ordinarias (Pestaña 1 y 4)!")
+                                else:
+                                    st.success(f"¡Factura {fac_nom_mover} retirada del Paquete #{pq_id_sel} y devuelta a facturas libres!")
+                                    
+                                st.rerun()
+                else:
+                    st.info("Este paquete no tiene facturas asignadas para retirar.")
+                    
+                st.markdown("---")
+                
+                # 2. SECCIÓN PARA AGREGAR NUEVAS FACTURAS
+                st.markdown("##### ➕ Añadir una factura a este paquete:")
+                # Facturas de terceros que no están en este paquete
                 opciones_agregar = []
                 mapa_agregar = {}
                 for _, tr_cand in df_terceros_all.iterrows():
@@ -3112,13 +3210,13 @@ with tab_triangulacion:
                         opciones_agregar.append(tag_c)
                         mapa_agregar[tag_c] = tr_cand
                         
-                c_add1, c_add2 = st.columns([3, 1])
+                c_add1, c_add2 = st.columns([3, 1.2])
                 with c_add1:
-                    sel_para_agregar = st.selectbox("Selecciona factura para añadir a este paquete:", ["(Seleccionar...)"] + opciones_agregar, key=f"sel_add_tr_{pq_id_sel}")
+                    sel_para_agregar = st.selectbox("Selecciona factura libre para añadir a este paquete:", ["(Seleccionar...)"] + opciones_agregar, key=f"sel_add_tr_{pq_id_sel}")
                 with c_add2:
                     st.write("")
                     st.write("")
-                    if st.button("➕ Añadir a este Paquete", key=f"btn_add_tr_{pq_id_sel}") and sel_para_agregar != "(Seleccionar...)":
+                    if st.button("➕ Añadir al Paquete", key=f"btn_add_tr_{pq_id_sel}") and sel_para_agregar != "(Seleccionar...)":
                         fila_agregada = mapa_agregar[sel_para_agregar]
                         terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([fila_agregada])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
                         st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
