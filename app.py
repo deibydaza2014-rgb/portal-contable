@@ -1355,12 +1355,12 @@ def identificar_factura_en_texto(texto, df_ref):
 
 def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, empresa_compradora=None):
     """
-    Busca y extrae el PDF de la factura seleccionada con máxima precisión y validación de contenido:
-    1. Búsqueda por CUFE en el nombre del archivo (para PDFs descargados directamente de la DIAN).
-    2. Búsqueda por CUFE o Factura verificando el CONTENIDO del PDF en dict_renombrados.
-       Si un archivo renombrado contiene una factura distinta a la seleccionada, se descarta.
-    3. Búsqueda en los archivos originales (tanto individuales como páginas de consolidado).
-    Retorna: (pdf_bytes, descripcion_origen, lista_paginas)
+    Busca y extrae el PDF de la factura seleccionada dando MÁXIMA PRIORIDAD
+    a las facturas YA DESBLOQUEADAS, SEPARADAS Y RENOMBRADAS (dict_renombrados):
+    1. PRIORIDAD 1: Facturas en dict_renombrados (las que ya pasaron por el proceso de desbloqueo y renombrado).
+       Coincidencia por nombre esperado (Comp_10-XXX...), comprobante, folio o CUFE.
+    2. PRIORIDAD 2: Si aún no se han desbloqueado/renombrado, buscar en dict_originales y desbloquearlas al vuelo.
+    Retorna: (pdf_bytes_desbloqueado, descripcion_origen, lista_paginas)
     """
     comp_siigo = str(fac_sel.get("Comprobante Siigo", "")).strip()
     consecutivo = str(fac_sel.get("Consecutivo", "")).strip()
@@ -1376,7 +1376,7 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
     cufe_raw = str(fac_sel.get("CUFE", "") or fac_sel.get("CUFE / Token", "") or "").strip()
     cufe_clean = re.sub(r'[^a-zA-Z0-9]', '', cufe_raw).lower()
     
-    # El NIT con el que vienen encriptadas las facturas electrónicas de proveedores es el NIT del COMPRADOR
+    # El NIT receptor es el de la empresa compradora
     nit_comprador = "9013464125"
     if empresa_compradora:
         nit_comprador = re.sub(r"\D", "", str(empresa_compradora.get("nit", "9013464125")))
@@ -1385,72 +1385,82 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
     soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", "")).strip()
     df_una_fac = pd.DataFrame([fac_sel])
 
-    # 1. BÚSQUEDA DIRECTA POR CUFE EN NOMBRE DE ARCHIVO (Archivos DIAN descargados)
-    if cufe_clean and len(cufe_clean) >= 15:
-        if dict_originales:
-            for fname, fbytes in dict_originales.items():
-                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
-                if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
-                    f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
-                    return f_des, f"Factura Oficial DIAN (CUFE: {fname[:18]}...pdf)", None
-        if dict_renombrados:
-            for fname, fbytes in dict_renombrados.items():
-                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
-                if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
-                    return fbytes, f"Factura Oficial DIAN ({fname})", None
-
-    # 2. BÚSQUEDA Y VERIFICACIÓN EN FACTURAS RENOMBRADAS
+    # =========================================================================
+    # PRIORIDAD 1: TOMAR LAS FACTURAS DESPUÉS DE DESBLOQUEARLAS Y RENOMBRARLAS
+    # =========================================================================
     if dict_renombrados:
-        # A. Prioridad a candidatos con nombre similar (soporte esperado, consecutivo o factura)
-        candidatos = []
+        # A. Coincidencia exacta por el nombre de archivo asignado
         if soporte_nom and soporte_nom in dict_renombrados:
-            candidatos.append((soporte_nom, dict_renombrados[soporte_nom]))
-            
-        comp_key = f"Comp_{t_comp}-{consecutivo}".upper()
+            f_bytes = dict_renombrados[soporte_nom]
+            f_des, _ = desbloquear_pdf_bytes(f_bytes, nit_receptor=nit_comprador)
+            return f_des, f"Factura Desbloqueada Oficial ({soporte_nom})", None
+
+        # B. Coincidencia por Comprobante (ej. Comp_10-680 o 10-680)
+        comp_patterns = [
+            f"Comp_{t_comp}-{consecutivo}".upper(),
+            f"Comp_{t_comp}_{consecutivo}".upper(),
+            f"{t_comp}-{consecutivo}".upper(),
+            f"{t_comp}_{consecutivo}".upper()
+        ]
         for k, v in dict_renombrados.items():
-            if comp_key in k.upper().replace(" ", "_") and (k, v) not in candidatos:
-                candidatos.append((k, v))
-                    
+            k_u = k.upper().replace(" ", "_")
+            if any(cp in k_u for cp in comp_patterns):
+                f_des, _ = desbloquear_pdf_bytes(v, nit_receptor=nit_comprador)
+                return f_des, f"Factura Desbloqueada Oficial ({k})", None
+
+        # C. Coincidencia por Número de Factura / Folio en el nombre renombrado
         for k, v in dict_renombrados.items():
-            k_clean = k.replace("-", "").replace(" ", "").upper()
-            if fac_full and len(fac_full) >= 3 and fac_full in k_clean and (k, v) not in candidatos:
-                candidatos.append((k, v))
-                    
-        # Verificar contenido de los candidatos: SOLO aceptar si el texto realmente pertenece a esta factura
-        for c_nom, c_bytes in candidatos:
+            k_clean = k.replace("-", "").replace(" ", "").replace("_", "").upper()
+            if fac_full and len(fac_full) >= 3 and fac_full in k_clean:
+                f_des, _ = desbloquear_pdf_bytes(v, nit_receptor=nit_comprador)
+                return f_des, f"Factura Desbloqueada Oficial ({k})", None
+            if folio_clean and len(folio_clean) >= 3 and folio_clean in k_clean:
+                f_des, _ = desbloquear_pdf_bytes(v, nit_receptor=nit_comprador)
+                return f_des, f"Factura Desbloqueada Oficial ({k})", None
+
+        # D. Coincidencia por CUFE en el nombre renombrado
+        if cufe_clean and len(cufe_clean) >= 15:
+            for k, v in dict_renombrados.items():
+                k_l = re.sub(r'[^a-zA-Z0-9]', '', k).lower()
+                if cufe_clean[:20] in k_l:
+                    f_des, _ = desbloquear_pdf_bytes(v, nit_receptor=nit_comprador)
+                    return f_des, f"Factura Desbloqueada Oficial ({k})", None
+
+        # E. Verificación por contenido de texto en las facturas renombradas
+        for r_nom, r_bytes in dict_renombrados.items():
             try:
-                pgs = cache_extraer_textos_pdf(c_bytes, nit_receptor=nit_comprador)
-                txt_c = " ".join(pgs)
-                if identificar_factura_en_texto(txt_c, df_una_fac) is not None:
-                    return c_bytes, f"Factura Verificada ({c_nom})", None
+                pgs = cache_extraer_textos_pdf(r_bytes, nit_receptor=nit_comprador)
+                txt_r = " ".join(pgs)
+                if identificar_factura_en_texto(txt_r, df_una_fac) is not None:
+                    f_des, _ = desbloquear_pdf_bytes(r_bytes, nit_receptor=nit_comprador)
+                    return f_des, f"Factura Desbloqueada por Contenido ({r_nom})", None
             except Exception:
                 pass
 
-        # B. Si los candidatos por nombre fallan, escanear TODOS los archivos renombrados por contenido
-        for r_nom, r_bytes in dict_renombrados.items():
-            if (r_nom, r_bytes) not in candidatos:
-                try:
-                    pgs = cache_extraer_textos_pdf(r_bytes, nit_receptor=nit_comprador)
-                    txt_r = " ".join(pgs)
-                    if identificar_factura_en_texto(txt_r, df_una_fac) is not None:
-                        return r_bytes, f"Factura Verificada por Contenido ({r_nom})", None
-                except Exception:
-                    pass
-
-    # 3. BÚSQUEDA EN ARCHIVOS ORIGINALES INDIVIDUALES Y UNIFICADOS
+    # =========================================================================
+    # PRIORIDAD 2: SI AÚN NO SE HA RENOMBRADO, BUSCAR EN LOS ORIGINALES Y DESBLOQUEAR
+    # =========================================================================
     if dict_originales:
-        # A. Archivos individuales por coincidencia de texto
+        # A. Búsqueda por CUFE en nombre de archivo original
+        if cufe_clean and len(cufe_clean) >= 15:
+            for fname, fbytes in dict_originales.items():
+                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
+                if cufe_clean[:20] in fn_l or fn_l.startswith(cufe_clean[:18]):
+                    f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
+                    return f_des, f"Factura Desbloqueada DIAN ({fname[:20]}...pdf)", None
+
+        # B. Archivos originales individuales por coincidencia de texto
         for fname, fbytes in dict_originales.items():
             try:
                 f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
                 pgs = cache_extraer_textos_pdf(f_des, nit_receptor=nit_comprador)
                 txt_ind = " ".join(pgs)
                 if identificar_factura_en_texto(txt_ind, df_una_fac) is not None:
-                    return f_des, f"Factura Original Verificada ({fname})", None
+                    return f_des, f"Factura Desbloqueada ({fname})", None
             except Exception:
                 pass
 
-        # B. Escaneo en PDFs unificados página por página
+        # C. Escaneo en PDFs originales unificados/consolidados página por página
         for fname, fbytes in dict_originales.items():
             try:
                 f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
@@ -1481,29 +1491,30 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
                     writer.write(out)
                     out.seek(0)
                     str_p = ", ".join([str(p+1) for p in pags_coincidentes])
-                    return out.getvalue(), f"Extraído de '{fname}' (Págs {str_p})", [p+1 for p in pags_coincidentes]
+                    return out.getvalue(), f"Factura Desbloqueada de '{fname}' (Págs {str_p})", [p+1 for p in pags_coincidentes]
             except Exception:
                 pass
 
-    # 4. Si no se encontró ningún archivo cuyo contenido coincida con esta factura, NO retornar una factura equivocada
     return None, None, None
 
 
-def convertir_pdf_a_imagenes(pdf_bytes, dpi=150):
+def convertir_pdf_a_imagenes(pdf_bytes, dpi=160, nit_comprador="9013464125"):
     """
     Convierte cualquier archivo PDF en una lista de imágenes para visualización directa con st.image().
-    Prueba en orden de máxima velocidad y compatibilidad:
-    1. pypdfium2 (renderizado directo en RAM si está instalado).
-    2. pdftoppm (utilidad oficial de Poppler/Linux pre-instalada en Streamlit Cloud y Debian/Ubuntu).
-    3. pypdf (extracción de imágenes nativas del PDF).
+    MÉTODO DE SEGURIDAD ABSOLUTA: Desbloquea y desencripta el PDF primero para que ninguna herramienta
+    falle por contraseña incorrecta.
     """
     if not pdf_bytes:
         return []
 
-    # 1. Intento por pypdfium2
+    # 1. PASO VITAL: DESBLOQUEAR Y DESENCRIPTAR EL PDF ANTES DE RENDERIZARLO
+    pdf_desbloqueado, fue_desbloqueado = desbloquear_pdf_bytes(pdf_bytes, nit_receptor=nit_comprador)
+    pdf_a_procesar = pdf_desbloqueado if (pdf_desbloqueado and len(pdf_desbloqueado) > 50) else pdf_bytes
+
+    # 2. Intento por pypdfium2 (renderizado directo en RAM)
     try:
         import pypdfium2 as pdfium
-        doc = pdfium.PdfDocument(pdf_bytes)
+        doc = pdfium.PdfDocument(pdf_a_procesar)
         imgs = []
         for page in doc:
             imgs.append(page.render(scale=dpi / 72.0).to_pil())
@@ -1512,13 +1523,13 @@ def convertir_pdf_a_imagenes(pdf_bytes, dpi=150):
     except Exception:
         pass
 
-    # 2. Intento por pdftoppm (nativo de Linux sin dependencias de Python)
+    # 3. Intento por pdftoppm (utilidad oficial de Poppler pre-instalada en Linux / Streamlit Cloud)
     try:
         import subprocess, tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            pdf_path = os.path.join(tmpdir, "factura.pdf")
+            pdf_path = os.path.join(tmpdir, "factura_desbloqueada.pdf")
             with open(pdf_path, "wb") as f:
-                f.write(pdf_bytes)
+                f.write(pdf_a_procesar)
             out_prefix = os.path.join(tmpdir, "page")
             cmd = ["pdftoppm", "-png", "-r", str(dpi), pdf_path, out_prefix]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
@@ -1532,9 +1543,9 @@ def convertir_pdf_a_imagenes(pdf_bytes, dpi=150):
     except Exception:
         pass
 
-    # 3. Intento por pypdf si la factura contiene imágenes embebidas
+    # 4. Intento por pypdf si la factura contiene imágenes embebidas
     try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
+        reader = PdfReader(io.BytesIO(pdf_a_procesar))
         imgs = []
         for page in reader.pages:
             for img_obj in page.images:
@@ -1547,24 +1558,30 @@ def convertir_pdf_a_imagenes(pdf_bytes, dpi=150):
     return []
 
 
-def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view"):
+def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view", nit_comprador="9013464125"):
     """
-    Visor oficial garantizado mediante renderizado nativo de imágenes con st.image():
-    100% inmune a bloqueos de Chrome, sin iframes, sin complementos y sin caras tristes.
+    Visor oficial garantizado con doble respaldo:
+    1. Si hay motor de imágenes (pypdfium2/pdftoppm), renderiza las páginas en alta definición.
+    2. Como respaldo directo (COMO ANTES), muestra el iframe nativo del documento con base64.
+    3. Botones para descargar el archivo desbloqueado o abrirlo a pantalla completa.
     """
     if not pdf_bytes or not isinstance(pdf_bytes, (bytes, bytearray)):
         st.error("⚠️ El archivo PDF no contiene datos válidos.")
         return
 
+    # Desbloquear el PDF para garantizar que esté 100% libre de contraseña
+    pdf_limpio, _ = desbloquear_pdf_bytes(pdf_bytes, nit_receptor=nit_comprador)
+    pdf_usar = pdf_limpio if pdf_limpio else pdf_bytes
+
     try:
-        reader_prev = PdfReader(io.BytesIO(pdf_bytes))
+        reader_prev = PdfReader(io.BytesIO(pdf_usar))
         num_pags_tot = len(reader_prev.pages)
     except Exception:
         num_pags_tot = 1
 
-    b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8').replace('\n', '').strip()
+    b64_pdf = base64.b64encode(pdf_usar).decode('utf-8').replace('\n', '').strip()
 
-    # Pre-cálculo seguro de variables para evitar cualquier error de f-string
+    # Pre-cálculo seguro de variables para evitar cualquier error de formato
     val_base = float(fac_sel.get("Base", 0.0)) if (fac_sel is not None and "Base" in fac_sel) else 0.0
     val_tot = float(fac_sel.get("Total", 0.0)) if (fac_sel is not None and "Total" in fac_sel) else 0.0
     val_iva = float(fac_sel.get("IVA", 0.0)) if (fac_sel is not None and "IVA" in fac_sel) else 0.0
@@ -1581,8 +1598,8 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
     with c_btn1:
         pags_label = f"{num_pags_tot} página{'s' if num_pags_tot > 1 else ''} completa{'s' if num_pags_tot > 1 else ''}"
         st.download_button(
-            label=f"📥 Descargar Factura Completa ({pags_label})",
-            data=pdf_bytes,
+            label=f"📥 Descargar Factura Desbloqueada ({pags_label})",
+            data=pdf_usar,
             file_name=nombre_archivo,
             mime="application/pdf",
             key=f"btn_dl_univ_{key_prefix}",
@@ -1592,16 +1609,15 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
         st.markdown(f"""
         <a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="text-decoration:none;">
             <div style="background:#0284c7; color:white; text-align:center; padding:9px 12px; border-radius:6px; font-weight:600; font-size:14px; box-shadow:0 1px 2px rgba(0,0,0,0.05); cursor:pointer;">
-                🗗 Abrir Factura en Otra Ventana
+                🗗 Abrir Factura en Otra Ventana (Pantalla Completa)
             </div>
         </a>
         """, unsafe_allow_html=True)
 
     st.write("")
 
-    # RENDERIZADO VISUAL DIRECTO EN PANTALLA MEDIANTE IMÁGENES NATIVAS (st.image)
-    with st.spinner("Cargando vista previa de la factura..."):
-        imagenes = convertir_pdf_a_imagenes(pdf_bytes, dpi=160)
+    # 1. INTENTO DE RENDERIZAR IMÁGENES NATIVAS (pypdfium2 / pdftoppm)
+    imagenes = convertir_pdf_a_imagenes(pdf_usar, dpi=160, nit_comprador=nit_comprador)
 
     if imagenes:
         tot_imgs = len(imagenes)
@@ -1614,23 +1630,23 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
             """, unsafe_allow_html=True)
             st.image(img, use_container_width=True, caption=f"Hoja {p_idx + 1} de {tot_imgs}")
     else:
-        # Cuadro formal de respaldo si no se pudieron renderizar imágenes
+        # 2. VISTA PREVIA DIRECTA COMO ANTES: IFRAME EN CONTENEDOR NATIVO SIN COMPONENTS
         st.markdown(f"""
-        <div style="background: white; border: 2px solid #0070ba; border-radius: 8px; padding: 22px; margin-top: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);">
-            <div style="border-bottom: 2px solid #0070ba; padding-bottom: 10px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;">
-                <h4 style="margin:0; color:#0f172a;">📄 Factura Electrónica: {fac_num_str}</h4>
-                <span style="background:#eff6ff; color:#1d4ed8; padding:4px 12px; border-radius:4px; font-weight:bold; font-family:monospace;">{comp_str}</span>
+        <div style="border: 2px solid #0070ba; border-radius: 8px; overflow: hidden; margin-top: 10px; margin-bottom: 16px; box-shadow: 0 3px 8px rgba(0,0,0,0.08);">
+            <div style="background:#0070ba; color:white; padding:9px 14px; font-weight:bold; font-size:14px; display:flex; justify-content:space-between; align-items:center;">
+                <span>📄 Vista Previa: Factura {fac_num_str} — {prov_str}</span>
+                <span style="background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:10px; font-size:11px;">{num_pags_tot} pág(s)</span>
             </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; font-size: 14px; color: #334155;">
-                <div><b>Proveedor:</b> {prov_str}<br><b>NIT Emisor:</b> {nit_str}</div>
-                <div><b>Fecha Emisión:</b> {fecha_str}<br><b>Régimen:</b> {reg_str}</div>
-                <div><b>Base Gravable:</b> ${val_base:,.2f}<br><b>IVA (19%):</b> ${val_iva:,.2f}</div>
-                <div><b>ReteFuente:</b> -${val_rfte:,.2f}<br><b>Total Factura:</b> <span style="font-size:16px; font-weight:bold; color:#0f172a;">${val_tot:,.2f}</span></div>
-            </div>
-            <div style="margin-top: 20px; text-align: center;">
-                <a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:12px 24px; border-radius:6px; font-weight:bold; text-decoration:none; font-size:15px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-                    🗗 Abrir Documento PDF Completo en Otra Pestaña
-                </a>
+            <iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1" width="100%" height="680" type="application/pdf" style="border:none;"></iframe>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 3. CUADRO DE METADATOS Y TOTALES DE LA FACTURA
+        st.markdown(f"""
+        <div style="background: white; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 13.5px; color: #334155;">
+                <div><b>Proveedor:</b> {prov_str} (NIT: {nit_str})<br><b>Factura:</b> {fac_num_str} ({comp_str})</div>
+                <div><b>Fecha Emisión:</b> {fecha_str} | <b>Régimen:</b> {reg_str}<br><b>Base:</b> ${val_base:,.2f} | <b>IVA:</b> ${val_iva:,.2f} | <b>Total:</b> <span style="font-weight:bold; color:#0f172a;">${val_tot:,.2f}</span></div>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -2728,7 +2744,8 @@ with tab_auditoria:
                 pdf_bytes_encontrado,
                 nombre_archivo=fac_sel["Soporte PDF Renombrado"],
                 fac_sel=fac_sel,
-                key_prefix=f"fac_{safe_c_key}"
+                key_prefix=f"fac_{safe_c_key}",
+                nit_comprador=re.sub(r"\D", "", str(empresa.get("nit", "9013464125")))
             )
         elif dict_orig or dict_renom:
             st.warning("⚠️ No se identificó automáticamente esta factura. Puedes seleccionar manualmente cualquier PDF cargado para visualizarlo:")
@@ -2742,7 +2759,8 @@ with tab_auditoria:
                     f_bytes_sel,
                     nombre_archivo=pdf_elegido,
                     fac_sel=fac_sel,
-                    key_prefix=f"man_{safe_f_key}"
+                    key_prefix=f"man_{safe_f_key}",
+                    nit_comprador=re.sub(r"\D", "", str(empresa.get("nit", "9013464125")))
                 )
         else:
             st.markdown(f"""
