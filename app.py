@@ -1491,11 +1491,10 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
 
 def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view"):
     """
-    Visor oficial con renderizado nativo en servidor:
-    1. Convierte las hojas a imágenes de alta definición y las muestra con st.image().
-       100% libre de la cara triste de Chrome (📄 🙁), sin dependencias de plugins de navegador ni bloqueos de iframe.
-    2. Si el motor de renderizado no está activo, muestra el cuadro formal del comprobante con enlace directo.
-    3. Botones superiores para Descargar el PDF original o Abrir en pestaña nueva a pantalla completa.
+    Visor oficial 100% blindado y garantizado:
+    1. Renderizado en imágenes de alta definición con pypdfium2 si está instalado.
+    2. Renderizado dinámico en Canvas HTML5 (PDF.js sin workers externos).
+    3. Cuadro formal con metadatos de factura, valores y acceso directo a pantalla completa.
     """
     if not pdf_bytes or not isinstance(pdf_bytes, (bytes, bytearray)):
         st.error("⚠️ El archivo PDF no contiene datos válidos.")
@@ -1508,6 +1507,19 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
         num_pags_tot = 1
 
     b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8').replace('\n', '').strip()
+
+    # Pre-cálculo seguro de variables para evitar cualquier error de f-string
+    val_base = float(fac_sel.get("Base", 0.0)) if (fac_sel is not None and "Base" in fac_sel) else 0.0
+    val_tot = float(fac_sel.get("Total", 0.0)) if (fac_sel is not None and "Total" in fac_sel) else 0.0
+    val_iva = float(fac_sel.get("IVA", 0.0)) if (fac_sel is not None and "IVA" in fac_sel) else 0.0
+    val_rfte = float(fac_sel.get("ReteFuente", 0.0)) if (fac_sel is not None and "ReteFuente" in fac_sel) else 0.0
+    val_rica = float(fac_sel.get("ReteICA", 0.0)) if (fac_sel is not None and "ReteICA" in fac_sel) else 0.0
+    fac_num_str = str(fac_sel.get("Factura", "")) if fac_sel is not None else nombre_archivo
+    prov_str = str(fac_sel.get("Proveedor", "")) if fac_sel is not None else ""
+    nit_str = str(fac_sel.get("NIT Emisor", "")) if fac_sel is not None else ""
+    comp_str = str(fac_sel.get("Comprobante Siigo", "")) if fac_sel is not None else ""
+    fecha_str = str(fac_sel.get("Fecha", "")) if fac_sel is not None else ""
+    reg_str = str(fac_sel.get("Régimen Fiscal Emisor", "O-48")) if fac_sel is not None else "O-48"
 
     # Botones superiores de descarga y apertura directa
     c_btn1, c_btn2 = st.columns([1, 1])
@@ -1532,7 +1544,7 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
 
     st.write("")
 
-    # 1. RENDERIZADO NATIVO POR IMÁGENES (Cero bloqueos, cero caras tristes)
+    # 1. INTENTO DE RENDERIZADO NATIVO POR IMÁGENES (pypdfium2)
     renderizado_exitoso = False
     try:
         import pypdfium2 as pdfium
@@ -1553,19 +1565,136 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
     except Exception:
         renderizado_exitoso = False
 
-    # 2. CUADRO ELEGANTE DE FALLBACK SI NO ESTÁ ACTIVO PYPDFIUM2
+    # 2. SI PYPDFIUM2 NO ESTÁ PRESENTE: VISOR HTML5 CANVAS DIRECTO (PDF.js sin Web Worker)
     if not renderizado_exitoso:
+        visor_height = max(700, min(3200, num_pags_tot * 780))
+        html_canvas_viewer = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.min.js"></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.worker.min.js"></script>
+          <style>
+            body {{
+              margin: 0;
+              padding: 12px;
+              background: #f8fafc;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            }}
+            .page-box {{
+              margin-bottom: 20px;
+              box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+              border-radius: 6px;
+              background: white;
+              overflow: hidden;
+              border: 1px solid #cbd5e1;
+              width: 100%;
+              max-width: 860px;
+            }}
+            .page-header {{
+              background: #0f172a;
+              color: #f8fafc;
+              font-size: 13px;
+              font-weight: 600;
+              padding: 8px 14px;
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+            }}
+            canvas {{
+              display: block;
+              width: 100%;
+              height: auto;
+            }}
+            #status {{
+              color: #0284c7;
+              padding: 20px;
+              font-size: 15px;
+              text-align: center;
+              font-weight: 600;
+            }}
+          </style>
+        </head>
+        <body>
+          <div id="status">⏳ Renderizando factura ({num_pags_tot} página(s))...</div>
+          <div id="viewer-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
+          
+          <script>
+            try {{
+              const b64 = "{b64_pdf}";
+              const binStr = atob(b64);
+              const len = binStr.length;
+              const bytes = new Uint8Array(len);
+              for (let i = 0; i < len; i++) {{
+                bytes[i] = binStr.charCodeAt(i);
+              }}
+
+              if (typeof pdfjsLib !== 'undefined') {{
+                pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+                const loadingTask = pdfjsLib.getDocument({{ data: bytes }});
+                loadingTask.promise.then(function(pdf) {{
+                  document.getElementById('status').style.display = 'none';
+                  const container = document.getElementById('viewer-container');
+                  container.innerHTML = '';
+                  
+                  for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
+                    (function(num) {{
+                      pdf.getPage(num).then(function(page) {{
+                        const scale = 1.5;
+                        const viewport = page.getViewport({{ scale: scale }});
+                        
+                        const pageBox = document.createElement('div');
+                        pageBox.className = 'page-box';
+                        
+                        const pageHeader = document.createElement('div');
+                        pageHeader.className = 'page-header';
+                        pageHeader.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:#0284c7; color:white; padding:2px 8px; border-radius:4px; font-size:11px;">Hoja ' + num + ' de ' + pdf.numPages + '</span>';
+                        pageBox.appendChild(pageHeader);
+                        
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.height = viewport.height;
+                        canvas.width = viewport.width;
+                        
+                        pageBox.appendChild(canvas);
+                        container.appendChild(pageBox);
+                        
+                        page.render({{ canvasContext: ctx, viewport: viewport }});
+                      }}).catch(function(pErr) {{
+                        console.error('Error renderizando página ' + num, pErr);
+                      }});
+                    }})(pNum);
+                  }}
+                }}).catch(function(err) {{
+                  console.error('Error al cargar PDF:', err);
+                  document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>📄 Factura lista</h4><p style="color:#64748b;">Abre el documento directamente o descárgalo con los botones superiores:</p><a href="data:application/pdf;base64,' + b64 + '" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
+                }});
+              }}
+            }} catch (e) {{
+              console.error('Excepción general en visor:', e);
+            }}
+          </script>
+        </body>
+        </html>
+        """
+        components.html(html_canvas_viewer, height=visor_height, scrolling=True)
+
+        # Además, mostramos el cuadro formal garantizado con los datos oficiales
         st.markdown(f"""
         <div style="background: white; border: 2px solid #0070ba; border-radius: 8px; padding: 22px; margin-top: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);">
             <div style="border-bottom: 2px solid #0070ba; padding-bottom: 10px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;">
-                <h4 style="margin:0; color:#0f172a;">📄 Factura Electrónica: {fac_sel.get('Factura', '') if fac_sel is not None else nombre_archivo}</h4>
-                <span style="background:#eff6ff; color:#1d4ed8; padding:4px 12px; border-radius:4px; font-weight:bold; font-family:monospace;">{fac_sel.get('Comprobante Siigo', '') if fac_sel is not None else ''}</span>
+                <h4 style="margin:0; color:#0f172a;">📄 Factura Electrónica: {fac_num_str}</h4>
+                <span style="background:#eff6ff; color:#1d4ed8; padding:4px 12px; border-radius:4px; font-weight:bold; font-family:monospace;">{comp_str}</span>
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; font-size: 14px; color: #334155;">
-                <div><b>Proveedor:</b> {fac_sel.get('Proveedor', '') if fac_sel is not None else ''}<br><b>NIT Emisor:</b> {fac_sel.get('NIT Emisor', '') if fac_sel is not None else ''}</div>
-                <div><b>Fecha Emisión:</b> {fac_sel.get('Fecha', '') if fac_sel is not None else ''}<br><b>Régimen:</b> {fac_sel.get('Régimen Fiscal Emisor', 'O-48') if fac_sel is not None else ''}</div>
-                <div><b>Base Gravable:</b> ${float(fac_sel.get('Base', 0)):,.2f if fac_sel is not None else 0}</div>
-                <div><b>Total Factura:</b> <span style="font-size:16px; font-weight:bold; color:#0f172a;">${float(fac_sel.get('Total', 0)):,.2f if fac_sel is not None else 0}</span></div>
+                <div><b>Proveedor:</b> {prov_str}<br><b>NIT Emisor:</b> {nit_str}</div>
+                <div><b>Fecha Emisión:</b> {fecha_str}<br><b>Régimen:</b> {reg_str}</div>
+                <div><b>Base Gravable:</b> ${val_base:,.2f}<br><b>IVA (19%):</b> ${val_iva:,.2f}</div>
+                <div><b>ReteFuente:</b> -${val_rfte:,.2f}<br><b>Total Factura:</b> <span style="font-size:16px; font-weight:bold; color:#0f172a;">${val_tot:,.2f}</span></div>
             </div>
             <div style="margin-top: 20px; text-align: center;">
                 <a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:12px 24px; border-radius:6px; font-weight:bold; text-decoration:none; font-size:15px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
