@@ -1964,7 +1964,7 @@ with tab_compras:
         </div>
         """, unsafe_allow_html=True)
         
-        cols_mostrar_proc = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Estado Registro", "Cuenta Pasivo (CxP)", "Base", "IVA", "ReteFuente", "ReteICA", "Neto a Pagar", "Soporte PDF Renombrado"]
+        cols_mostrar_proc = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Régimen Fiscal Emisor", "Estado Registro", "Cuenta Pasivo (CxP)", "Base", "IVA", "ReteFuente", "ReteICA", "Neto a Pagar", "Soporte PDF Renombrado"]
         cols_mostrar_existentes = [c for c in cols_mostrar_proc if c in df_proc.columns]
         st.dataframe(df_proc[cols_mostrar_existentes], use_container_width=True)
 
@@ -2503,26 +2503,44 @@ with tab_auditoria:
                     )
                 
             # Opciones de visualización de páginas
-            if num_pags_tot > 1:
-                modo_vista_doc = st.radio(
-                    "Modo de vista de factura:",
-                    ["📜 Ver Todas las Hojas en Cascada Continua (1, 2, 3...)", "🖨️ Visor Integrado del Navegador (con Miniaturas y Barra Lateral)"],
-                    horizontal=True,
-                    key="radio_modo_vista_pdf"
-                )
-            else:
-                modo_vista_doc = "📜 Ver Todas las Hojas en Cascada Continua (1, 2, 3...)"
+            modo_vista_doc = st.radio(
+                "Modo de vista de factura:",
+                ["📜 Ver Hojas en Cascada Continua (Canvas)", "🖨️ Visor Nativo del Navegador (Incrustado)"],
+                horizontal=True,
+                key=f"radio_modo_vista_pdf_{fac_sel['Comprobante Siigo']}"
+            )
                 
-            # Altura dinámica para visualizar todas las hojas (2, 3 o más páginas continuas)
-            visor_height = max(680, min(2200, num_pags_tot * 620))
+            visor_height = max(700, min(2400, num_pags_tot * 640))
             
-            # Visor robusto secuencial de alta resolución para facturas multi-página
-            html_visor = f"""
+            # HTML para modo Visor Nativo Incrustado con <object> (100% compatible con Chrome/Edge sin iframe colapsado)
+            html_nativo = f"""
             <!DOCTYPE html>
             <html>
             <head>
               <meta charset="utf-8">
-              <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+              <style>
+                body {{ margin:0; padding:0; background:#0f172a; display:flex; justify-content:center; align-items:center; }}
+                object, embed {{ width:100%; height:820px; border:none; }}
+              </style>
+            </head>
+            <body>
+              <object data="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=1" type="application/pdf">
+                <embed src="data:application/pdf;base64,{b64_pdf}" type="application/pdf" />
+                <div style="color:#cbd5e1; text-align:center; padding:20px; font-family:sans-serif;">
+                  Tu navegador no previsualiza PDFs embebidos. Puedes descargarlo con el botón superior.
+                </div>
+              </object>
+            </body>
+            </html>
+            """
+            
+            # HTML para modo Cascada Continua (Canvas multi-hoja con PDF.js 2.16.105 y Blob Worker seguro)
+            html_canvas = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="utf-8">
+              <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
               <style>
                 body {{
                   margin: 0;
@@ -2535,13 +2553,13 @@ with tab_auditoria:
                   overflow-y: auto;
                 }}
                 .page-box {{
-                  margin-bottom: 24px;
-                  box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+                  margin-bottom: 20px;
+                  box-shadow: 0 4px 18px rgba(0,0,0,0.5);
                   border-radius: 6px;
                   background: white;
                   overflow: hidden;
                   width: 100%;
-                  max-width: 880px;
+                  max-width: 860px;
                 }}
                 .page-header {{
                   background: #1e293b;
@@ -2565,19 +2583,28 @@ with tab_auditoria:
                   font-weight: 600;
                   text-align: center;
                 }}
-                iframe {{
-                  border: none;
+                #fallback-container {{
+                  display: none;
                   width: 100%;
+                  max-width: 860px;
                   height: 780px;
-                  background: white;
+                }}
+                object {{
+                  width: 100%;
+                  height: 100%;
                   border-radius: 6px;
                 }}
               </style>
             </head>
             <body>
-              <div id="status">Cargando factura completa ({num_pags_tot} página(s))...</div>
+              <div id="status">Cargando documento ({num_pags_tot} página(s))...</div>
               <div id="viewer-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
-              <iframe id="fallback-frame" style="display:none;" width="100%" height="780px"></iframe>
+              <div id="fallback-container">
+                <object id="fallback-obj" data="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=1" type="application/pdf">
+                  <embed src="data:application/pdf;base64,{b64_pdf}" type="application/pdf" />
+                </object>
+              </div>
+
               <script>
                 const b64Data = "{b64_pdf}";
                 function base64ToUint8Array(base64) {{
@@ -2595,62 +2622,60 @@ with tab_auditoria:
                 function showFallback() {{
                     document.getElementById('status').style.display = 'none';
                     document.getElementById('viewer-container').style.display = 'none';
-                    const frame = document.getElementById('fallback-frame');
-                    try {{
-                        const blob = new Blob([uint8Pdf], {{type: 'application/pdf'}});
-                        const blobUrl = URL.createObjectURL(blob);
-                        frame.src = blobUrl + '#toolbar=1&navpanes=1';
-                    }} catch (e) {{
-                        frame.src = 'data:application/pdf;base64,' + b64Data + '#toolbar=1&navpanes=1';
-                    }}
-                    frame.style.display = 'block';
+                    document.getElementById('fallback-container').style.display = 'block';
                 }}
 
                 try {{
-                    if (typeof pdfjsLib === 'undefined' && window['pdfjs-dist/build/pdf']) {{
-                        window.pdfjsLib = window['pdfjs-dist/build/pdf'];
+                    // Inicializar Worker de manera segura contra políticas CORS
+                    try {{
+                        const workerBlob = new Blob([
+                            "importScripts('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js');"
+                        ], {{ type: 'application/javascript' }});
+                        pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
+                    }} catch (eWorker) {{
+                        pdfjsLib.GlobalWorkerOptions.workerSrc = '';
                     }}
-                    if (typeof pdfjsLib !== 'undefined') {{
-                        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-                        const loadingTask = pdfjsLib.getDocument({{data: uint8Pdf}});
-                        loadingTask.promise.then(async function(pdf) {{
-                            document.getElementById('status').style.display = 'none';
-                            const container = document.getElementById('viewer-container');
-                            container.innerHTML = '';
-                            
-                            for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
-                                try {{
-                                    const page = await pdf.getPage(pNum);
-                                    const scale = 1.45;
-                                    const viewport = page.getViewport({{scale: scale}});
-                                    
-                                    const pageBox = document.createElement('div');
-                                    pageBox.className = 'page-box';
-                                    
-                                    const pageHeader = document.createElement('div');
-                                    pageHeader.className = 'page-header';
-                                    pageHeader.innerHTML = '<span>📄 Factura ' + '{fac_sel["Factura"]}' + ' — {fac_sel["Comprobante Siigo"]}</span><span style="background:#334155; padding:2px 8px; border-radius:4px;">Hoja ' + pNum + ' de ' + pdf.numPages + '</span>';
-                                    pageBox.appendChild(pageHeader);
-                                    
-                                    const canvas = document.createElement('canvas');
-                                    const ctx = canvas.getContext('2d');
-                                    canvas.height = viewport.height;
-                                    canvas.width = viewport.width;
-                                    pageBox.appendChild(canvas);
-                                    
-                                    container.appendChild(pageBox);
-                                    await page.render({{canvasContext: ctx, viewport: viewport}}).promise;
-                                }} catch (renderErr) {{
-                                    console.error('Error renderizando página ' + pNum, renderErr);
-                                }}
+
+                    const loadingTask = pdfjsLib.getDocument({{
+                        data: uint8Pdf,
+                        disableFontFace: false
+                    }});
+
+                    loadingTask.promise.then(async function(pdf) {{
+                        document.getElementById('status').style.display = 'none';
+                        const container = document.getElementById('viewer-container');
+                        container.innerHTML = '';
+                        
+                        for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
+                            try {{
+                                const page = await pdf.getPage(pNum);
+                                const scale = 1.45;
+                                const viewport = page.getViewport({{ scale: scale }});
+                                
+                                const pageBox = document.createElement('div');
+                                pageBox.className = 'page-box';
+                                
+                                const pageHeader = document.createElement('div');
+                                pageHeader.className = 'page-header';
+                                pageHeader.innerHTML = '<span>📄 Factura ' + '{fac_sel["Factura"]}' + ' — {fac_sel["Comprobante Siigo"]}</span><span style="background:#334155; padding:2px 8px; border-radius:4px;">Hoja ' + pNum + ' de ' + pdf.numPages + '</span>';
+                                pageBox.appendChild(pageHeader);
+                                
+                                const canvas = document.createElement('canvas');
+                                const ctx = canvas.getContext('2d');
+                                canvas.height = viewport.height;
+                                canvas.width = viewport.width;
+                                pageBox.appendChild(canvas);
+                                
+                                container.appendChild(pageBox);
+                                await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
+                            }} catch (renderErr) {{
+                                console.error('Error renderizando página ' + pNum, renderErr);
                             }}
-                        }}).catch(function(err) {{
-                            console.error('Error cargando documento PDF:', err);
-                            showFallback();
-                        }});
-                    }} else {{
+                        }}
+                    }}).catch(function(err) {{
+                        console.error('Error cargando documento PDF:', err);
                         showFallback();
-                    }}
+                    }});
                 }} catch (e) {{
                     console.error('Excepción general en visor:', e);
                     showFallback();
@@ -2660,33 +2685,16 @@ with tab_auditoria:
             </html>
             """
             
-            if "Visor Integrado" in modo_vista_doc:
-                html_blob = f"""
-                <!DOCTYPE html>
-                <html>
-                <body style="margin:0; padding:0; background:#0f172a;">
-                  <iframe id="native-frame" width="100%" height="820px" style="border:1px solid #334155; border-radius:6px; background:white;"></iframe>
-                  <script>
-                    const b64 = "{b64_pdf}";
-                    const bin = atob(b64);
-                    const bArr = new Uint8Array(bin.length);
-                    for (let i = 0; i < bin.length; i++) bArr[i] = bin.charCodeAt(i);
-                    const bUrl = URL.createObjectURL(new Blob([bArr], {{type: 'application/pdf'}}));
-                    document.getElementById('native-frame').src = bUrl + '#toolbar=1&navpanes=1';
-                  </script>
-                </body>
-                </html>
-                """
-                components.html(html_blob, height=840, scrolling=True)
+            if "Visor Nativo" in modo_vista_doc:
+                components.html(html_nativo, height=840, scrolling=True)
             else:
-                components.html(html_visor, height=visor_height, scrolling=True)
+                components.html(html_canvas, height=visor_height, scrolling=True)
         elif dict_orig or dict_renom:
             st.warning("⚠️ No se identificó automáticamente esta factura. Puedes seleccionar manualmente cualquier PDF cargado para visualizarlo:")
             todos_los_pdfs = {**dict_orig, **dict_renom}
-            pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()))
+            pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()), key="sel_pdf_manual_box")
             if pdf_elegido:
                 f_bytes_sel = todos_los_pdfs[pdf_elegido]
-                # Desbloquear si está protegido
                 f_bytes_sel, _ = desbloquear_pdf_bytes(f_bytes_sel, nit_receptor=re.sub(r"\D", "", str(empresa.get("nit", "9013464125"))))
                 b64_m = base64.b64encode(f_bytes_sel).decode('utf-8')
                 
@@ -2700,23 +2708,17 @@ with tab_auditoria:
                         key=f"btn_dl_manual_pdf_{clean_pdf_k}"
                     )
                 
-                html_blob_manual = f"""
+                html_manual = f"""
                 <!DOCTYPE html>
                 <html>
                 <body style="margin:0; padding:0; background:#0f172a;">
-                  <iframe id="man-frame" width="100%" height="750px" style="border:1px solid #334155; border-radius:6px; background:white;"></iframe>
-                  <script>
-                    const b64 = "{b64_m}";
-                    const bin = atob(b64);
-                    const bArr = new Uint8Array(bin.length);
-                    for (let i = 0; i < bin.length; i++) bArr[i] = bin.charCodeAt(i);
-                    const bUrl = URL.createObjectURL(new Blob([bArr], {{type: 'application/pdf'}}));
-                    document.getElementById('man-frame').src = bUrl + '#toolbar=1&navpanes=1';
-                  </script>
+                  <object data="data:application/pdf;base64,{b64_m}#toolbar=1&navpanes=1" type="application/pdf" width="100%" height="750px">
+                    <embed src="data:application/pdf;base64,{b64_m}" type="application/pdf" />
+                  </object>
                 </body>
                 </html>
                 """
-                components.html(html_blob_manual, height=770, scrolling=True)
+                components.html(html_manual, height=770, scrolling=True)
         else:
             st.markdown(f"""
             <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px;">
