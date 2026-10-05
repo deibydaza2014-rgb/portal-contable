@@ -752,769 +752,22 @@ def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_d
     df_asiento = pd.DataFrame(asiento)
     return df_asiento, max(0.0, diferencia_no_deducible), suma_ret_asumidas
 
-def desbloquear_pdf_bytes(fbytes, nit_receptor=None, claves_extra=None, nits_emisores=None):
-    """
-    Desbloquea automáticamente un PDF si viene encriptado/protegido con contraseña.
-    Prueba el NIT de la empresa compradora (con/sin dígito), NITs de emisores,
-    contraseña opcional y contraseñas estándar de facturación electrónica.
-    Retorna: (pdf_desbloqueado_bytes, fue_desbloqueado)
-    """
-    try:
-        reader = PdfReader(io.BytesIO(fbytes))
-        if not reader.is_encrypted:
-            return fbytes, True
-            
-        claves = [""]
-        if claves_extra:
-            claves.append(str(claves_extra).strip())
-            
-        if nit_receptor:
-            nr = re.sub(r"\D", "", str(nit_receptor))
-            if nr:
-                claves.extend([nr, nr[:-1], f"{nr[:-1]}-{nr[-1]}", f"{nr}5", f"{nr}-5"])
-        claves.extend(["901346412", "9013464125", "901346412-5", "1234", "123456"])
-        
-        if nits_emisores:
-            for ne in nits_emisores:
-                c = re.sub(r"\D", "", str(ne))
-                if c and len(c) >= 7:
-                    claves.append(c)
-                    
-        desencriptado = False
-        for pwd in claves:
-            try:
-                res = reader.decrypt(pwd)
-                if res in (1, 2) or not reader.is_encrypted:
-                    desencriptado = True
-                    break
-            except Exception:
-                pass
-                
-        if desencriptado:
-            writer = PdfWriter()
-            for p in reader.pages:
-                writer.add_page(p)
-            out = io.BytesIO()
-            writer.write(out)
-            out.seek(0)
-            return out.getvalue(), True
-        else:
-            return fbytes, False
-    except Exception:
-        return fbytes, False
-
-def auditar_regimen_desde_facturas_renombradas(df_ref, dict_renombrados, empresa_dict):
-    """
-    Escanea el régimen fiscal Y los valores fiscales reales (Subtotal, IVA, Retenciones Sugeridas, Total Neto)
-    directamente de las facturas PDF ya desbloqueadas y renombradas.
-    Permite capturar bases exactas (ej. .388.770) y retenciones sugeridas (ej. 52.361 y 3.380) para agencias aduaneras.
-    """
-    total_modificados = 0
-    if not dict_renombrados or df_ref.empty:
-        return total_modificados
-        
-    for r_idx, r_mat in df_ref.iterrows():
-        soporte_nom = str(r_mat.get("Soporte PDF Renombrado", ""))
-        pdf_bytes = dict_renombrados.get(soporte_nom)
-        
-        # Búsqueda por coincidencia de comprobante o folio si el nombre varió ligeramente
-        if not pdf_bytes:
-            comp_id = str(r_mat.get("Comprobante Siigo", "")).replace(" ", "_")
-            fol_id = str(r_mat.get("Folio", ""))
-            for k, v in dict_renombrados.items():
-                if comp_id and comp_id in k:
-                    pdf_bytes = v
-                    break
-                elif fol_id and len(fol_id) >= 3 and fol_id in k:
-                    pdf_bytes = v
-                    break
-                    
-        if pdf_bytes:
-            try:
-                paginas = cache_extraer_textos_pdf(pdf_bytes, nit_receptor=empresa_dict.get("nit", "9013464125"))
-                txt_completo = chr(10).join(paginas)
-                
-                # 1. Escanear valores fiscales y totales desde el PDF
-                val_fisc = extraer_valores_fiscales_texto_pdf(txt_completo)
-                hubo_cambio = False
-                
-                if val_fisc.get("subtotal") and val_fisc["subtotal"] > 0:
-                    df_ref.at[r_idx, "Base"] = val_fisc["subtotal"]
-                    hubo_cambio = True
-                    
-                if val_fisc.get("iva") is not None and val_fisc["iva"] > 0:
-                    df_ref.at[r_idx, "IVA"] = val_fisc["iva"]
-                    hubo_cambio = True
-                    
-                if val_fisc.get("retefuente") is not None and val_fisc["retefuente"] > 0:
-                    df_ref.at[r_idx, "ReteFuente"] = val_fisc["retefuente"]
-                    hubo_cambio = True
-                    
-                if val_fisc.get("reteica") is not None and val_fisc["reteica"] > 0:
-                    df_ref.at[r_idx, "ReteICA"] = val_fisc["reteica"]
-                    hubo_cambio = True
-                    
-                if val_fisc.get("total_neto") and val_fisc["total_neto"] > 0:
-                    df_ref.at[r_idx, "Total Neto"] = val_fisc["total_neto"]
-                    
-                # 2. Escaneo de régimen fiscal
-                reg_detectado = escanear_regimen_texto_pdf(txt_completo)
-                if reg_detectado and reg_detectado != r_mat.get("Régimen Fiscal Emisor"):
-                    df_ref.at[r_idx, "Régimen Fiscal Emisor"] = reg_detectado
-                    hubo_cambio = True
-
-                # 3. Tratamiento para Agencias Aduaneras / Facturas de Mandato (como Cargo Aduana)
-                prov_nom_u = str(df_ref.at[r_idx, "Proveedor"]).upper()
-                es_aduanero_row = any(k in prov_nom_u for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL", "DHL", "EURO SHIPPING", "TRADE GLOBAL"])
-                
-                if es_aduanero_row or val_fisc.get("retefuente", 0) > 0:
-                    # En facturas aduaneras que se cruzan con el agente, los impuestos se asumen
-                    df_ref.at[r_idx, "Impuestos Asumidos"] = True
-                    saldo_cruce = round(df_ref.at[r_idx, "Base"] + df_ref.at[r_idx, "IVA"], 2)
-                    df_ref.at[r_idx, "Neto a Pagar"] = saldo_cruce
-                    if "CARGO" in prov_nom_u:
-                        df_ref.at[r_idx, "Cuenta Pasivo Especifica"] = "22050505"
-                        df_ref.at[r_idx, "Cta Contrapartida"] = "22050505"
-                    elif "DHL" in prov_nom_u:
-                        df_ref.at[r_idx, "Cuenta Pasivo Especifica"] = "23359501"
-                        df_ref.at[r_idx, "Cta Contrapartida"] = "23359501"
-                    hubo_cambio = True
-                elif hubo_cambio:
-                    df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - df_ref.at[r_idx, "ReteFuente"] - df_ref.at[r_idx, "ReteICA"] - df_ref.at[r_idx, "ReteIVA"], 2)
-
-                if hubo_cambio:
-                    total_modificados += 1
-            except Exception:
-                pass
-                
-    return total_modificados
-
-def identificar_factura_en_texto(texto, df_ref):
-    """
-    Evalúa CUFE, Prefijo, Folio, NIT Emisor y nombre comercial del proveedor.
-    REGLA DE ORO: NUNCA empareja una factura basándose solo en el NIT del proveedor,
-    para evitar confundir múltiples facturas del mismo proveedor (ej. DHL, Claro, Siigo).
-    Debe coincidir obligatoriamente el CUFE o el Número de Factura (Prefijo + Folio).
-    """
-    if not texto or df_ref.empty:
-        return None
-    txt_clean = re.sub(r'[^A-Z0-9]', '', texto.upper())
-    digits_only = re.sub(r'\D', '', texto)
-    
-    # 1. Validación prioritaria por CUFE / Token (certeza absoluta del 100%)
-    for _, r_cand in df_ref.iterrows():
-        cufe_cand = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE / Token", "") or r_cand.get("CUFE", "") or "")).upper()
-        if len(cufe_cand) >= 15 and cufe_cand[:20] in txt_clean:
-            return r_cand
-            
-    mejor_cand = None
-    mejor_score = 0
-    
-    for _, r_cand in df_ref.iterrows():
-        pref = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Prefijo", "")).upper())
-        fol = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Folio", "")).upper())
-        fol_sc = fol.lstrip('0')
-        fac_full = (pref + fol) if pref else fol
-        fac_full_sc = (pref + fol_sc) if pref else fol_sc
-        
-        nit_c = re.sub(r'\D', '', str(r_cand.get("NIT Emisor", "")))
-        nit_base = nit_c[:-1] if len(nit_c) >= 10 else nit_c
-        
-        has_nit = (nit_c and len(nit_c) >= 6 and nit_c in digits_only) or (nit_base and len(nit_base) >= 6 and nit_base in digits_only)
-        has_fac = (len(fac_full) >= 3 and fac_full in txt_clean) or (len(fac_full_sc) >= 3 and fac_full_sc in txt_clean)
-        
-        if not has_fac and len(fol) >= 3:
-            # Buscar el folio explícito precedido por marcadores de factura
-            pat_fol = rf'(?:FACTURA|FAC|NO|NUMERO|N[°º]|VENTA)[\s\:\.\#\-_]*{re.escape(fol)}'
-            if re.search(pat_fol, texto, re.IGNORECASE):
-                has_fac = True
-                
-        prov_words = [w for w in re.split(r'[^A-Z0-9]+', str(r_cand.get("Proveedor", "")).upper()) if len(w) >= 4 and w not in ["SAS", "LTDA", "S.A.", "COLOMBIA", "SERVICES", "SOLUTIONS", "SOCIEDAD", "DISTRIBUCIONES", "GLOBAL", "TRADE"]]
-        has_prov = any(w in txt_clean for w in prov_words)
-        
-        score = 0
-        if has_fac and has_nit:
-            score = 600
-        elif has_fac and has_prov:
-            score = 450
-        elif has_fac and len(fac_full) >= 4:
-            score = 300
-        else:
-            score = 0
-            
-        if score > mejor_score and score >= 300:
-            mejor_score = score
-            mejor_cand = r_cand
-            
-    return mejor_cand
-
-@st.cache_data(show_spinner=False)
-def cache_extraer_textos_pdf(fbytes, nit_receptor="9013464125"):
-    """Extrae el texto de todas las páginas de un PDF, desbloqueándolo automáticamente si está protegido."""
-    try:
-        reader = PdfReader(io.BytesIO(fbytes))
-        if reader.is_encrypted:
-            fbytes_des, ok = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_receptor)
-            if ok:
-                reader = PdfReader(io.BytesIO(fbytes_des))
-        return [(p.extract_text() or "") for p in reader.pages]
-    except Exception:
-        return []
-    """Extrae el texto de todas las páginas de un PDF y lo almacena en caché en RAM para búsqueda ultrarrápida."""
-    try:
-        reader = PdfReader(io.BytesIO(fbytes))
-        return [(p.extract_text() or "") for p in reader.pages]
-    except Exception:
-        return []
-
-def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, empresa_compradora=None):
-    """
-    Busca y extrae el PDF de la factura seleccionada con máxima precisión y validación de contenido:
-    1. Búsqueda por CUFE en el nombre del archivo (para PDFs descargados directamente de la DIAN).
-    2. Búsqueda por CUFE o Factura verificando el CONTENIDO del PDF en dict_renombrados.
-       Si un archivo renombrado contiene una factura distinta a la seleccionada, se descarta.
-    3. Búsqueda en los archivos originales (tanto individuales como páginas de consolidado).
-    Retorna: (pdf_bytes, descripcion_origen, lista_paginas)
-    """
-    comp_siigo = str(fac_sel.get("Comprobante Siigo", "")).strip()
-    consecutivo = str(fac_sel.get("Consecutivo", "")).strip()
-    t_comp = str(fac_sel.get("Tipo Comp", "")).strip()
-    
-    folio_clean = str(fac_sel.get("Folio", "")).replace("-", "").strip().upper()
-    folio_sc = folio_clean.lstrip("0")
-    pref_clean = str(fac_sel.get("Prefijo", "")).replace("-", "").strip().upper()
-    fac_clean = str(fac_sel.get("Factura", "")).replace("-", "").strip().upper()
-    fac_full = (pref_clean + folio_clean) if pref_clean else folio_clean
-    fac_full_sc = (pref_clean + folio_sc) if pref_clean else folio_sc
-    
-    cufe_raw = str(fac_sel.get("CUFE", "") or fac_sel.get("CUFE / Token", "") or "").strip()
-    cufe_clean = re.sub(r'[^a-zA-Z0-9]', '', cufe_raw).lower()
-    
-    # El NIT con el que vienen encriptadas las facturas electrónicas de proveedores es el NIT del COMPRADOR
-    nit_comprador = "9013464125"
-    if empresa_compradora:
-        nit_comprador = re.sub(r"\D", "", str(empresa_compradora.get("nit", "9013464125")))
-        
-    nit_emisor_digits = re.sub(r"\D", "", str(fac_sel.get("NIT Emisor", "")))
-    soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", "")).strip()
-    df_una_fac = pd.DataFrame([fac_sel])
-
-    # 1. BÚSQUEDA DIRECTA POR CUFE EN NOMBRE DE ARCHIVO (Archivos DIAN descargados)
-    if cufe_clean and len(cufe_clean) >= 15:
-        if dict_originales:
-            for fname, fbytes in dict_originales.items():
-                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
-                if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
-                    f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
-                    return f_des, f"Factura Oficial DIAN (CUFE: {fname[:18]}...pdf)", None
-        if dict_renombrados:
-            for fname, fbytes in dict_renombrados.items():
-                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
-                if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
-                    return fbytes, f"Factura Oficial DIAN ({fname})", None
-
-    # 2. BÚSQUEDA Y VERIFICACIÓN EN FACTURAS RENOMBRADAS
-    if dict_renombrados:
-        # A. Prioridad a candidatos con nombre similar (soporte esperado, consecutivo o factura)
-        candidatos = []
-        if soporte_nom and soporte_nom in dict_renombrados:
-            candidatos.append((soporte_nom, dict_renombrados[soporte_nom]))
-            
-        comp_key = f"Comp_{t_comp}-{consecutivo}".upper()
-        for k, v in dict_renombrados.items():
-            if comp_key in k.upper().replace(" ", "_") and (k, v) not in candidatos:
-                candidatos.append((k, v))
-                    
-        for k, v in dict_renombrados.items():
-            k_clean = k.replace("-", "").replace(" ", "").upper()
-            if fac_full and len(fac_full) >= 3 and fac_full in k_clean and (k, v) not in candidatos:
-                candidatos.append((k, v))
-                    
-        # Verificar contenido de los candidatos: SOLO aceptar si el texto realmente pertenece a esta factura
-        for c_nom, c_bytes in candidatos:
-            try:
-                pgs = cache_extraer_textos_pdf(c_bytes, nit_receptor=nit_comprador)
-                txt_c = " ".join(pgs)
-                if identificar_factura_en_texto(txt_c, df_una_fac) is not None:
-                    return c_bytes, f"Factura Verificada ({c_nom})", None
-            except Exception:
-                pass
-
-        # B. Si los candidatos por nombre fallan, escanear TODOS los archivos renombrados por contenido
-        for r_nom, r_bytes in dict_renombrados.items():
-            if (r_nom, r_bytes) not in candidatos:
-                try:
-                    pgs = cache_extraer_textos_pdf(r_bytes, nit_receptor=nit_comprador)
-                    txt_r = " ".join(pgs)
-                    if identificar_factura_en_texto(txt_r, df_una_fac) is not None:
-                        return r_bytes, f"Factura Verificada por Contenido ({r_nom})", None
-                except Exception:
-                    pass
-
-    # 3. BÚSQUEDA EN ARCHIVOS ORIGINALES INDIVIDUALES Y UNIFICADOS
-    if dict_originales:
-        # A. Archivos individuales por coincidencia de texto
-        for fname, fbytes in dict_originales.items():
-            try:
-                f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
-                pgs = cache_extraer_textos_pdf(f_des, nit_receptor=nit_comprador)
-                txt_ind = " ".join(pgs)
-                if identificar_factura_en_texto(txt_ind, df_una_fac) is not None:
-                    return f_des, f"Factura Original Verificada ({fname})", None
-            except Exception:
-                pass
-
-        # B. Escaneo en PDFs unificados página por página
-        for fname, fbytes in dict_originales.items():
-            try:
-                f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
-                paginas_txt = cache_extraer_textos_pdf(f_des, nit_receptor=nit_comprador)
-                pags_coincidentes = []
-                for p_idx, txt in enumerate(paginas_txt):
-                    if identificar_factura_en_texto(txt, df_una_fac) is not None:
-                        if p_idx not in pags_coincidentes:
-                            pags_coincidentes.append(p_idx)
-                        m_p = re.search(r'(?:P[ÁAáa]G(?:INA)?|HOJA|PAGE)\s*[:\.]?\s*1\s*(?:DE|/|OF)\s*(\d+)', txt, re.IGNORECASE)
-                        if m_p:
-                            try:
-                                total_h = int(m_p.group(1))
-                                if 2 <= total_h <= 15:
-                                    for off in range(1, total_h):
-                                        p_next = p_idx + off
-                                        if p_next < len(paginas_txt) and p_next not in pags_coincidentes:
-                                            pags_coincidentes.append(p_next)
-                            except Exception:
-                                pass
-                
-                if pags_coincidentes:
-                    reader = PdfReader(io.BytesIO(f_des))
-                    writer = PdfWriter()
-                    for p in pags_coincidentes:
-                        writer.add_page(reader.pages[p])
-                    out = io.BytesIO()
-                    writer.write(out)
-                    out.seek(0)
-                    str_p = ", ".join([str(p+1) for p in pags_coincidentes])
-                    return out.getvalue(), f"Extraído de '{fname}' (Págs {str_p})", [p+1 for p in pags_coincidentes]
-            except Exception:
-                pass
-
-    # 4. Si no se encontró ningún archivo cuyo contenido coincida con esta factura, NO retornar una factura equivocada
-    return None, None, None
-
-
-def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view"):
-    """
-    Renderiza la previsualización del PDF de la manera más robusta y compatible posible:
-    1. Si 'pypdfium2' está instalado: convierte cada página a imagen y la muestra nativamente con st.image().
-       100% inmune a bloqueos de navegador, sandboxes, plugins de PDF y dispositivos móviles.
-    2. Si 'pypdfium2' aún no está activo: utiliza el visor Canvas (PDF.js) con worker seguro en Blob.
-       NUNCA utiliza <iframe src="data:application/pdf"> porque los navegadores Chromium bloquean data URLs en subframes.
-    3. Botón de Descarga directa (st.download_button) y botón directo para abrir en otra ventana.
-    """
-    if not pdf_bytes or not isinstance(pdf_bytes, (bytes, bytearray)):
-        st.error("⚠️ El archivo PDF no contiene datos válidos.")
-        return
-
-    try:
-        reader_prev = PdfReader(io.BytesIO(pdf_bytes))
-        num_pags_tot = len(reader_prev.pages)
-    except Exception:
-        num_pags_tot = 1
-
-    b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8').replace('\n', '').strip()
-
-    # Botones superiores de descarga y apertura directa
-    c_btn1, c_btn2 = st.columns([1, 1])
-    with c_btn1:
-        pags_label = f"{num_pags_tot} página{'s' if num_pags_tot > 1 else ''} completa{'s' if num_pags_tot > 1 else ''}"
-        st.download_button(
-            label=f"📥 Descargar Factura Completa ({pags_label})",
-            data=pdf_bytes,
-            file_name=nombre_archivo,
-            mime="application/pdf",
-            key=f"btn_dl_univ_{key_prefix}",
-            use_container_width=True
-        )
-    with c_btn2:
-        st.markdown(f"""
-        <a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="text-decoration:none;">
-            <div style="background:#0284c7; color:white; text-align:center; padding:9px 12px; border-radius:6px; font-weight:600; font-size:14px; box-shadow:0 1px 2px rgba(0,0,0,0.05); cursor:pointer;">
-                🗗 Abrir / Descargar Factura en Otra Ventana
-            </div>
-        </a>
-        """, unsafe_allow_html=True)
-
-    st.write("")
-
-    try:
-        import pypdfium2 as pdfium
-        has_pdfium = True
-    except Exception:
-        has_pdfium = False
-
-    if has_pdfium:
-        try:
-            doc = pdfium.PdfDocument(pdf_bytes)
-            tot_pags = len(doc)
-            
-            col_zoom1, col_zoom2 = st.columns([1, 2])
-            with col_zoom1:
-                zoom_opt = st.select_slider(
-                    "🔍 Tamaño de Visualización:",
-                    options=["Normal (150%)", "Grande (200%)", "Compacto (100%)"],
-                    value="Normal (150%)",
-                    key=f"zoom_slider_{key_prefix}"
-                )
-                scale_map = {"Normal (150%)": 1.6, "Grande (200%)": 2.2, "Compacto (100%)": 1.1}
-                scale_val = scale_map.get(zoom_opt, 1.6)
-            with col_zoom2:
-                st.caption(f"📄 Visualizando **{tot_pags}** página(s) de la factura generadas directamente en el servidor sin restricciones de navegador.")
-            
-            for p_idx in range(tot_pags):
-                page = doc[p_idx]
-                pil_img = page.render(scale=scale_val).to_pil()
-                st.markdown(f"""
-                <div style="background:#0f172a; color:#f8fafc; padding:7px 14px; border-radius:6px 6px 0 0; font-size:13px; font-weight:600; margin-top:16px; display:flex; justify-content:space-between; align-items:center;">
-                    <span>📄 {nombre_archivo}</span>
-                    <span style="background:#0284c7; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">Página {p_idx + 1} de {tot_pags}</span>
-                </div>
-                """, unsafe_allow_html=True)
-                st.image(pil_img, use_container_width=True, caption=f"Hoja {p_idx + 1} de {tot_pags}")
-            return
-        except Exception as e_pdfium:
-            st.warning(f"Nota: Falló renderizado de imagen ({e_pdfium}). Mostrando visor alternativo...")
-
-    st.info("💡 **Para activar la visualización nativa en Streamlit Cloud:** Como ya agregaste `pypdfium2` a tu `requirements.txt`, haz clic en el menú superior derecho de Streamlit Cloud (los 3 puntos `...`) y selecciona **'Reboot app'** para que instale la librería. Abajo se muestra el visor continuo Canvas:")
-
-    # Modo Canvas PDF.js con fondo claro y worker seguro en Blob
-    visor_height = max(700, min(2400, num_pags_tot * 640))
-    html_canvas = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-      <style>
-        body {{
-          margin: 0;
-          padding: 12px;
-          background: #f8fafc;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-          overflow-y: auto;
-        }}
-        .page-box {{
-          margin-bottom: 20px;
-          box-shadow: 0 2px 10px rgba(0,0,0,0.12);
-          border-radius: 6px;
-          background: white;
-          overflow: hidden;
-          width: 100%;
-          max-width: 860px;
-          border: 1px solid #e2e8f0;
-        }}
-        .page-header {{
-          background: #0f172a;
-          color: #f8fafc;
-          font-size: 13px;
-          font-weight: 600;
-          padding: 8px 14px;
-          display: flex;
-          justify-content: space-between;
-        }}
-        canvas {{
-          display: block;
-          width: 100%;
-          height: auto;
-        }}
-        #status {{
-          color: #0284c7;
-          padding: 16px;
-          font-size: 14px;
-          font-weight: 600;
-          text-align: center;
-        }}
-        #fallback-card {{
-          display: none;
-          background: white;
-          border: 1px solid #cbd5e1;
-          border-radius: 8px;
-          padding: 24px;
-          text-align: center;
-          max-width: 600px;
-          margin-top: 20px;
-          box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        }}
-      </style>
-    </head>
-    <body>
-      <div id="status">⏳ Procesando y renderizando factura ({num_pags_tot} página(s))...</div>
-      <div id="viewer-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
-      
-      <div id="fallback-card">
-        <h3 style="color:#0f172a; margin-top:0;">📄 Factura Lista</h3>
-        <p style="color:#64748b; font-size:14px;">El navegador bloqueó la ejecución de scripts en este contenedor. Utiliza los botones superiores de descarga o abre la factura directamente:</p>
-        <a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 20px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Documento Completo</a>
-      </div>
-
-      <script>
-        const b64Data = "{b64_pdf}";
-        function base64ToUint8Array(base64) {{
-            const binaryString = atob(base64);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {{
-                bytes[i] = binaryString.charCodeAt(i);
-            }}
-            return bytes;
-        }}
-        
-        function showFallback() {{
-            document.getElementById('status').style.display = 'none';
-            document.getElementById('viewer-container').style.display = 'none';
-            document.getElementById('fallback-card').style.display = 'block';
-        }}
-
-        async function initPdfJs() {{
-            try {{
-                if (typeof pdfjsLib === 'undefined') {{
-                    showFallback();
-                    return;
-                }}
-
-                try {{
-                    const wResp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js');
-                    if (wResp.ok) {{
-                        const wCode = await wResp.text();
-                        const wBlob = new Blob([wCode], {{ type: 'application/javascript' }});
-                        pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(wBlob);
-                    }} else {{
-                        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-                    }}
-                }} catch (eW) {{
-                    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-                }}
-                
-                const uint8Pdf = base64ToUint8Array(b64Data);
-                const loadingTask = pdfjsLib.getDocument({{
-                    data: uint8Pdf,
-                    disableFontFace: false
-                }});
-
-                const pdf = await loadingTask.promise;
-                document.getElementById('status').style.display = 'none';
-                const container = document.getElementById('viewer-container');
-                container.innerHTML = '';
-                
-                for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
-                    try {{
-                        const page = await pdf.getPage(pNum);
-                        const scale = 1.5;
-                        const viewport = page.getViewport({{ scale: scale }});
-                        
-                        const pageBox = document.createElement('div');
-                        pageBox.className = 'page-box';
-                        
-                        const pageHeader = document.createElement('div');
-                        pageHeader.className = 'page-header';
-                        pageHeader.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:#0284c7; padding:2px 8px; border-radius:4px;">Hoja ' + pNum + ' de ' + pdf.numPages + '</span>';
-                        pageBox.appendChild(pageHeader);
-                        
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        canvas.height = viewport.height;
-                        canvas.width = viewport.width;
-                        pageBox.appendChild(canvas);
-                        
-                        container.appendChild(pageBox);
-                        await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
-                    }} catch (renderErr) {{
-                        console.error('Error renderizando página ' + pNum, renderErr);
-                    }}
-                }}
-            }} catch (e) {{
-                console.error('Excepción general en visor:', e);
-                showFallback();
-            }}
-        }}
-
-        initPdfJs();
-      </script>
-    </body>
-    </html>
-    """
-    components.html(html_canvas, height=visor_height, scrolling=True)
-
-
-# AVISO DE TRABAJO PREVIO DISPONIBLE (SOLO SE CARGA SI EL USUARIO OPRIME EL BOTÓN)
-trabajos_existentes = listar_trabajos_historial(empresa)
-
-if "df_procesado" not in st.session_state and trabajos_existentes:
-    ultimo = trabajos_existentes[0]
-    nom_ult = ultimo.get("nombre_trabajo", f"Trabajo {ultimo.get('id', '')}")
-    n_fac = ultimo.get("total_facturas", 0)
-    val_tot = ultimo.get("total_valor", 0.0)
-    
-    st.markdown(f"""
-    <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:14px 18px; margin-bottom:14px;">
-        <h4 style="margin:0 0 6px 0; color:#166534;">📂 Tienes un trabajo guardado disponible</h4>
-        <p style="margin:0; color:#14532d; font-size:14px;">
-            Tienes guardado en memoria tu trabajo previo: <b>'{nom_ult}'</b> con <b>{n_fac} facturas</b> (${val_tot:,.2f}) y sus PDFs vinculados.<br>
-            • Si deseas continuar con este trabajo, haz clic en el botón verde.<br>
-            • Si hoy vas a implementar <b>facturas nuevas</b>, no tienes que oprimir nada y puedes subir tus nuevos archivos directamente abajo en la Pestaña 1.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    c_btn_c1, c_btn_c2 = st.columns([1.6, 3])
-    with c_btn_c1:
-        if st.button("📂 Cargar mi trabajo anterior", key="btn_cargar_trabajo_previo_on_demand", use_container_width=True):
-            df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, ultimo["id"])
-            if df_g is not None and not df_g.empty:
-                st.session_state["df_procesado"] = df_g
-                st.session_state["dict_pdfs"] = pdfs_r_g or {}
-                st.session_state["raw_uploaded_pdfs"] = pdfs_o_g or {}
-                st.session_state["excel_bytes"] = ex_b_g
-                st.session_state["excel_nombre"] = ex_n_g
-                st.session_state["zip_pdfs"] = zip_g
-                st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
-                st.session_state["job_actual_id"] = ultimo["id"]
-                st.session_state["_sesion_cargada_nombre"] = nom_ult
-                st.success(f"¡Trabajo '{nom_ult}' cargado con éxito!")
-                st.rerun()
-    with c_btn_c2:
-        st.caption("👈 Oprime aquí **únicamente** cuando desees restaurar el trabajo anterior. De lo contrario, continúa abajo con tus facturas nuevas.")
-
-# BANNER DE SESIÓN ACTIVA EN PANTALLA
-if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-    c_bnr1, c_bnr2 = st.columns([4, 1.4])
-    with c_bnr1:
-        nom_ses = st.session_state.get("_sesion_cargada_nombre", st.session_state.get("excel_nombre", "Reporte de Facturas"))
-        st.info(f"📋 **Trabajo Activo en Pantalla:** '{nom_ses}' ({len(st.session_state['df_procesado'])} facturas cargadas). Puedes auditar o exportar a Siigo.")
-    with c_bnr2:
-        if st.button("🆕 Limpiar / Subir Facturas Nuevas", key="btn_nuevo_trabajo_top", help="Limpia la pantalla para procesar un nuevo mes o facturas nuevas."):
-            for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_sesion_cargada_nombre", "_sesion_auto_recuperada", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig"]:
-                st.session_state.pop(k, None)
-            st.rerun()
-
-# PANEL DE HISTORIAL DE TRABAJOS Y RESPALDOS INDESTRUCTIBLES
-trabajos_guardados = listar_trabajos_historial(empresa)
-panel_expanded = False
-
-with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", expanded=panel_expanded):
-    col_h_left, col_h_right = st.columns([1.5, 1])
-    
-    with col_h_left:
-        st.markdown("#### 📂 Trabajos Guardados en esta Empresa:")
-        if trabajos_guardados:
-            st.caption("Haz clic en 'Cargar' para recuperar de inmediato cualquier auditoría o mes previo:")
-            for tb in trabajos_guardados:
-                c_h1, c_h2, c_h3 = st.columns([3, 1.2, 0.5])
-                with c_h1:
-                    nom_tb = tb.get("nombre_trabajo", f"Trabajo {tb.get('id', '')}")
-                    n_facs = tb.get("total_facturas", 0)
-                    val_tot = tb.get("total_valor", 0.0)
-                    n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
-                    n_orig = tb.get("total_pdfs_originales", 0)
-                    info_pdf_str = f"{n_renom} PDFs procesados" if n_renom > 0 else (f"{n_orig} PDFs subidos" if n_orig > 0 else "Sin PDFs")
-                    st.markdown(f"📄 **{nom_tb}** — {n_facs} facturas (${val_tot:,.2f}) — **{info_pdf_str}**")
-                with c_h2:
-                    if st.button("📂 Cargar", key=f"btn_h_load_{tb['id']}"):
-                        df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, tb["id"])
-                        if df_g is not None:
-                            st.session_state["df_procesado"] = df_g
-                        if pdfs_r_g:
-                            st.session_state["dict_pdfs"] = pdfs_r_g
-                        if pdfs_o_g:
-                            st.session_state["raw_uploaded_pdfs"] = pdfs_o_g
-                        if ex_b_g:
-                            st.session_state["excel_bytes"] = ex_b_g
-                            st.session_state["excel_nombre"] = ex_n_g
-                        if zip_g:
-                            st.session_state["zip_pdfs"] = zip_g
-                            st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
-                        st.session_state["job_actual_id"] = tb["id"]
-                        st.session_state["_sesion_auto_recuperada"] = nom_tb
-                        st.success(f"¡Trabajo '{nom_tb}' cargado! Todo tu avance está listo.")
-                        st.rerun()
-                with c_h3:
-                    if st.button("🗑️", key=f"btn_h_del_{tb['id']}"):
-                        eliminar_trabajo_historial(empresa, tb["id"])
-                        st.rerun()
-        else:
-            st.info("💡 Aún no tienes trabajos guardados en el disco local para esta empresa.")
-
-    with col_h_right:
-        st.markdown("#### 🛡️ Respaldo Portable (.zip):")
-        st.caption("Guarda o restaura todo tu trabajo en un solo archivo, ideal si cambias de PC o si el servidor se reinicia:")
-        
-        # 1. Botón para exportar respaldo de la sesión activa
-        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-            zip_respaldo_bytes = exportar_respaldo_sesion_zip(
-                empresa,
-                st.session_state.get("df_procesado"),
-                st.session_state.get("dict_pdfs", {}),
-                st.session_state.get("raw_uploaded_pdfs", {}),
-                st.session_state.get("excel_bytes"),
-                st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                st.session_state.get("zip_pdfs")
-            )
-            nom_respaldo = f"Respaldo_Sesion_{empresa['nombre'].replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d')}.zip"
-            st.download_button(
-                label="💾 Descargar Respaldo Completo de esta Sesión (.zip)",
-                data=zip_respaldo_bytes,
-                file_name=nom_respaldo,
-                mime="application/zip",
-                use_container_width=True,
-                help="Descarga un solo archivo con TODO (Excel, cálculos, retenciones y PDFs vinculados)."
-            )
-        
-        # 2. Uploader para restaurar desde un archivo ZIP de respaldo previo
-        archivo_zip_restaurar = st.file_uploader(
-            "📥 Restaurar Sesión desde Archivo de Respaldo (.zip):",
-            type=["zip"],
-            key="upl_zip_restore_historial"
-        )
-        if archivo_zip_restaurar is not None:
-            with st.spinner("Restaurando sesión completa desde el respaldo..."):
-                df_res, renom_res, orig_res, ex_b_res, ex_n_res, zip_res = importar_respaldo_sesion_zip(
-                    archivo_zip_restaurar.getvalue(), empresa
-                )
-                if df_res is not None:
-                    st.session_state["df_procesado"] = df_res
-                    st.session_state["dict_pdfs"] = renom_res or {}
-                    st.session_state["raw_uploaded_pdfs"] = orig_res or {}
-                    st.session_state["excel_bytes"] = ex_b_res
-                    st.session_state["excel_nombre"] = ex_n_res
-                    st.session_state["zip_pdfs"] = zip_res
-                    st.session_state["total_zip_pdfs"] = len(renom_res) if renom_res else 0
-                    
-                    # Guardar también en el disco local
-                    guardar_trabajo_en_historial(
-                        empresa, df_res,
-                        excel_bytes=ex_b_res,
-                        excel_nombre=ex_n_res,
-                        dict_pdfs_renombrados=renom_res,
-                        dict_pdfs_originales=orig_res,
-                        zip_bytes=zip_res
-                    )
-                    st.session_state["_sesion_auto_recuperada"] = f"Respaldo {archivo_zip_restaurar.name}"
-                    st.success(f"¡Sesión restaurada con éxito! Se recuperaron {len(df_res)} facturas y {len(renom_res)} PDFs.")
-                    st.rerun()
-                else:
-                    st.error("El archivo ZIP no contiene un respaldo válido de sesión contable.")
-
-st.markdown("---")
-
-tab_compras, tab_auditoria, tab_triangulacion, tab_siigo = st.tabs([
-    "1. Cargar Documentos y Desbloquear PDFs",
-    "2. Auditoria y Trazabilidad Fiscal",
-    "3. 🔀 Triangulación y Cruces de Importación (Aduanas)",
-    "4. Exportar Planilla Oficial a Siigo"
-])
+# Directorio oficial de regímenes fiscales conocidos por NIT y Nombre
+REGIMENES_EMISORES_CONOCIDOS = {
+    '860502609': 'O-13;O-15',   # DHL EXPRESS COLOMBIA LTDA (Gran Contribuyente y Autorretenedor)
+    '800215775': 'O-13;O-15',   # SOCIEDAD PORTUARIA REGIONAL DE BUENAVENTURA S.A.
+    '890304099': 'O-13;O-15',   # HOTELES ESTELAR S.A.
+    '830048268': 'O-13;O-15',   # SIIGO S.A.S.
+    '800153993': 'O-13;O-15',   # COMUNICACION CELULAR S.A. COMCEL / CLARO
+    '860006376': 'O-13;O-15',   # PANAMERICANA LIBRERIA Y PAPELERIA S.A.
+    '890900608': 'O-13;O-15',   # BANCOLOMBIA S.A.
+    '860007738': 'O-13;O-15',   # BANCO DAVIVIENDA S.A.
+    '890903938': 'O-13;O-15',   # ALMACENES EXITO S.A.
+    '860012936': 'O-13;O-15',   # SODIMAC CORONA / HOMECENTER
+    '901306979': 'O-48',        # TRADE GLOBAL INTERNATIONAL SAS
+    '805001149': 'O-48',        # AGENCIA INTERAMERICANA DE CARGA
+    '900744197': 'O-48',        # HOTEL GENOVA SAS
+}
 
 CODIGOS_IMPUESTO_SIIGO = {
     '24081001': 1,   # IVA 19% compras bienes
@@ -1544,66 +797,63 @@ CODIGOS_IMPUESTO_SIIGO = {
 
 AGENTES_ADUANEROS = ["DHL", "ADUANA", "EURO SHIPPING", "PORTUARIA", "ALMACENADORA", "CARGO", "TRADE GLOBAL", "TERMINAL", "BUENAVENTURA"]
 
-def escanear_regimen_texto_pdf(texto):
+def escanear_regimen_texto_pdf(texto, nit_emisor=None):
     """
     Escaneo inteligente de responsabilidades fiscales del EMISOR en la factura electrónica:
-    1. Descarta el pie de página de proveedores tecnológicos (Siigo, Facturatech, Carvajal, Cadena, etc.)
-       para no confundir las resoluciones de autorretenedor del software con las del proveedor real.
-    2. Aísla el bloque de datos del Emisor antes de los datos del Cliente/Adquirente.
-    3. Descarta frases negativas como 'No somos grandes contribuyentes ni autorretenedores'.
-    4. Detecta afirmativamente O-13 (Gran Contribuyente), O-15 (Autorretenedor), O-47 (Régimen Simple), O-48 y O-49.
+    Analiza el documento completo sin truncar en 'Cliente:' para no perder las resoluciones.
+    Detecta O-13 (Gran Contribuyente), O-15 (Autorretenedor), O-47 (RST), O-48 y O-49.
     """
     if not texto:
         return ""
     
     txt = texto.upper()
+    txt_norm = re.sub(r'\s+', ' ', txt)
     
-    # 1. Cortar pie de página de proveedores tecnológicos de software
-    for corte in ["PROVEEDOR TECNOLÓGICO", "PROVEEDOR TECNOLOGICO", "IMPRESO POR SOFTWARE", "DESARROLLADO POR", "SOFTWARE SIIGO", "TECNOLOGÍA TRANSACCIONAL", "THE FACTORY HKA", "DISPAPELES", "FACTURATECH", "CADENA S.A."]:
-        pos_c = txt.find(corte)
-        if pos_c != -1:
-            txt = txt[:pos_c]
-            
-    # 2. Aislar el bloque del Emisor antes de los datos del Cliente/Adquirente
-    pos_cli = -1
-    for k_cli in ["DATOS DEL CLIENTE", "DATOS DEL ADQUIRENTE", "CLIENTE:", "SEÑOR(ES):", "SEÑORES:", "ADQUIRENTE:", "FACTURADO A:"]:
-        p = txt.find(k_cli)
-        if p != -1 and (pos_cli == -1 or p < pos_cli):
-            pos_cli = p
-            
-    txt_emisor = txt[:pos_cli] if pos_cli != -1 else txt
+    # 1. Si se conoce el NIT del emisor, verificar en el directorio de regímenes oficiales
+    if nit_emisor:
+        ne_clean = re.sub(r'\D', '', str(nit_emisor))
+        if ne_clean in REGIMENES_EMISORES_CONOCIDOS:
+            return REGIMENES_EMISORES_CONOCIDOS[ne_clean]
     
-    # 3. Analizar Gran Contribuyente (O-13)
+    # 2. Analizar Gran Contribuyente (O-13 / 0-13 / Grandes Contribuyentes)
     es_gc = False
-    if "O-13" in txt_emisor or "0-13" in txt_emisor:
-        es_gc = True
-    elif "GRAN CONTRIBUYENTE" in txt_emisor or "GRANDES CONTRIBUYENTES" in txt_emisor:
-        if not re.search(r"(?:NO\s+(?:SOMOS\s+)?|NI\s+)GRANDES?\s+CONTRIBUYENTES?", txt_emisor):
+    if re.search(r'\b[O0]-13\b', txt_norm):
+        if not re.search(r'(?:NO\s+(?:SOMOS\s+)?|NI\s+|NO\s+ES\s+)[O0]-13', txt_norm):
+            es_gc = True
+    elif re.search(r'GRANDES?\s+CONTRIBUYENTES?', txt_norm):
+        if not re.search(r'(?:NO\s+(?:SOMOS\s+)?|NI\s+|NO\s+ES\s+)GRANDES?\s+CONTRIBUYENTES?', txt_norm):
             es_gc = True
             
-    # 4. Analizar Autorretenedor (O-15)
+    # 3. Analizar Autorretenedor (O-15 / 0-15 / Autorretenedor de Renta)
     es_autorr = False
-    if "O-15" in txt_emisor or "0-15" in txt_emisor:
-        es_autorr = True
-    elif "AUTORRETENEDOR" in txt_emisor or "AUTORETENEDOR" in txt_emisor:
-        if not re.search(r"(?:NO\s+(?:SOMOS\s+)?|NI\s+)AUTO[R]?RETENEDOR(?:ES)?", txt_emisor):
+    if re.search(r'\b[O0]-15\b', txt_norm):
+        if not re.search(r'(?:NO\s+(?:SOMOS\s+)?|NI\s+|NO\s+ES\s+)[O0]-15', txt_norm):
+            es_autorr = True
+    elif re.search(r'AUTO[R]?RETENEDOR(?:ES)?', txt_norm):
+        if not re.search(r'(?:NO\s+(?:SOMOS\s+)?|NI\s+|NO\s+ES\s+)AUTO[R]?RETENEDOR(?:ES)?', txt_norm):
             es_autorr = True
             
-    # 5. Analizar Régimen Simple de Tributación (O-47 / RST)
+    # 4. Analizar Régimen Simple de Tributación (O-47 / 0-47 / RST)
     es_rst = False
-    if "O-47" in txt_emisor or "0-47" in txt_emisor:
+    if re.search(r'\b[O0]-47\b', txt_norm):
         es_rst = True
-    elif "REGIMEN SIMPLE" in txt_emisor or "RÉGIMEN SIMPLE" in txt_emisor or "SIMPLE DE TRIBUTACION" in txt_emisor or "RST" in txt_emisor:
-        es_rst = True
+    elif re.search(r'R[EÉ]GIMEN\s+SIMPLE|SIMPLE\s+DE\s+TRIBUTACI[OÓ]N|\bRST\b', txt_norm):
+        if not re.search(r'(?:NO\s+(?:SOMOS\s+)?|NI\s+)(?:R[EÉ]GIMEN\s+SIMPLE|RST)', txt_norm):
+            es_rst = True
+            
+    # 5. No Responsable de IVA (O-49 / 0-49)
+    es_no_iva = False
+    if re.search(r'\b[O0]-49\b', txt_norm) or re.search(r'NO\s+RESPONSABLE\s+(?:DE|DEL)\s+IVA', txt_norm):
+        es_no_iva = True
 
     codigos = []
     if es_gc: codigos.append("O-13")
     if es_autorr: codigos.append("O-15")
     if es_rst: codigos.append("O-47")
+    if es_no_iva: codigos.append("O-49")
     if not codigos: codigos.append("O-48")
     
     return ";".join(codigos)
-
 
 def parse_num_co(val_str):
     if not val_str: return 0.0
@@ -1868,6 +1118,689 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_do
     }
     return t_comp, op, cta_p, cta_c, desc, rfte, rica, reteiva, cta_rfte, cta_iva, cta_rica, cat, razon_total, audit_dict
 
+
+
+def desbloquear_pdf_bytes(fbytes, nit_receptor=None, claves_extra=None, nits_emisores=None):
+    """
+    Desbloquea automáticamente un PDF si viene encriptado/protegido con contraseña.
+    Prueba el NIT de la empresa compradora (con/sin dígito), NITs de emisores,
+    contraseña opcional y contraseñas estándar de facturación electrónica.
+    Retorna: (pdf_desbloqueado_bytes, fue_desbloqueado)
+    """
+    try:
+        reader = PdfReader(io.BytesIO(fbytes))
+        if not reader.is_encrypted:
+            return fbytes, True
+            
+        claves = [""]
+        if claves_extra:
+            claves.append(str(claves_extra).strip())
+            
+        if nit_receptor:
+            nr = re.sub(r"\D", "", str(nit_receptor))
+            if nr:
+                claves.extend([nr, nr[:-1], f"{nr[:-1]}-{nr[-1]}", f"{nr}5", f"{nr}-5"])
+        claves.extend(["901346412", "9013464125", "901346412-5", "1234", "123456"])
+        
+        if nits_emisores:
+            for ne in nits_emisores:
+                c = re.sub(r"\D", "", str(ne))
+                if c and len(c) >= 7:
+                    claves.append(c)
+                    
+        desencriptado = False
+        for pwd in claves:
+            try:
+                res = reader.decrypt(pwd)
+                if res in (1, 2) or not reader.is_encrypted:
+                    desencriptado = True
+                    break
+            except Exception:
+                pass
+                
+        if desencriptado:
+            writer = PdfWriter()
+            for p in reader.pages:
+                writer.add_page(p)
+            out = io.BytesIO()
+            writer.write(out)
+            out.seek(0)
+            return out.getvalue(), True
+        else:
+            return fbytes, False
+    except Exception:
+        return fbytes, False
+
+@st.cache_data(show_spinner=False)
+def cache_extraer_textos_pdf(fbytes, nit_receptor="9013464125"):
+    """Extrae el texto de todas las páginas de un PDF, desbloqueándolo automáticamente si está protegido."""
+    try:
+        reader = PdfReader(io.BytesIO(fbytes))
+        if reader.is_encrypted:
+            fbytes_des, ok = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_receptor)
+            if ok:
+                reader = PdfReader(io.BytesIO(fbytes_des))
+        return [(p.extract_text() or "") for p in reader.pages]
+    except Exception:
+        return []
+
+
+
+
+def auditar_regimen_desde_facturas_renombradas(df_ref, dict_renombrados, empresa_dict):
+    """
+    Escanea el régimen fiscal Y los valores fiscales reales (Subtotal, IVA, Retenciones Sugeridas, Total Neto)
+    directamente de las facturas PDF ya desbloqueadas y renombradas.
+    Actualiza el Régimen Fiscal Emisor Y recalcula las retenciones en la fuente correspondientes.
+    """
+    total_modificados = 0
+    if not dict_renombrados or df_ref.empty:
+        return total_modificados
+        
+    for r_idx, r_mat in df_ref.iterrows():
+        soporte_nom = str(r_mat.get("Soporte PDF Renombrado", ""))
+        pdf_bytes = dict_renombrados.get(soporte_nom)
+        
+        # Búsqueda por coincidencia de comprobante o folio si el nombre varió ligeramente
+        if not pdf_bytes:
+            comp_id = str(r_mat.get("Comprobante Siigo", "")).replace(" ", "_")
+            fol_id = str(r_mat.get("Folio", ""))
+            for k, v in dict_renombrados.items():
+                if comp_id and comp_id in k:
+                    pdf_bytes = v
+                    break
+                elif fol_id and len(fol_id) >= 3 and fol_id in k:
+                    pdf_bytes = v
+                    break
+                    
+        if pdf_bytes:
+            try:
+                paginas = cache_extraer_textos_pdf(pdf_bytes, nit_receptor=empresa_dict.get("nit", "9013464125"))
+                txt_completo = chr(10).join(paginas)
+                
+                # 1. Escanear valores fiscales y totales desde el PDF
+                val_fisc = extraer_valores_fiscales_texto_pdf(txt_completo)
+                hubo_cambio = False
+                
+                if val_fisc.get("subtotal") and val_fisc["subtotal"] > 0:
+                    df_ref.at[r_idx, "Base"] = val_fisc["subtotal"]
+                    hubo_cambio = True
+                    
+                if val_fisc.get("iva") is not None and val_fisc["iva"] > 0:
+                    df_ref.at[r_idx, "IVA"] = val_fisc["iva"]
+                    hubo_cambio = True
+                    
+                # 2. Escaneo de régimen fiscal del emisor
+                nit_emisor_val = r_mat.get("NIT Emisor")
+                reg_detectado = escanear_regimen_texto_pdf(txt_completo, nit_emisor=nit_emisor_val)
+                
+                if not reg_detectado:
+                    ne_dig = re.sub(r'\D', '', str(nit_emisor_val))
+                    if ne_dig in REGIMENES_EMISORES_CONOCIDOS:
+                        reg_detectado = REGIMENES_EMISORES_CONOCIDOS[ne_dig]
+                    elif any(k in str(r_mat.get("Proveedor", "")).upper() for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
+                        reg_detectado = "O-13;O-15"
+                
+                if reg_detectado and reg_detectado != r_mat.get("Régimen Fiscal Emisor"):
+                    df_ref.at[r_idx, "Régimen Fiscal Emisor"] = reg_detectado
+                    hubo_cambio = True
+
+                # 3. Recalcular liquidación de retenciones con el nuevo régimen
+                reg_a_usar = df_ref.at[r_idx, "Régimen Fiscal Emisor"]
+                t_c_n, op_n, c_p_n, c_c_n, desc_n, rfte_n, rica_n, riva_n, c_rf_n, c_iv_n, c_ri_n, cat_n, razon_n, audit_n = clasificar_factura(
+                    df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
+                    df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
+                    df_ref.at[r_idx, "Operacion"], reg_a_usar, empresa_dict
+                )
+                
+                # Si el PDF trae retenciones sugeridas explícitas en notas
+                if val_fisc.get("retefuente") is not None and val_fisc["retefuente"] > 0:
+                    df_ref.at[r_idx, "ReteFuente"] = val_fisc["retefuente"]
+                else:
+                    df_ref.at[r_idx, "ReteFuente"] = rfte_n
+                    
+                if val_fisc.get("reteica") is not None and val_fisc["reteica"] > 0:
+                    df_ref.at[r_idx, "ReteICA"] = val_fisc["reteica"]
+                else:
+                    df_ref.at[r_idx, "ReteICA"] = rica_n
+                    
+                df_ref.at[r_idx, "ReteIVA"] = riva_n
+                df_ref.at[r_idx, "Cta ReteFuente"] = c_rf_n
+                df_ref.at[r_idx, "Cta ReteICA"] = c_ri_n
+                df_ref.at[r_idx, "Razón Contable"] = razon_n
+                df_ref.at[r_idx, "Audit Info"] = audit_n
+
+                # 4. Tratamiento para Agencias Aduaneras / Facturas de Mandato
+                prov_nom_u = str(df_ref.at[r_idx, "Proveedor"]).upper()
+                es_aduanero_row = any(k in prov_nom_u for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL", "DHL", "EURO SHIPPING", "TRADE GLOBAL"])
+                
+                if es_aduanero_row or val_fisc.get("retefuente", 0) > 0:
+                    df_ref.at[r_idx, "Impuestos Asumidos"] = True
+                    saldo_cruce = round(df_ref.at[r_idx, "Base"] + df_ref.at[r_idx, "IVA"], 2)
+                    df_ref.at[r_idx, "Neto a Pagar"] = saldo_cruce
+                    if "CARGO" in prov_nom_u:
+                        df_ref.at[r_idx, "Cuenta Pasivo Especifica"] = "22050505"
+                        df_ref.at[r_idx, "Cta Contrapartida"] = "22050505"
+                    elif "DHL" in prov_nom_u:
+                        df_ref.at[r_idx, "Cuenta Pasivo Especifica"] = "23359501"
+                        df_ref.at[r_idx, "Cta Contrapartida"] = "23359501"
+                else:
+                    df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - df_ref.at[r_idx, "ReteFuente"] - df_ref.at[r_idx, "ReteICA"] - df_ref.at[r_idx, "ReteIVA"], 2)
+
+                if hubo_cambio:
+                    total_modificados += 1
+            except Exception as e:
+                pass
+                
+    return total_modificados
+
+def identificar_factura_en_texto(texto, df_ref):
+    """
+    Evalúa CUFE, Prefijo, Folio, NIT Emisor y nombre comercial del proveedor.
+    REGLA DE ORO: NUNCA empareja una factura basándose solo en el NIT del proveedor,
+    para evitar confundir múltiples facturas del mismo proveedor (ej. DHL, Claro, Siigo).
+    Debe coincidir obligatoriamente el CUFE o el Número de Factura (Prefijo + Folio).
+    """
+    if not texto or df_ref.empty:
+        return None
+    txt_clean = re.sub(r'[^A-Z0-9]', '', texto.upper())
+    digits_only = re.sub(r'\D', '', texto)
+    
+    # 1. Validación prioritaria por CUFE / Token (certeza absoluta del 100%)
+    for _, r_cand in df_ref.iterrows():
+        cufe_cand = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE / Token", "") or r_cand.get("CUFE", "") or "")).upper()
+        if len(cufe_cand) >= 15 and cufe_cand[:20] in txt_clean:
+            return r_cand
+            
+    mejor_cand = None
+    mejor_score = 0
+    
+    for _, r_cand in df_ref.iterrows():
+        pref = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Prefijo", "")).upper())
+        fol = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Folio", "")).upper())
+        fol_sc = fol.lstrip('0')
+        fac_full = (pref + fol) if pref else fol
+        fac_full_sc = (pref + fol_sc) if pref else fol_sc
+        
+        nit_c = re.sub(r'\D', '', str(r_cand.get("NIT Emisor", "")))
+        nit_base = nit_c[:-1] if len(nit_c) >= 10 else nit_c
+        
+        has_nit = (nit_c and len(nit_c) >= 6 and nit_c in digits_only) or (nit_base and len(nit_base) >= 6 and nit_base in digits_only)
+        has_fac = (len(fac_full) >= 3 and fac_full in txt_clean) or (len(fac_full_sc) >= 3 and fac_full_sc in txt_clean)
+        
+        if not has_fac and len(fol) >= 3:
+            # Buscar el folio explícito precedido por marcadores de factura
+            pat_fol = rf'(?:FACTURA|FAC|NO|NUMERO|N[°º]|VENTA)[\s\:\.\#\-_]*{re.escape(fol)}'
+            if re.search(pat_fol, texto, re.IGNORECASE):
+                has_fac = True
+                
+        prov_words = [w for w in re.split(r'[^A-Z0-9]+', str(r_cand.get("Proveedor", "")).upper()) if len(w) >= 4 and w not in ["SAS", "LTDA", "S.A.", "COLOMBIA", "SERVICES", "SOLUTIONS", "SOCIEDAD", "DISTRIBUCIONES", "GLOBAL", "TRADE"]]
+        has_prov = any(w in txt_clean for w in prov_words)
+        
+        score = 0
+        if has_fac and has_nit:
+            score = 600
+        elif has_fac and has_prov:
+            score = 450
+        elif has_fac and len(fac_full) >= 4:
+            score = 300
+        else:
+            score = 0
+            
+        if score > mejor_score and score >= 300:
+            mejor_score = score
+            mejor_cand = r_cand
+            
+    return mejor_cand
+
+def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, empresa_compradora=None):
+    """
+    Busca y extrae el PDF de la factura seleccionada con máxima precisión y validación de contenido:
+    1. Búsqueda por CUFE en el nombre del archivo (para PDFs descargados directamente de la DIAN).
+    2. Búsqueda por CUFE o Factura verificando el CONTENIDO del PDF en dict_renombrados.
+       Si un archivo renombrado contiene una factura distinta a la seleccionada, se descarta.
+    3. Búsqueda en los archivos originales (tanto individuales como páginas de consolidado).
+    Retorna: (pdf_bytes, descripcion_origen, lista_paginas)
+    """
+    comp_siigo = str(fac_sel.get("Comprobante Siigo", "")).strip()
+    consecutivo = str(fac_sel.get("Consecutivo", "")).strip()
+    t_comp = str(fac_sel.get("Tipo Comp", "")).strip()
+    
+    folio_clean = str(fac_sel.get("Folio", "")).replace("-", "").strip().upper()
+    folio_sc = folio_clean.lstrip("0")
+    pref_clean = str(fac_sel.get("Prefijo", "")).replace("-", "").strip().upper()
+    fac_clean = str(fac_sel.get("Factura", "")).replace("-", "").strip().upper()
+    fac_full = (pref_clean + folio_clean) if pref_clean else folio_clean
+    fac_full_sc = (pref_clean + folio_sc) if pref_clean else folio_sc
+    
+    cufe_raw = str(fac_sel.get("CUFE", "") or fac_sel.get("CUFE / Token", "") or "").strip()
+    cufe_clean = re.sub(r'[^a-zA-Z0-9]', '', cufe_raw).lower()
+    
+    # El NIT con el que vienen encriptadas las facturas electrónicas de proveedores es el NIT del COMPRADOR
+    nit_comprador = "9013464125"
+    if empresa_compradora:
+        nit_comprador = re.sub(r"\D", "", str(empresa_compradora.get("nit", "9013464125")))
+        
+    nit_emisor_digits = re.sub(r"\D", "", str(fac_sel.get("NIT Emisor", "")))
+    soporte_nom = str(fac_sel.get("Soporte PDF Renombrado", "")).strip()
+    df_una_fac = pd.DataFrame([fac_sel])
+
+    # 1. BÚSQUEDA DIRECTA POR CUFE EN NOMBRE DE ARCHIVO (Archivos DIAN descargados)
+    if cufe_clean and len(cufe_clean) >= 15:
+        if dict_originales:
+            for fname, fbytes in dict_originales.items():
+                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
+                if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
+                    f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
+                    return f_des, f"Factura Oficial DIAN (CUFE: {fname[:18]}...pdf)", None
+        if dict_renombrados:
+            for fname, fbytes in dict_renombrados.items():
+                fn_l = re.sub(r'[^a-zA-Z0-9]', '', fname).lower()
+                if cufe_clean[:25] in fn_l or fn_l.startswith(cufe_clean[:20]):
+                    return fbytes, f"Factura Oficial DIAN ({fname})", None
+
+    # 2. BÚSQUEDA Y VERIFICACIÓN EN FACTURAS RENOMBRADAS
+    if dict_renombrados:
+        # A. Prioridad a candidatos con nombre similar (soporte esperado, consecutivo o factura)
+        candidatos = []
+        if soporte_nom and soporte_nom in dict_renombrados:
+            candidatos.append((soporte_nom, dict_renombrados[soporte_nom]))
+            
+        comp_key = f"Comp_{t_comp}-{consecutivo}".upper()
+        for k, v in dict_renombrados.items():
+            if comp_key in k.upper().replace(" ", "_") and (k, v) not in candidatos:
+                candidatos.append((k, v))
+                    
+        for k, v in dict_renombrados.items():
+            k_clean = k.replace("-", "").replace(" ", "").upper()
+            if fac_full and len(fac_full) >= 3 and fac_full in k_clean and (k, v) not in candidatos:
+                candidatos.append((k, v))
+                    
+        # Verificar contenido de los candidatos: SOLO aceptar si el texto realmente pertenece a esta factura
+        for c_nom, c_bytes in candidatos:
+            try:
+                pgs = cache_extraer_textos_pdf(c_bytes, nit_receptor=nit_comprador)
+                txt_c = " ".join(pgs)
+                if identificar_factura_en_texto(txt_c, df_una_fac) is not None:
+                    return c_bytes, f"Factura Verificada ({c_nom})", None
+            except Exception:
+                pass
+
+        # B. Si los candidatos por nombre fallan, escanear TODOS los archivos renombrados por contenido
+        for r_nom, r_bytes in dict_renombrados.items():
+            if (r_nom, r_bytes) not in candidatos:
+                try:
+                    pgs = cache_extraer_textos_pdf(r_bytes, nit_receptor=nit_comprador)
+                    txt_r = " ".join(pgs)
+                    if identificar_factura_en_texto(txt_r, df_una_fac) is not None:
+                        return r_bytes, f"Factura Verificada por Contenido ({r_nom})", None
+                except Exception:
+                    pass
+
+    # 3. BÚSQUEDA EN ARCHIVOS ORIGINALES INDIVIDUALES Y UNIFICADOS
+    if dict_originales:
+        # A. Archivos individuales por coincidencia de texto
+        for fname, fbytes in dict_originales.items():
+            try:
+                f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
+                pgs = cache_extraer_textos_pdf(f_des, nit_receptor=nit_comprador)
+                txt_ind = " ".join(pgs)
+                if identificar_factura_en_texto(txt_ind, df_una_fac) is not None:
+                    return f_des, f"Factura Original Verificada ({fname})", None
+            except Exception:
+                pass
+
+        # B. Escaneo en PDFs unificados página por página
+        for fname, fbytes in dict_originales.items():
+            try:
+                f_des, _ = desbloquear_pdf_bytes(fbytes, nit_receptor=nit_comprador)
+                paginas_txt = cache_extraer_textos_pdf(f_des, nit_receptor=nit_comprador)
+                pags_coincidentes = []
+                for p_idx, txt in enumerate(paginas_txt):
+                    if identificar_factura_en_texto(txt, df_una_fac) is not None:
+                        if p_idx not in pags_coincidentes:
+                            pags_coincidentes.append(p_idx)
+                        m_p = re.search(r'(?:P[ÁAáa]G(?:INA)?|HOJA|PAGE)\s*[:\.]?\s*1\s*(?:DE|/|OF)\s*(\d+)', txt, re.IGNORECASE)
+                        if m_p:
+                            try:
+                                total_h = int(m_p.group(1))
+                                if 2 <= total_h <= 15:
+                                    for off in range(1, total_h):
+                                        p_next = p_idx + off
+                                        if p_next < len(paginas_txt) and p_next not in pags_coincidentes:
+                                            pags_coincidentes.append(p_next)
+                            except Exception:
+                                pass
+                
+                if pags_coincidentes:
+                    reader = PdfReader(io.BytesIO(f_des))
+                    writer = PdfWriter()
+                    for p in pags_coincidentes:
+                        writer.add_page(reader.pages[p])
+                    out = io.BytesIO()
+                    writer.write(out)
+                    out.seek(0)
+                    str_p = ", ".join([str(p+1) for p in pags_coincidentes])
+                    return out.getvalue(), f"Extraído de '{fname}' (Págs {str_p})", [p+1 for p in pags_coincidentes]
+            except Exception:
+                pass
+
+    # 4. Si no se encontró ningún archivo cuyo contenido coincida con esta factura, NO retornar una factura equivocada
+    return None, None, None
+
+
+def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view"):
+    """
+    Visor HTML5 con Canvas (PDF.js 3.11.174) — 100% compatible con Chrome, Edge y Streamlit Cloud,
+    sin bloqueos de iframe ni dependencias complejas.
+    """
+    if not pdf_bytes or not isinstance(pdf_bytes, (bytes, bytearray)):
+        st.error("⚠️ El archivo PDF no contiene datos válidos.")
+        return
+
+    try:
+        reader_prev = PdfReader(io.BytesIO(pdf_bytes))
+        num_pags_tot = len(reader_prev.pages)
+    except Exception:
+        num_pags_tot = 1
+
+    b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8').replace('\n', '').strip()
+
+    # Botones superiores de descarga y apertura directa
+    c_btn1, c_btn2 = st.columns([1, 1])
+    with c_btn1:
+        pags_label = f"{num_pags_tot} página{'s' if num_pags_tot > 1 else ''} completa{'s' if num_pags_tot > 1 else ''}"
+        st.download_button(
+            label=f"📥 Descargar Factura Completa ({pags_label})",
+            data=pdf_bytes,
+            file_name=nombre_archivo,
+            mime="application/pdf",
+            key=f"btn_dl_univ_{key_prefix}",
+            use_container_width=True
+        )
+    with c_btn2:
+        st.markdown(f"""
+        <a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="text-decoration:none;">
+            <div style="background:#0284c7; color:white; text-align:center; padding:9px 12px; border-radius:6px; font-weight:600; font-size:14px; box-shadow:0 1px 2px rgba(0,0,0,0.05); cursor:pointer;">
+                🗗 Abrir / Descargar Factura en Otra Ventana
+            </div>
+        </a>
+        """, unsafe_allow_html=True)
+
+    st.write("")
+
+    visor_height = max(680, min(3200, num_pags_tot * 800))
+    
+    html_visor = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+      <style>
+        body {{
+          margin: 0;
+          padding: 14px;
+          background: #f8fafc;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }}
+        .page-box {{
+          margin-bottom: 20px;
+          box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+          border-radius: 6px;
+          background: white;
+          overflow: hidden;
+          border: 1px solid #cbd5e1;
+        }}
+        .page-header {{
+          background: #0f172a;
+          color: #f8fafc;
+          font-size: 13px;
+          font-weight: 600;
+          padding: 8px 14px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }}
+        canvas {{
+          display: block;
+          max-width: 100%;
+          height: auto;
+        }}
+        #status {{
+          color: #0284c7;
+          padding: 20px;
+          font-size: 15px;
+          text-align: center;
+          font-weight: 600;
+        }}
+      </style>
+    </head>
+    <body>
+      <div id="status">⏳ Renderizando vista previa de la factura ({num_pags_tot} página(s))...</div>
+      <div id="viewer-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
+      
+      <script>
+        try {{
+          const rawPdf = atob("{b64_pdf}");
+          const pdfjsLib = window['pdfjs-dist/build/pdf'];
+          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+          const loadingTask = pdfjsLib.getDocument({{ data: rawPdf }});
+          loadingTask.promise.then(function(pdf) {{
+            document.getElementById('status').style.display = 'none';
+            const container = document.getElementById('viewer-container');
+            container.innerHTML = '';
+            
+            for (let pNum = 1; pNum <= pdf.numPages; pNum++) {{
+              (function(num) {{
+                pdf.getPage(num).then(function(page) {{
+                  const scale = 1.45;
+                  const viewport = page.getViewport({{ scale: scale }});
+                  
+                  const pageBox = document.createElement('div');
+                  pageBox.className = 'page-box';
+                  
+                  const pageHeader = document.createElement('div');
+                  pageHeader.className = 'page-header';
+                  pageHeader.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:#0284c7; color:white; padding:2px 8px; border-radius:4px; font-size:11px;">Hoja ' + num + ' de ' + pdf.numPages + '</span>';
+                  pageBox.appendChild(pageHeader);
+                  
+                  const canvas = document.createElement('canvas');
+                  const ctx = canvas.getContext('2d');
+                  canvas.height = viewport.height;
+                  canvas.width = viewport.width;
+                  
+                  pageBox.appendChild(canvas);
+                  container.appendChild(pageBox);
+                  
+                  page.render({{ canvasContext: ctx, viewport: viewport }});
+                }});
+              }})(pNum);
+            }}
+          }}).catch(function(err) {{
+            document.getElementById('status').innerHTML = '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:8px; padding:20px; text-align:center;"><h4>📄 Factura lista para abrir</h4><p style="color:#64748b;">Utiliza los botones superiores de descarga o abre el documento directamente:</p><a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
+          }});
+        }} catch (e) {{
+          document.getElementById('status').innerHTML = '<span style="color:#ef4444;">Error al decodificar: ' + e.message + '</span>';
+        }}
+      </script>
+    </body>
+    </html>
+    """
+    components.html(html_visor, height=visor_height, scrolling=True)
+
+
+# AVISO DE TRABAJO PREVIO DISPONIBLE (SOLO SE CARGA SI EL USUARIO OPRIME EL BOTÓN)
+trabajos_existentes = listar_trabajos_historial(empresa)
+
+if "df_procesado" not in st.session_state and trabajos_existentes:
+    ultimo = trabajos_existentes[0]
+    nom_ult = ultimo.get("nombre_trabajo", f"Trabajo {ultimo.get('id', '')}")
+    n_fac = ultimo.get("total_facturas", 0)
+    val_tot = ultimo.get("total_valor", 0.0)
+    
+    st.markdown(f"""
+    <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:14px 18px; margin-bottom:14px;">
+        <h4 style="margin:0 0 6px 0; color:#166534;">📂 Tienes un trabajo guardado disponible</h4>
+        <p style="margin:0; color:#14532d; font-size:14px;">
+            Tienes guardado en memoria tu trabajo previo: <b>'{nom_ult}'</b> con <b>{n_fac} facturas</b> (${val_tot:,.2f}) y sus PDFs vinculados.<br>
+            • Si deseas continuar con este trabajo, haz clic en el botón verde.<br>
+            • Si hoy vas a implementar <b>facturas nuevas</b>, no tienes que oprimir nada y puedes subir tus nuevos archivos directamente abajo en la Pestaña 1.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    c_btn_c1, c_btn_c2 = st.columns([1.6, 3])
+    with c_btn_c1:
+        if st.button("📂 Cargar mi trabajo anterior", key="btn_cargar_trabajo_previo_on_demand", use_container_width=True):
+            df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, ultimo["id"])
+            if df_g is not None and not df_g.empty:
+                st.session_state["df_procesado"] = df_g
+                st.session_state["dict_pdfs"] = pdfs_r_g or {}
+                st.session_state["raw_uploaded_pdfs"] = pdfs_o_g or {}
+                st.session_state["excel_bytes"] = ex_b_g
+                st.session_state["excel_nombre"] = ex_n_g
+                st.session_state["zip_pdfs"] = zip_g
+                st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
+                st.session_state["job_actual_id"] = ultimo["id"]
+                st.session_state["_sesion_cargada_nombre"] = nom_ult
+                st.success(f"¡Trabajo '{nom_ult}' cargado con éxito!")
+                st.rerun()
+    with c_btn_c2:
+        st.caption("👈 Oprime aquí **únicamente** cuando desees restaurar el trabajo anterior. De lo contrario, continúa abajo con tus facturas nuevas.")
+
+# BANNER DE SESIÓN ACTIVA EN PANTALLA
+if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+    c_bnr1, c_bnr2 = st.columns([4, 1.4])
+    with c_bnr1:
+        nom_ses = st.session_state.get("_sesion_cargada_nombre", st.session_state.get("excel_nombre", "Reporte de Facturas"))
+        st.info(f"📋 **Trabajo Activo en Pantalla:** '{nom_ses}' ({len(st.session_state['df_procesado'])} facturas cargadas). Puedes auditar o exportar a Siigo.")
+    with c_bnr2:
+        if st.button("🆕 Limpiar / Subir Facturas Nuevas", key="btn_nuevo_trabajo_top", help="Limpia la pantalla para procesar un nuevo mes o facturas nuevas."):
+            for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_sesion_cargada_nombre", "_sesion_auto_recuperada", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
+# PANEL DE HISTORIAL DE TRABAJOS Y RESPALDOS INDESTRUCTIBLES
+trabajos_guardados = listar_trabajos_historial(empresa)
+panel_expanded = False
+
+with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", expanded=panel_expanded):
+    col_h_left, col_h_right = st.columns([1.5, 1])
+    
+    with col_h_left:
+        st.markdown("#### 📂 Trabajos Guardados en esta Empresa:")
+        if trabajos_guardados:
+            st.caption("Haz clic en 'Cargar' para recuperar de inmediato cualquier auditoría o mes previo:")
+            for tb in trabajos_guardados:
+                c_h1, c_h2, c_h3 = st.columns([3, 1.2, 0.5])
+                with c_h1:
+                    nom_tb = tb.get("nombre_trabajo", f"Trabajo {tb.get('id', '')}")
+                    n_facs = tb.get("total_facturas", 0)
+                    val_tot = tb.get("total_valor", 0.0)
+                    n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
+                    n_orig = tb.get("total_pdfs_originales", 0)
+                    info_pdf_str = f"{n_renom} PDFs procesados" if n_renom > 0 else (f"{n_orig} PDFs subidos" if n_orig > 0 else "Sin PDFs")
+                    st.markdown(f"📄 **{nom_tb}** — {n_facs} facturas (${val_tot:,.2f}) — **{info_pdf_str}**")
+                with c_h2:
+                    if st.button("📂 Cargar", key=f"btn_h_load_{tb['id']}"):
+                        df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, tb["id"])
+                        if df_g is not None:
+                            st.session_state["df_procesado"] = df_g
+                        if pdfs_r_g:
+                            st.session_state["dict_pdfs"] = pdfs_r_g
+                        if pdfs_o_g:
+                            st.session_state["raw_uploaded_pdfs"] = pdfs_o_g
+                        if ex_b_g:
+                            st.session_state["excel_bytes"] = ex_b_g
+                            st.session_state["excel_nombre"] = ex_n_g
+                        if zip_g:
+                            st.session_state["zip_pdfs"] = zip_g
+                            st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
+                        st.session_state["job_actual_id"] = tb["id"]
+                        st.session_state["_sesion_auto_recuperada"] = nom_tb
+                        st.success(f"¡Trabajo '{nom_tb}' cargado! Todo tu avance está listo.")
+                        st.rerun()
+                with c_h3:
+                    if st.button("🗑️", key=f"btn_h_del_{tb['id']}"):
+                        eliminar_trabajo_historial(empresa, tb["id"])
+                        st.rerun()
+        else:
+            st.info("💡 Aún no tienes trabajos guardados en el disco local para esta empresa.")
+
+    with col_h_right:
+        st.markdown("#### 🛡️ Respaldo Portable (.zip):")
+        st.caption("Guarda o restaura todo tu trabajo en un solo archivo, ideal si cambias de PC o si el servidor se reinicia:")
+        
+        # 1. Botón para exportar respaldo de la sesión activa
+        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+            zip_respaldo_bytes = exportar_respaldo_sesion_zip(
+                empresa,
+                st.session_state.get("df_procesado"),
+                st.session_state.get("dict_pdfs", {}),
+                st.session_state.get("raw_uploaded_pdfs", {}),
+                st.session_state.get("excel_bytes"),
+                st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                st.session_state.get("zip_pdfs")
+            )
+            nom_respaldo = f"Respaldo_Sesion_{empresa['nombre'].replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d')}.zip"
+            st.download_button(
+                label="💾 Descargar Respaldo Completo de esta Sesión (.zip)",
+                data=zip_respaldo_bytes,
+                file_name=nom_respaldo,
+                mime="application/zip",
+                use_container_width=True,
+                help="Descarga un solo archivo con TODO (Excel, cálculos, retenciones y PDFs vinculados)."
+            )
+        
+        # 2. Uploader para restaurar desde un archivo ZIP de respaldo previo
+        archivo_zip_restaurar = st.file_uploader(
+            "📥 Restaurar Sesión desde Archivo de Respaldo (.zip):",
+            type=["zip"],
+            key="upl_zip_restore_historial"
+        )
+        if archivo_zip_restaurar is not None:
+            with st.spinner("Restaurando sesión completa desde el respaldo..."):
+                df_res, renom_res, orig_res, ex_b_res, ex_n_res, zip_res = importar_respaldo_sesion_zip(
+                    archivo_zip_restaurar.getvalue(), empresa
+                )
+                if df_res is not None:
+                    st.session_state["df_procesado"] = df_res
+                    st.session_state["dict_pdfs"] = renom_res or {}
+                    st.session_state["raw_uploaded_pdfs"] = orig_res or {}
+                    st.session_state["excel_bytes"] = ex_b_res
+                    st.session_state["excel_nombre"] = ex_n_res
+                    st.session_state["zip_pdfs"] = zip_res
+                    st.session_state["total_zip_pdfs"] = len(renom_res) if renom_res else 0
+                    
+                    # Guardar también en el disco local
+                    guardar_trabajo_en_historial(
+                        empresa, df_res,
+                        excel_bytes=ex_b_res,
+                        excel_nombre=ex_n_res,
+                        dict_pdfs_renombrados=renom_res,
+                        dict_pdfs_originales=orig_res,
+                        zip_bytes=zip_res
+                    )
+                    st.session_state["_sesion_auto_recuperada"] = f"Respaldo {archivo_zip_restaurar.name}"
+                    st.success(f"¡Sesión restaurada con éxito! Se recuperaron {len(df_res)} facturas y {len(renom_res)} PDFs.")
+                    st.rerun()
+                else:
+                    st.error("El archivo ZIP no contiene un respaldo válido de sesión contable.")
+
+st.markdown("---")
+
+tab_compras, tab_auditoria, tab_triangulacion, tab_siigo = st.tabs([
+    "1. Cargar Documentos y Desbloquear PDFs",
+    "2. Auditoria y Trazabilidad Fiscal",
+    "3. 🔀 Triangulación y Cruces de Importación (Aduanas)",
+    "4. Exportar Planilla Oficial a Siigo"
+])
+
 with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
     st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs (unificados o separados) para desbloquear, guardar y renombrar automáticamente por comprobante.")
@@ -1981,6 +1914,15 @@ with tab_compras:
 
                 col_resp = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["régimen", "regimen", "responsabilidad", "obligacion"])), None)
                 resp_e = str(r.get(col_resp, "")).strip() if col_resp and pd.notna(r.get(col_resp)) else ""
+                
+                # Búsqueda inmediata por NIT y Razón Social en catálogo oficial
+                nit_e_digits = re.sub(r'\D', '', str(nit_e))
+                if not resp_e and nit_e_digits in REGIMENES_EMISORES_CONOCIDOS:
+                    resp_e = REGIMENES_EMISORES_CONOCIDOS[nit_e_digits]
+                elif not resp_e:
+                    nom_e_u = str(nom_e).upper()
+                    if any(k in nom_e_u for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
+                        resp_e = "O-13;O-15"
 
                 t_comp, op, cta_p, cta_c, desc, rfte, rica, riva, cta_rfte, cta_iva, cta_rica, cat, razon, audit_dict = clasificar_factura(
                     nit_e, nom_e, base, iva, tipo_doc, resp_e, empresa
@@ -2216,6 +2158,46 @@ with tab_compras:
         </div>
         """, unsafe_allow_html=True)
         
+        
+        # AUTO-AUDITORÍA Y VERIFICACIÓN INMEDIATA DE REGÍMENES FISCALES AL CARGAR EXCEL O PDFS
+        dict_renom_mem = st.session_state.get("dict_pdfs", {})
+        dict_orig_mem = st.session_state.get("raw_uploaded_pdfs", {})
+        
+        # 1. Aplicar catálogo oficial de regímenes conocidos por NIT inmediatamente
+        for r_idx, r_row in df_proc.iterrows():
+            nit_d = re.sub(r'\D', '', str(r_row.get("NIT Emisor", "")))
+            nom_u = str(r_row.get("Proveedor", "")).upper()
+            reg_prev = str(r_row.get("Régimen Fiscal Emisor", ""))
+            
+            nuevo_reg = None
+            if nit_d in REGIMENES_EMISORES_CONOCIDOS:
+                nuevo_reg = REGIMENES_EMISORES_CONOCIDOS[nit_d]
+            elif any(k in nom_u for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
+                nuevo_reg = "O-13;O-15"
+                
+            if nuevo_reg and (nuevo_reg != reg_prev or "O-48" in reg_prev):
+                df_proc.at[r_idx, "Régimen Fiscal Emisor"] = nuevo_reg
+                t_c, op_c, c_p, c_c, desc_c, rfte_c, rica_c, riva_c, c_rf, c_iv, c_ri, cat_c, razon_c, audit_c = clasificar_factura(
+                    r_row["NIT Emisor"], r_row["Proveedor"],
+                    r_row["Base"], r_row["IVA"],
+                    r_row["Operacion"], nuevo_reg, empresa
+                )
+                df_proc.at[r_idx, "ReteFuente"] = rfte_c
+                df_proc.at[r_idx, "ReteICA"] = rica_c
+                df_proc.at[r_idx, "ReteIVA"] = riva_c
+                df_proc.at[r_idx, "Cta ReteFuente"] = c_rf
+                df_proc.at[r_idx, "Cta ReteICA"] = c_ri
+                df_proc.at[r_idx, "Razón Contable"] = razon_c
+                df_proc.at[r_idx, "Audit Info"] = audit_c
+                df_proc.at[r_idx, "Neto a Pagar"] = round(r_row["Total"] - rfte_c - rica_c - riva_c, 2)
+
+        # 2. Si hay PDFs cargados en memoria, auditar automáticamente por contenido
+        if (dict_renom_mem or dict_orig_mem) and not st.session_state.get("_regimenes_auditados_v2", False):
+            if dict_renom_mem:
+                auditar_regimen_desde_facturas_renombradas(df_proc, dict_renom_mem, empresa)
+            st.session_state["_regimenes_auditados_v2"] = True
+            st.session_state["df_procesado"] = df_proc
+
         cols_mostrar_proc = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Régimen Fiscal Emisor", "Estado Registro", "Cuenta Pasivo (CxP)", "Base", "IVA", "ReteFuente", "ReteICA", "Neto a Pagar", "Soporte PDF Renombrado"]
         cols_mostrar_existentes = [c for c in cols_mostrar_proc if c in df_proc.columns]
         st.dataframe(df_proc[cols_mostrar_existentes], use_container_width=True)
