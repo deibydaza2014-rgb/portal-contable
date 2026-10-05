@@ -1498,72 +1498,13 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
     return None, None, None
 
 
-def convertir_pdf_a_imagenes(pdf_bytes, dpi=160, nit_comprador="9013464125"):
-    """
-    Convierte cualquier archivo PDF en una lista de imágenes para visualización directa con st.image().
-    MÉTODO DE SEGURIDAD ABSOLUTA: Desbloquea y desencripta el PDF primero para que ninguna herramienta
-    falle por contraseña incorrecta.
-    """
-    if not pdf_bytes:
-        return []
-
-    # 1. PASO VITAL: DESBLOQUEAR Y DESENCRIPTAR EL PDF ANTES DE RENDERIZARLO
-    pdf_desbloqueado, fue_desbloqueado = desbloquear_pdf_bytes(pdf_bytes, nit_receptor=nit_comprador)
-    pdf_a_procesar = pdf_desbloqueado if (pdf_desbloqueado and len(pdf_desbloqueado) > 50) else pdf_bytes
-
-    # 2. Intento por pypdfium2 (renderizado directo en RAM)
-    try:
-        import pypdfium2 as pdfium
-        doc = pdfium.PdfDocument(pdf_a_procesar)
-        imgs = []
-        for page in doc:
-            imgs.append(page.render(scale=dpi / 72.0).to_pil())
-        if imgs:
-            return imgs
-    except Exception:
-        pass
-
-    # 3. Intento por pdftoppm (utilidad oficial de Poppler pre-instalada en Linux / Streamlit Cloud)
-    try:
-        import subprocess, tempfile
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pdf_path = os.path.join(tmpdir, "factura_desbloqueada.pdf")
-            with open(pdf_path, "wb") as f:
-                f.write(pdf_a_procesar)
-            out_prefix = os.path.join(tmpdir, "page")
-            cmd = ["pdftoppm", "-png", "-r", str(dpi), pdf_path, out_prefix]
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
-            png_files = sorted([f for f in os.listdir(tmpdir) if f.startswith("page") and f.endswith(".png")])
-            imgs = []
-            for pf in png_files:
-                with open(os.path.join(tmpdir, pf), "rb") as f_img:
-                    imgs.append(f_img.read())
-            if imgs:
-                return imgs
-    except Exception:
-        pass
-
-    # 4. Intento por pypdf si la factura contiene imágenes embebidas
-    try:
-        reader = PdfReader(io.BytesIO(pdf_a_procesar))
-        imgs = []
-        for page in reader.pages:
-            for img_obj in page.images:
-                imgs.append(img_obj.image)
-        if imgs:
-            return imgs
-    except Exception:
-        pass
-
-    return []
-
-
 def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view", nit_comprador="9013464125"):
     """
-    Visor oficial garantizado con doble respaldo:
-    1. Si hay motor de imágenes (pypdfium2/pdftoppm), renderiza las páginas en alta definición.
-    2. Como respaldo directo (COMO ANTES), muestra el iframe nativo del documento con base64.
-    3. Botones para descargar el archivo desbloqueado o abrirlo a pantalla completa.
+    Visor oficial garantizado (como antes):
+    1. Desbloquea y desencripta el PDF para que no pida contraseña.
+    2. Marco oficial directo con <object> e <iframe> sin extraer imágenes parciales ni logos gigantes.
+    3. Botón para abrir a pantalla completa en pestaña nueva y botón de descarga directa.
+    4. Cuadro formal con resumen contable de la factura.
     """
     if not pdf_bytes or not isinstance(pdf_bytes, (bytes, bytearray)):
         st.error("⚠️ El archivo PDF no contiene datos válidos.")
@@ -1593,7 +1534,7 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
     fecha_str = str(fac_sel.get("Fecha", "")) if fac_sel is not None else ""
     reg_str = str(fac_sel.get("Régimen Fiscal Emisor", "O-48")) if fac_sel is not None else "O-48"
 
-    # Botones superiores de descarga y apertura directa
+    # 1. BOTONES SUPERIORES DE ACCIÓN RÁPIDA
     c_btn1, c_btn2 = st.columns([1, 1])
     with c_btn1:
         pags_label = f"{num_pags_tot} página{'s' if num_pags_tot > 1 else ''} completa{'s' if num_pags_tot > 1 else ''}"
@@ -1616,40 +1557,28 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
 
     st.write("")
 
-    # 1. INTENTO DE RENDERIZAR IMÁGENES NATIVAS (pypdfium2 / pdftoppm)
-    imagenes = convertir_pdf_a_imagenes(pdf_usar, dpi=160, nit_comprador=nit_comprador)
-
-    if imagenes:
-        tot_imgs = len(imagenes)
-        for p_idx, img in enumerate(imagenes):
-            st.markdown(f"""
-            <div style="background:#0f172a; color:#f8fafc; padding:8px 14px; border-radius:6px 6px 0 0; font-size:13px; font-weight:600; margin-top:14px; display:flex; justify-content:space-between; align-items:center;">
-                <span>📄 {nombre_archivo}</span>
-                <span style="background:#0284c7; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">Hoja {p_idx + 1} de {tot_imgs}</span>
-            </div>
-            """, unsafe_allow_html=True)
-            st.image(img, use_container_width=True, caption=f"Hoja {p_idx + 1} de {tot_imgs}")
-    else:
-        # 2. VISTA PREVIA DIRECTA COMO ANTES: IFRAME EN CONTENEDOR NATIVO SIN COMPONENTS
-        st.markdown(f"""
-        <div style="border: 2px solid #0070ba; border-radius: 8px; overflow: hidden; margin-top: 10px; margin-bottom: 16px; box-shadow: 0 3px 8px rgba(0,0,0,0.08);">
-            <div style="background:#0070ba; color:white; padding:9px 14px; font-weight:bold; font-size:14px; display:flex; justify-content:space-between; align-items:center;">
-                <span>📄 Vista Previa: Factura {fac_num_str} — {prov_str}</span>
-                <span style="background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:10px; font-size:11px;">{num_pags_tot} pág(s)</span>
-            </div>
-            <iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1" width="100%" height="680" type="application/pdf" style="border:none;"></iframe>
+    # 2. VISOR OFICIAL COMO ANTES (Directo de la factura completa, con zoom y herramientas)
+    st.markdown(f"""
+    <div style="border: 2px solid #0070ba; border-radius: 8px; overflow: hidden; margin-top: 10px; margin-bottom: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.08);">
+        <div style="background:#0070ba; color:white; padding:9px 14px; font-weight:bold; font-size:14px; display:flex; justify-content:space-between; align-items:center;">
+            <span>📄 Factura: {fac_num_str} — {prov_str}</span>
+            <span style="background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:10px; font-size:11px;">{num_pags_tot} pág(s)</span>
         </div>
-        """, unsafe_allow_html=True)
+        <object data="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=0" type="application/pdf" width="100%" height="700">
+            <iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=0" width="100%" height="700" style="border:none;"></iframe>
+        </object>
+    </div>
+    """, unsafe_allow_html=True)
 
-        # 3. CUADRO DE METADATOS Y TOTALES DE LA FACTURA
-        st.markdown(f"""
-        <div style="background: white; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 13.5px; color: #334155;">
-                <div><b>Proveedor:</b> {prov_str} (NIT: {nit_str})<br><b>Factura:</b> {fac_num_str} ({comp_str})</div>
-                <div><b>Fecha Emisión:</b> {fecha_str} | <b>Régimen:</b> {reg_str}<br><b>Base:</b> ${val_base:,.2f} | <b>IVA:</b> ${val_iva:,.2f} | <b>Total:</b> <span style="font-weight:bold; color:#0f172a;">${val_tot:,.2f}</span></div>
-            </div>
+    # 3. CUADRO RESUMEN OFICIAL CON VALORES CONTABLES
+    st.markdown(f"""
+    <div style="background: white; border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 13.5px; color: #334155;">
+            <div><b>Proveedor:</b> {prov_str} (NIT: {nit_str})<br><b>Factura:</b> {fac_num_str} ({comp_str})</div>
+            <div><b>Fecha:</b> {fecha_str} | <b>Régimen:</b> {reg_str}<br><b>Base:</b> ${val_base:,.2f} | <b>IVA:</b> ${val_iva:,.2f} | <b>Total:</b> <span style="font-weight:bold; color:#0f172a;">${val_tot:,.2f}</span></div>
         </div>
-        """, unsafe_allow_html=True)
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # AVISO DE TRABAJO PREVIO DISPONIBLE (SOLO SE CARGA SI EL USUARIO OPRIME EL BOTÓN)
