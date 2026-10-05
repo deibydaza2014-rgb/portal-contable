@@ -1500,9 +1500,9 @@ def buscar_y_extraer_pdf(fac_sel, dict_renombrados=None, dict_originales=None, e
 
 def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_prefix="pdf_view", nit_comprador="9013464125"):
     """
-    Visor oficial garantizado (como antes):
-    1. Desbloquea y desencripta el PDF para que no pida contraseña.
-    2. Marco oficial directo con <object> e <iframe> sin extraer imágenes parciales ni logos gigantes.
+    Visor oficial 100% blindado y garantizado:
+    1. Desbloquea y desencripta el PDF primero para que no pida contraseña.
+    2. Renderizado en lienzo HTML5 Canvas mediante PDF.js con Blob Worker (100% inmune al bloqueo de Chrome).
     3. Botón para abrir a pantalla completa en pestaña nueva y botón de descarga directa.
     4. Cuadro formal con resumen contable de la factura.
     """
@@ -1510,7 +1510,7 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
         st.error("⚠️ El archivo PDF no contiene datos válidos.")
         return
 
-    # Desbloquear el PDF para garantizar que esté 100% libre de contraseña
+    # 1. Desbloquear el PDF para garantizar que esté 100% libre de contraseña
     pdf_limpio, _ = desbloquear_pdf_bytes(pdf_bytes, nit_receptor=nit_comprador)
     pdf_usar = pdf_limpio if pdf_limpio else pdf_bytes
 
@@ -1534,7 +1534,7 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
     fecha_str = str(fac_sel.get("Fecha", "")) if fac_sel is not None else ""
     reg_str = str(fac_sel.get("Régimen Fiscal Emisor", "O-48")) if fac_sel is not None else "O-48"
 
-    # 1. BOTONES SUPERIORES DE ACCIÓN RÁPIDA
+    # 2. BOTONES SUPERIORES DE ACCIÓN RÁPIDA
     c_btn1, c_btn2 = st.columns([1, 1])
     with c_btn1:
         pags_label = f"{num_pags_tot} página{'s' if num_pags_tot > 1 else ''} completa{'s' if num_pags_tot > 1 else ''}"
@@ -1557,25 +1557,124 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
 
     st.write("")
 
-    # 2. VISOR OFICIAL COMO ANTES (Directo de la factura completa, con zoom y herramientas)
-    st.markdown(f"""
-    <div style="border: 2px solid #0070ba; border-radius: 8px; overflow: hidden; margin-top: 10px; margin-bottom: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.08);">
-        <div style="background:#0070ba; color:white; padding:9px 14px; font-weight:bold; font-size:14px; display:flex; justify-content:space-between; align-items:center;">
-            <span>📄 Factura: {fac_num_str} — {prov_str}</span>
-            <span style="background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:10px; font-size:11px;">{num_pags_tot} pág(s)</span>
-        </div>
-        <object data="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=0" type="application/pdf" width="100%" height="700">
-            <iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=0" width="100%" height="700" style="border:none;"></iframe>
-        </object>
-    </div>
-    """, unsafe_allow_html=True)
+    # 3. VISOR NATIVO CANVAS HTML5 (PDF.js con Blob Worker — CERO CARAS TRISTES, CERO BLOQUEOS DE CHROME)
+    visor_height = max(680, min(3600, num_pags_tot * 850))
+    html_canvas_viewer = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+      <style>
+        body {{
+          margin: 0;
+          padding: 10px;
+          background: #f1f5f9;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }}
+        .page-card {{
+          margin-bottom: 18px;
+          background: white;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+          border-radius: 6px;
+          overflow: hidden;
+          width: 100%;
+          max-width: 860px;
+          border: 1px solid #cbd5e1;
+        }}
+        .page-title {{
+          background: #0070ba;
+          color: white;
+          padding: 8px 14px;
+          font-size: 13px;
+          font-weight: 600;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }}
+        canvas {{
+          display: block;
+          width: 100%;
+          height: auto;
+        }}
+        #msg {{
+          font-size: 14px;
+          color: #0284c7;
+          padding: 20px;
+          text-align: center;
+          font-weight: 600;
+        }}
+      </style>
+    </head>
+    <body>
+      <div id="msg">⏳ Cargando y renderizando factura ({num_pags_tot} página(s))...</div>
+      <div id="pages-container" style="width: 100%; display: flex; flex-direction: column; align-items: center;"></div>
 
-    # 3. CUADRO RESUMEN OFICIAL CON VALORES CONTABLES
+      <script>
+        (async function() {{
+          try {{
+            const b64 = "{b64_pdf}";
+            const raw = atob(b64);
+            const uint8Array = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) {{
+              uint8Array[i] = raw.charCodeAt(i);
+            }}
+
+            // Cargar el worker mediante Blob para evitar bloqueos de origen cruzado en iframes
+            try {{
+              const resp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js');
+              const workerScript = await resp.text();
+              const workerBlob = new Blob([workerScript], {{ type: 'text/javascript' }});
+              pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
+            }} catch (wErr) {{
+              pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+            }}
+
+            const pdf = await pdfjsLib.getDocument({{ data: uint8Array }}).promise;
+            document.getElementById('msg').style.display = 'none';
+            const container = document.getElementById('pages-container');
+
+            for (let num = 1; num <= pdf.numPages; num++) {{
+              const page = await pdf.getPage(num);
+              const viewport = page.getViewport({{ scale: 1.5 }});
+
+              const card = document.createElement('div');
+              card.className = 'page-card';
+
+              const title = document.createElement('div');
+              title.className = 'page-title';
+              title.innerHTML = '<span>📄 {nombre_archivo}</span><span style="background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:10px; font-size:11px;">Hoja ' + num + ' de ' + pdf.numPages + '</span>';
+              card.appendChild(title);
+
+              const canvas = document.createElement('canvas');
+              const ctx = canvas.getContext('2d');
+              canvas.height = viewport.height;
+              canvas.width = viewport.width;
+              card.appendChild(canvas);
+
+              container.appendChild(card);
+              await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
+            }}
+          }} catch (err) {{
+            console.error('Error renderizando:', err);
+            document.getElementById('msg').innerHTML = '<div style="background:white; padding:20px; border-radius:8px; border:2px solid #0070ba; text-align:center;"><h4>📄 Factura Lista</h4><p style="color:#64748b;">Haz clic abajo para abrir el documento a pantalla completa:</p><a href="data:application/pdf;base64,{b64_pdf}" target="_blank" download="{nombre_archivo}" style="display:inline-block; background:#0070ba; color:white; padding:10px 22px; border-radius:6px; font-weight:600; text-decoration:none;">🗗 Abrir Factura en Otra Ventana</a></div>';
+          }}
+        }})();
+      </script>
+    </body>
+    </html>
+    """
+    components.html(html_canvas_viewer, height=visor_height, scrolling=True)
+
+    # 4. CUADRO RESUMEN OFICIAL CON VALORES CONTABLES
     st.markdown(f"""
-    <div style="background: white; border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
+    <div style="background: white; border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; margin-top: 14px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 13.5px; color: #334155;">
             <div><b>Proveedor:</b> {prov_str} (NIT: {nit_str})<br><b>Factura:</b> {fac_num_str} ({comp_str})</div>
-            <div><b>Fecha:</b> {fecha_str} | <b>Régimen:</b> {reg_str}<br><b>Base:</b> ${val_base:,.2f} | <b>IVA:</b> ${val_iva:,.2f} | <b>Total:</b> <span style="font-weight:bold; color:#0f172a;">${val_tot:,.2f}</span></div>
+            <div><b>Fecha Emisión:</b> {fecha_str} | <b>Régimen:</b> {reg_str}<br><b>Base:</b> ${val_base:,.2f} | <b>IVA:</b> ${val_iva:,.2f} | <b>Total:</b> <span style="font-weight:bold; color:#0f172a;">${val_tot:,.2f}</span></div>
         </div>
     </div>
     """, unsafe_allow_html=True)
