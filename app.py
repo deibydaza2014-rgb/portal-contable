@@ -596,7 +596,7 @@ def analizar_estado_filas_excel(excel_bytes):
         
     return estados
 
-def generar_asiento_triangulacion_paquete(agente_row, terceros_df):
+def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_deducible=False):
     """
     Calcula el asiento contable de partida doble para un paquete de importación triangulado:
     1. Débito a CxP Terceros (22050505/23359501) por el Saldo por Pagar real (Base + IVA, ej. .651.939).
@@ -717,7 +717,7 @@ def generar_asiento_triangulacion_paquete(agente_row, terceros_df):
     suma_justificada = suma_cxp_canceladas + suma_ret_asumidas + suma_costo_blancas + suma_iva_blancas + iva_agente
     diferencia_no_deducible = round(tot_agente - suma_justificada, 2)
     
-    if diferencia_no_deducible > 0.01:
+    if diferencia_no_deducible > 0.01 and enviar_a_no_deducible:
         asiento.append({
             "Código Cuenta": CUENTA_NO_DEDUCIBLE,
             "Descripción Cuenta": f"Gastos No Deducibles Importación (Diferencia sin soporte DIAN)",
@@ -2851,8 +2851,8 @@ with tab_auditoria:
         st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
 
 with tab_triangulacion:
-    st.markdown("### 🔀 Triangulación y Cruce de Cuentas por Pagar (Importaciones y Aduanas)")
-    st.caption("Resuelve la sustitución de acreedores: cruza los pagos realizados por agentes aduaneros (Euro Shipping, Trade Global) contra las facturas ya causadas (DHL, Cargo Aduana), reconociendo retenciones asumidas (53152001) y diferencias no deducibles (53950501).")
+    st.markdown("### 🔀 Paquetes de Importación y Cruce de Cuentas por Pagar")
+    st.caption("Separa y concilia cada importación en paquetes individuales: Cobro de Euro Shipping = Factura DHL (Flete) + Factura Agencia Aduanas + Factura Garaje/Almacenadora.")
 
     if "df_procesado" in st.session_state:
         df_total = st.session_state["df_procesado"]
@@ -2861,104 +2861,187 @@ with tab_triangulacion:
         cond_aduanera = (df_total.get("Es Aduanera", False) == True) | df_total["Proveedor"].str.upper().str.contains("EURO|TRADE|CARGO|ADUANA|DHL|PORTUARIA|ALMACENADORA|TERMINAL|CONSOLCARGO")
         df_adu = df_total[cond_aduanera].copy()
         
-        # Facturas de Agentes Principales (Amarillas)
-        df_agentes_all = df_adu[df_adu["Proveedor"].str.upper().str.contains("EURO SHIPPING|TRADE GLOBAL")].copy()
+        # Configuración dinámica y extensible de Agentes Coordinadores (Forwarders)
+        AGENTES_COORDINADORES_BASE = ["EURO SHIPPING", "TRADE GLOBAL", "CONSOLCARGO", "BLUE LOGISTICS", "KUEHNE", "PANALPINA", "DSV", "EXPEDITORS", "TIBA", "HUBEMAR"]
         
-        # Facturas de Terceros Soporte (Rojas y Blancas)
+        todos_provs = sorted(list(df_total["Proveedor"].dropna().unique()))
+        provs_agentes_sugeridos = [p for p in todos_provs if any(k in str(p).upper() for k in AGENTES_COORDINADORES_BASE)]
+        
+        with st.expander("🏢 Configurar Agentes Coordinadores (Los que nos cobran directamente a nosotros):", expanded=False):
+            st.caption("Selecciona qué empresas actúan como Agentes Coordinadores / Forwarders que emiten cobros globales consolidados (Euro Shipping, Trade Global, Consolcargo, etc.):")
+            agentes_seleccionados_noms = st.multiselect(
+                "Agentes Coordinadores Activos:",
+                options=todos_provs,
+                default=provs_agentes_sugeridos,
+                key="sel_multiselect_agentes_coordinadores"
+            )
+            
+        if not agentes_seleccionados_noms:
+            agentes_seleccionados_noms = provs_agentes_sugeridos
+            
+        # Facturas de Agentes Principales (Los que nos cobran directamente)
+        df_agentes_all = df_adu[df_adu["Proveedor"].isin(agentes_seleccionados_noms)].copy()
+        
+        # Facturas de Terceros Soporte (Los que se cruzan contra esos agentes)
         df_terceros_all = df_adu[~df_adu.index.isin(df_agentes_all.index)].copy()
 
-        # Resumen general de importaciones
+        # Resumen superior
         m_c1, m_c2, m_c3, m_c4 = st.columns(4)
         with m_c1:
-            st.metric("Facturas Agentes (Amarillas)", len(df_agentes_all))
+            st.metric("Operaciones Agente (Euro / Trade)", len(df_agentes_all))
         with m_c2:
-            st.metric("Terceros Soporte (DHL / Aduanas)", len(df_terceros_all))
+            st.metric("Facturas Soporte (DHL / Aduana / Garaje)", len(df_terceros_all))
         with m_c3:
             n_rojas_adu = len(df_terceros_all[df_terceros_all.get("Ya Registrada", False) == True])
-            st.metric("Terceros Ya Causados (Rojas)", n_rojas_adu)
+            st.metric("Terceros Ya Causados (🔴)", n_rojas_adu)
         with m_c4:
             n_blancas_adu = len(df_terceros_all[df_terceros_all.get("Ya Registrada", False) == False])
-            st.metric("Terceros Nuevos (Blancas)", n_blancas_adu)
+            st.metric("Terceros Nuevos (⚪)", n_blancas_adu)
 
         st.markdown("---")
 
-        # Agrupación y Selección de Paquetes de Importación
-        # Cada factura de agente aduanero (Euro Shipping, Trade Global) representa una operación de cobro global
-        lista_opciones_agente = []
-        mapa_agentes = {}
-        for idx_ag, (_, ag) in enumerate(df_agentes_all.iterrows()):
-            key_ag = f"{ag['Proveedor'][:18]} (Fac {ag['Factura']}) — Total: ${ag['Total']:,.2f} [{ag['Fecha']}]"
-            lista_opciones_agente.append(key_ag)
-            mapa_agentes[key_ag] = ag
-
-        if not lista_opciones_agente:
+        if df_agentes_all.empty:
             st.warning("⚠️ No se encontraron facturas de agentes aduaneros principales (Euro Shipping o Trade Global) en este reporte.")
         else:
-            col_sel_g1, col_sel_g2 = st.columns([2.5, 1])
-            with col_sel_g1:
-                sel_ag_key = st.selectbox("1. Selecciona la Factura del Agente Aduanero (Cobro Global):", lista_opciones_agente, key="sel_agente_triangulacion")
-                agente_actual = mapa_agentes[sel_ag_key]
+            # 1. FUNCIÓN DE AUTO-EMPAQUETAMIENTO INTELIGENTE
+            # Algoritmo de combinación: encuentra para cada Euro Shipping el subconjunto de DHL + Agencia + Garaje que suma su valor
+            def auto_empaquetar_inteligente(df_ag, df_terc):
+                import itertools
+                pqs_res = {}
+                pool_t = df_terc.copy()
+                pool_t["_asignado_pq"] = 0
+                
+                for idx_ag_i, (_, ag_i) in enumerate(df_ag.iterrows()):
+                    pq_id_i = idx_ag_i + 1
+                    target_i = float(ag_i["Total"])
+                    f_ag_dt_i = pd.to_datetime(ag_i["Fecha"], dayfirst=True, errors="coerce")
+                    
+                    cands_i = pool_t[pool_t["_asignado_pq"] == 0].copy()
+                    if cands_i.empty:
+                        pqs_res[pq_id_i] = {"agente": ag_i, "terceros": pd.DataFrame(), "diferencia": target_i}
+                        continue
+                        
+                    # Priorizar coincidencia directa por NIT Facturado a / Nombre Facturado a (Mandato)
+                    nit_ag_clean = re.sub(r'\D', '', str(ag_i.get("NIT Emisor", "")))
+                    nom_ag_u = str(ag_i.get("Proveedor", "")).upper()
+                    
+                    # Identificar terceros que traen explícitamente el NIT o Nombre de este agente en notas
+                    cands_i["_score_agente"] = 0
+                    for c_idx_k, c_row_k in cands_i.iterrows():
+                        nit_fact = re.sub(r'\D', '', str(c_row_k.get("NIT Facturado A", "") or c_row_k.get("nit_facturado_a", "")))
+                        nom_fact = str(c_row_k.get("Facturado A", "") or c_row_k.get("nombre_facturado_a", "")).upper()
+                        if nit_ag_clean and nit_fact and nit_ag_clean[:8] in nit_fact:
+                            cands_i.at[c_idx_k, "_score_agente"] += 100
+                        elif any(w in nom_fact for w in nom_ag_u.split() if len(w) >= 4):
+                            cands_i.at[c_idx_k, "_score_agente"] += 50
+                            
+                    # Priorizar por coincidencia de agente y ventana de fechas
+                    if pd.notna(f_ag_dt_i):
+                        cands_i["_diff_d"] = (pd.to_datetime(cands_i["Fecha"], dayfirst=True, errors="coerce") - f_ag_dt_i).dt.days.abs()
+                        cands_i = cands_i.sort_values(by=["_score_agente", "_diff_d"], ascending=[False, True])
+                        
+                    cand_l = []
+                    for c_idx_i, c_row_i in cands_i.iterrows():
+                        tb_i = float(c_row_i.get("Base", 0.0))
+                        tiv_i = float(c_row_i.get("IVA", 0.0))
+                        sc_i = float(c_row_i.get("Total Neto", 0.0)) or (tb_i + tiv_i if tb_i > 0 else float(c_row_i.get("Total", 0.0)))
+                        p_u_i = str(c_row_i["Proveedor"]).upper()
+                        rol_i = "DHL" if "DHL" in p_u_i else ("AGENCIA" if any(k in p_u_i for k in ["CARGO", "ADUANA"]) else "GARAJE")
+                        cand_l.append({"index": c_idx_i, "fac": c_row_i["Factura"], "saldo": sc_i, "rol": rol_i, "row": c_row_i})
+                        
+                    best_combo_i = []
+                    best_diff_i = float("inf")
+                    
+                    dhls_i = [c for c in cand_l if c["rol"] == "DHL"]
+                    agencias_i = [c for c in cand_l if c["rol"] == "AGENCIA"]
+                    garajes_i = [c for c in cand_l if c["rol"] == "GARAJE"]
+                    
+                    # 1. Probar 1 DHL + 1 Agencia + 1 Garaje / Almacenadora
+                    for d_i in dhls_i[:12]:
+                        for a_i in agencias_i[:10]:
+                            s_da_i = d_i["saldo"] + a_i["saldo"]
+                            diff_da_i = abs(s_da_i - target_i)
+                            if diff_da_i < best_diff_i:
+                                best_diff_i = diff_da_i
+                                best_combo_i = [d_i, a_i]
+                                if diff_da_i < 1.0: break
+                                
+                            for g_i in garajes_i[:8]:
+                                s_dag_i = s_da_i + g_i["saldo"]
+                                diff_dag_i = abs(s_dag_i - target_i)
+                                if diff_dag_i < best_diff_i:
+                                    best_diff_i = diff_dag_i
+                                    best_combo_i = [d_i, a_i, g_i]
+                                    if diff_dag_i < 1.0: break
+                            if best_diff_i < 1.0: break
+                        if best_diff_i < 1.0: break
+                        
+                    # 2. Si la diferencia es mayor a 50k, probar combinatoria general de 1 a 4 facturas
+                    if best_diff_i > 50000:
+                        for k_c in range(1, min(5, len(cand_l) + 1)):
+                            for combo_i in itertools.combinations(cand_l[:16], k_c):
+                                s_c_i = sum(c["saldo"] for c in combo_i)
+                                d_c_i = abs(s_c_i - target_i)
+                                if d_c_i < best_diff_i:
+                                    best_diff_i = d_c_i
+                                    best_combo_i = list(combo_i)
+                                    if d_c_i < 1.0: break
+                            if best_diff_i < 1.0: break
+                            
+                    sel_idxs_i = [c["index"] for c in best_combo_i]
+                    pool_t.loc[sel_idxs_i, "_asignado_pq"] = pq_id_i
+                    terc_pq_i = df_terc.loc[sel_idxs_i].copy()
+                    
+                    pqs_res[pq_id_i] = {
+                        "agente": ag_i,
+                        "terceros": terc_pq_i,
+                        "diferencia": best_diff_i
+                    }
+                    
+                terc_libres_i = pool_t[pool_t["_asignado_pq"] == 0].copy()
+                return pqs_res, terc_libres_i
+
+            # Inicializar o recuperar paquetes de importación
+            if "paquetes_importacion" not in st.session_state or st.session_state.get("_ultimo_agentes_len") != len(df_agentes_all):
+                pqs_ini, libres_ini = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all)
+                st.session_state["paquetes_importacion"] = pqs_ini
+                st.session_state["_ultimo_agentes_len"] = len(df_agentes_all)
+
+            pqs_actuales = st.session_state["paquetes_importacion"]
+
+            # Barra de Acciones y Selección de Paquete
+            c_top_pq1, c_top_pq2 = st.columns([2.5, 1])
+            with c_top_pq1:
+                lista_pqs_titulos = []
+                for p_num, p_data in pqs_actuales.items():
+                    ag_t = p_data["agente"]
+                    n_terc = len(p_data["terceros"])
+                    s_terc = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in p_data["terceros"].iterrows()])
+                    tag_pq = f"📦 Paquete #{p_num}: {ag_t['Proveedor'][:16]} ({ag_t['Factura']}) — Cobro: ${ag_t['Total']:,.0f} | {n_terc} Facturas Terceros (${s_terc:,.0f})"
+                    lista_pqs_titulos.append(tag_pq)
+                    
+                sel_pq_idx = st.selectbox(
+                    "📦 Selecciona el Paquete de Importación que deseas revisar:",
+                    range(len(lista_pqs_titulos)),
+                    format_func=lambda i: lista_pqs_titulos[i],
+                    key="sel_paquete_importacion_activo"
+                )
+                pq_id_sel = sel_pq_idx + 1
+                paquete_activo = pqs_actuales[pq_id_sel]
+                agente_actual = paquete_activo["agente"]
+                terceros_actual = paquete_activo["terceros"]
                 tot_agente_actual = float(agente_actual["Total"])
 
-            with col_sel_g2:
+            with c_top_pq2:
                 st.write("")
                 st.write("")
-                st.info(f"📅 **Fecha:** {agente_actual['Fecha']} | Total: **${tot_agente_actual:,.2f}**")
+                if st.button("🪄 Re-calcular Auto-Empaquetado", key="btn_recalc_auto_pqs", help="Vuelve a calcular las combinaciones exactas de DHL + Agencia + Garaje para cada cobro de Euro"):
+                    pqs_re, _ = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all)
+                    st.session_state["paquetes_importacion"] = pqs_re
+                    st.success("¡Paquetes recalculados y separados!")
+                    st.rerun()
 
-            # Identificar qué facturas de terceros corresponden a este paquete
-            # A. Si el Excel trae Grupo Importación definido (ej. grupo '1', '2', etc.), tomar esas
-            grp_id_ag = str(agente_actual.get("Grupo Importación", "")).strip()
-            terceros_predefinidos = []
-            if grp_id_ag and grp_id_ag != 'nan':
-                for _, tr in df_terceros_all[df_terceros_all["Grupo Importación"] == grp_id_ag].iterrows():
-                    terceros_predefinidos.append(tr["Factura"])
-
-            # B. Si no hay grupo predefinido en Excel, buscar sugerencias automáticas por ventana de fecha y aproximación
-            if not terceros_predefinidos:
-                try:
-                    f_ag_dt = pd.to_datetime(agente_actual["Fecha"], dayfirst=True)
-                    # Candidatos en ventana de +/- 25 días
-                    candidatos_periodo = []
-                    for _, tr in df_terceros_all.iterrows():
-                        try:
-                            f_tr_dt = pd.to_datetime(tr["Fecha"], dayfirst=True)
-                            diff_dias = (f_ag_dt - f_tr_dt).days
-                            if -5 <= diff_dias <= 35 and tr["Total"] < tot_agente_actual:
-                                candidatos_periodo.append(tr["Factura"])
-                        except:
-                            pass
-                    terceros_predefinidos = candidatos_periodo[:4]
-                except:
-                    terceros_predefinidos = []
-
-            # Selector interactivo para que el usuario pueda marcar/desmarcar con total libertad
-            opciones_terceros_lista = []
-            mapa_terceros = {}
-            for _, tr in df_terceros_all.iterrows():
-                es_r = tr.get("Ya Registrada", False)
-                comp_txt = f"🔴 [Ya Registrada en Siigo: {tr.get('Comprobante Previo', '10-Prev')}]" if es_r else "⚪ [Pendiente]"
-                tag_t = f"[{tr['Factura']}] {tr['Fecha']} - {tr['Proveedor'][:24]} (${tr['Total']:,.2f}) — {comp_txt}"
-                opciones_terceros_lista.append(tag_t)
-                mapa_terceros[tr["Factura"]] = tag_t
-
-            # Valores por defecto para el multiselect
-            defaults_sel = [mapa_terceros[fac] for fac in terceros_predefinidos if fac in mapa_terceros]
-
-            st.markdown("##### 2. Selecciona las facturas de terceros que van trianguladas en este paquete:")
-            st.caption("Marca o desmarca las facturas de terceros (Cargo Aduana, DHL, Almacenadoras, Puertos). Puedes incluir las facturas rojas (ya causadas) para cruzar sus cuentas por pagar:")
-
-            terceros_elegidos_tags = st.multiselect(
-                "Facturas de terceros incluidas:",
-                opciones_terceros_lista,
-                default=defaults_sel,
-                key=f"multisel_terceros_{agente_actual['Factura']}"
-            )
-
-            # Filtrar DataFrame de terceros seleccionados
-            facs_seleccionadas = [t.split("]")[0].replace("[", "").strip() for t in terceros_elegidos_tags]
-            terceros_actual = df_terceros_all[df_terceros_all["Factura"].isin(facs_seleccionadas)].copy()
-
-            # Resumen del Paquete Seleccionado
+            # Resumen visual del Paquete Seleccionado
             col_pq1, col_pq2 = st.columns([1.3, 2.5])
             with col_pq1:
                 st.markdown(f"""
@@ -2968,25 +3051,32 @@ with tab_triangulacion:
                         <b>Proveedor:</b> {agente_actual['Proveedor']}<br>
                         <b>NIT:</b> {agente_actual['NIT Emisor']}<br>
                         <b>Factura:</b> {agente_actual['Factura']}<br>
-                        <b>Total Facturado:</b> <span style="font-size:16px; font-weight:bold; color:#b45309;">${tot_agente_actual:,.2f}</span><br>
-                        <b>IVA de Importación / Serv:</b> ${float(agente_actual.get('IVA', 0.0)):,.2f}
+                        <b>Fecha:</b> {agente_actual['Fecha']}<br>
+                        <b>Total Facturado:</b> <span style="font-size:18px; font-weight:bold; color:#b45309;">${tot_agente_actual:,.2f}</span><br>
+                        <b>IVA Discriminado:</b> ${float(agente_actual.get('IVA', 0.0)):,.2f}
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
 
             with col_pq2:
+                st.markdown(f"##### Facturas de Terceros que Componen este Paquete #{pq_id_sel}:")
                 if not terceros_actual.empty:
                     filas_terc_disp = []
+                    tot_s_terceros = 0.0
                     for _, tr in terceros_actual.iterrows():
                         es_r = tr.get("Ya Registrada", False)
                         badge_est = f"🔴 Ya en Siigo ({tr.get('Comprobante Previo', '10-Prev')})" if es_r else "⚪ Pendiente"
                         t_b = float(tr.get("Base", 0.0))
                         t_iv = float(tr.get("IVA", 0.0))
                         s_cruce = float(tr.get("Total Neto", 0.0)) or round(t_b + t_iv, 2)
+                        tot_s_terceros += s_cruce
                         cta_actual_tr = str(tr.get("Cuenta Pasivo Especifica", "22050505" if "CARGO" in str(tr["Proveedor"]).upper() else "23359501")).strip()
+                        p_nom = str(tr["Proveedor"]).upper()
+                        rol_dsp = "🚚 DHL (Flete)" if "DHL" in p_nom else ("🏢 Agencia (Aduana)" if any(k in p_nom for k in ["CARGO", "ADUANA"]) else "🏬 Garaje / Almacén")
                         filas_terc_disp.append({
+                            "Rol": rol_dsp,
                             "Estado": badge_est,
-                            "Proveedor Tercero": tr["Proveedor"],
+                            "Proveedor Tercero": tr["Proveedor"][:22],
                             "Factura": tr["Factura"],
                             "Subtotal (Base)": t_b,
                             "IVA": t_iv,
@@ -3000,207 +3090,228 @@ with tab_triangulacion:
                         "Saldo Cruce": "${:,.2f}"
                     }), use_container_width=True, hide_index=True)
                     
-                    with st.expander("✏️ Modificar Cuentas Pasivo (CxP) o Saldos de Terceros de este Paquete:", expanded=False):
-                        st.caption("Si registraste alguna factura en Siigo bajo una cuenta diferente (ej. 23359501 en vez de 22050505) o deseas ajustar el saldo a cruzar, cámbialo aquí:")
-                        for t_idx, tr_row in terceros_actual.iterrows():
-                            c_e1, c_e2, c_e3 = st.columns([1.6, 1.2, 1.2])
-                            with c_e1:
-                                st.markdown(f"**{tr_row['Factura']}** - {tr_row['Proveedor'][:20]} ({'🔴 Ya en Siigo' if tr_row.get('Ya Registrada') else '⚪ Pendiente'})")
-                            with c_e2:
-                                cta_t_edit = st.text_input(
-                                    f"Cta CxP ({tr_row['Factura']}):",
-                                    value=str(tr_row.get("Cuenta Pasivo Especifica", "22050505")),
-                                    key=f"ed_cta_tr_{agente_actual['Factura']}_{tr_row['Factura']}"
-                                )
-                                if cta_t_edit != tr_row.get("Cuenta Pasivo Especifica"):
-                                    terceros_actual.at[t_idx, "Cuenta Pasivo Especifica"] = cta_t_edit.strip()
-                                    if "df_procesado" in st.session_state:
-                                        m_idx = st.session_state["df_procesado"][st.session_state["df_procesado"]["Factura"] == tr_row["Factura"]].index
-                                        if not m_idx.empty:
-                                            st.session_state["df_procesado"].at[m_idx[0], "Cuenta Pasivo Especifica"] = cta_t_edit.strip()
-                            with c_e3:
-                                val_cruce_def = float(tr_row.get("Total Neto", 0.0) or (float(tr_row.get("Base", 0.0)) + float(tr_row.get("IVA", 0.0))))
-                                val_t_edit = st.number_input(
-                                    f"Saldo Cruce ({tr_row['Factura']}):",
-                                    value=val_cruce_def,
-                                    step=1000.0,
-                                    key=f"ed_val_tr_{agente_actual['Factura']}_{tr_row['Factura']}"
-                                )
-                                if val_t_edit != val_cruce_def:
-                                    terceros_actual.at[t_idx, "Total Neto"] = val_t_edit
-                                    if "df_procesado" in st.session_state:
-                                        m_idx = st.session_state["df_procesado"][st.session_state["df_procesado"]["Factura"] == tr_row["Factura"]].index
-                                        if not m_idx.empty:
-                                            st.session_state["df_procesado"].at[m_idx[0], "Total Neto"] = val_t_edit
+                    dif_pq_actual = abs(tot_agente_actual - tot_s_terceros)
+                    if dif_pq_actual < 5.0:
+                        st.success(f"✅ **Paquete #{pq_id_sel} Exacto:** Total Terceros: **${tot_s_terceros:,.2f}** == Cobro Euro: **${tot_agente_actual:,.2f}** | Diferencia: **$0.00**")
+                    else:
+                        st.info(f"📊 Total Terceros: **${tot_s_terceros:,.2f}** | Cobro Euro: **${tot_agente_actual:,.2f}** | Diferencia a No Deducible: **${dif_pq_actual:,.2f}**")
                 else:
-                    st.warning("⚠️ No has seleccionado facturas de terceros para este paquete aún. Selecciona arriba las que correspondan.")
+                    st.warning(f"⚠️ El Paquete #{pq_id_sel} no tiene facturas de terceros asignadas todavía.")
 
-        # CALCULAR ASIENTO CONTABLE CUADRADO DEL PAQUETE
-        df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual)
+            # Expander para agregar/quitar facturas manualmente a este paquete
+            with st.expander(f"➕ Modificar / Agregar Facturas de Terceros a este Paquete #{pq_id_sel}:", expanded=False):
+                st.caption("Si deseas añadir otra factura de DHL, Agencia o Garaje a este paquete, selecciónala aquí:")
+                
+                # Identificar facturas que no están en este paquete
+                facs_en_este = list(terceros_actual["Factura"].unique()) if not terceros_actual.empty else []
+                opciones_agregar = []
+                mapa_agregar = {}
+                for _, tr_cand in df_terceros_all.iterrows():
+                    if tr_cand["Factura"] not in facs_en_este:
+                        tag_c = f"[{tr_cand['Factura']}] {tr_cand['Proveedor'][:20]} (${float(tr_cand['Total']):,.2f})"
+                        opciones_agregar.append(tag_c)
+                        mapa_agregar[tag_c] = tr_cand
+                        
+                c_add1, c_add2 = st.columns([3, 1])
+                with c_add1:
+                    sel_para_agregar = st.selectbox("Selecciona factura para añadir a este paquete:", ["(Seleccionar...)"] + opciones_agregar, key=f"sel_add_tr_{pq_id_sel}")
+                with c_add2:
+                    st.write("")
+                    st.write("")
+                    if st.button("➕ Añadir a este Paquete", key=f"btn_add_tr_{pq_id_sel}") and sel_para_agregar != "(Seleccionar...)":
+                        fila_agregada = mapa_agregar[sel_para_agregar]
+                        terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([fila_agregada])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
+                        st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
+                        st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel}!")
+                        st.rerun()
 
-        st.markdown("#### ⚖️ Asiento Contable Cuadrado del Cruce (Para Siigo):")
-        st.caption("Detalle de partida doble: cancela las cuentas por pagar a terceros, asume las retenciones y manda la diferencia a no deducible:")
-
-        st.dataframe(
-            df_asiento_paquete.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        c_cuad1, c_cuad2, c_cuad3, c_cuad4 = st.columns(4)
-        sum_deb_pq = df_asiento_paquete["Débito ($)"].sum()
-        sum_cred_pq = df_asiento_paquete["Crédito ($)"].sum()
-        dif_cuad_pq = abs(sum_deb_pq - sum_cred_pq)
-        
-        with c_cuad1:
-            st.metric("Total Débito", f"${sum_deb_pq:,.2f}")
-        with c_cuad2:
-            st.metric("Total Crédito", f"${sum_cred_pq:,.2f}")
-        with c_cuad3:
-            st.metric("Retenciones Asumidas (53152001)", f"${ret_asum:,.2f}")
-        with c_cuad4:
-            st.metric("Diferencia No Deducible (53950501)", f"${dif_no_ded:,.2f}")
-
-        if dif_cuad_pq < 0.05:
-            st.success("✅ **Comprobante de Cruce Verificado:** Partida doble cuadrada con sumas iguales al centavo ($0.00).")
-        else:
-            st.error(f"Diferencia de cuadre: ${dif_cuad_pq:,.2f}")
-
-        st.markdown("---")
-        st.markdown("#### 📥 Exportar Control de Paquetes y Cruces de Importación:")
-        st.caption("Descarga un archivo Excel con el resumen de cada paquete, el detalle de facturas de terceros vinculadas y el asiento contable de control (sin generar aún notas de contabilidad en Siigo hasta que definas el procedimiento):")
-
-        # Construir el diccionario de todos los paquetes de importación
-        grupos_dict = {}
-        for idx_ag_loop, (_, ag_row) in enumerate(df_agentes_all.iterrows()):
-            pq_num = idx_ag_loop + 1
-            grp_id = str(ag_row.get("Grupo Importación", "")).strip()
+            # 3. VERIFICACIÓN DE FALTANTE Y BOTÓN DE ENVÍO A NO DEDUCIBLE
+            enviar_nd_activo = st.session_state.get(f"enviar_nd_pq_{pq_id_sel}", False)
             
-            if ag_row["Factura"] == agente_actual["Factura"]:
-                terc_pq = terceros_actual.copy()
-            elif grp_id and grp_id != 'nan':
-                terc_pq = df_terceros_all[df_terceros_all["Grupo Importación"] == grp_id].copy()
+            # Pre-cálculo para conocer si falta dinero
+            df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False)
+            
+            if dif_faltante_prev > 0.05:
+                if not enviar_nd_activo:
+                    st.warning(f"⚠️ **Faltan ${dif_faltante_prev:,.2f}** para completar el cobro del Agente ({agente_actual['Proveedor']} por ${tot_agente_actual:,.2f}). Faltan facturas de terceros (DHL, Cargo Aduana o Garaje) por aparecer o vincular.")
+                    c_btn_nd1, c_btn_nd2 = st.columns([2.2, 1.2])
+                    with c_btn_nd1:
+                        st.caption("💡 Si ya no queda de otra porque el agente no entregó soporte o no hay más facturas, presiona el botón para cerrar el cruce mandando la diferencia a No Deducibles:")
+                    with c_btn_nd2:
+                        if st.button(f"🔴 Enviar Faltante (${dif_faltante_prev:,.2f}) a No Deducibles (53950501)", key=f"btn_mandar_nd_{pq_id_sel}"):
+                            st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
+                            st.success(f"¡Faltante de ${dif_faltante_prev:,.2f} enviado a la cuenta 53950501!")
+                            st.rerun()
+                else:
+                    c_msg_nd1, c_msg_nd2 = st.columns([2.5, 1])
+                    with c_msg_nd1:
+                        st.info(f"ℹ️ **Cruce Cerrado con No Deducibles:** Se enviaron **${dif_faltante_prev:,.2f}** a la cuenta `53950501` (Gastos No Deducibles) al no existir soporte DIAN.")
+                    with c_msg_nd2:
+                        if st.button("↩️ Deshacer envío a No Deducibles", key=f"btn_undo_nd_{pq_id_sel}"):
+                            st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
+                            st.rerun()
+
+            # CALCULAR ASIENTO CONTABLE CUADRADO DEL PAQUETE SELECCIONADO
+            df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=enviar_nd_activo)
+
+            st.markdown(f"#### ⚖️ Asiento Contable del Paquete #{pq_id_sel}:")
+            st.caption("Detalle de partida doble de ESTE paquete: cancela las cuentas por pagar de DHL, Agencia y Garaje contra Euro Shipping:")
+
+            st.dataframe(
+                df_asiento_paquete.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            c_cuad1, c_cuad2, c_cuad3, c_cuad4 = st.columns(4)
+            sum_deb_pq = df_asiento_paquete["Débito ($)"].sum()
+            sum_cred_pq = df_asiento_paquete["Crédito ($)"].sum()
+            dif_cuad_pq = abs(sum_deb_pq - sum_cred_pq)
+            
+            with c_cuad1:
+                st.metric("Total Débito", f"${sum_deb_pq:,.2f}")
+            with c_cuad2:
+                st.metric("Total Crédito", f"${sum_cred_pq:,.2f}")
+            with c_cuad3:
+                st.metric("Retenciones Asumidas (53152001)", f"${ret_asum:,.2f}")
+            with c_cuad4:
+                st.metric("Diferencia No Deducible (53950501)", f"${dif_no_ded:,.2f}")
+
+            if dif_cuad_pq < 0.05:
+                st.success(f"✅ **Paquete #{pq_id_sel} Verificado:** Partida doble cuadrada con sumas iguales al centavo ($0.00).")
             else:
-                try:
-                    f_ag_dt = pd.to_datetime(ag_row["Fecha"], dayfirst=True)
-                    cand_idx = []
-                    for t_i, tr_r in df_terceros_all.iterrows():
-                        try:
-                            f_tr_dt = pd.to_datetime(tr_r["Fecha"], dayfirst=True)
-                            diff_d = (f_ag_dt - f_tr_dt).days
-                            if -5 <= diff_d <= 35 and tr_r["Total"] < ag_row["Total"]:
-                                cand_idx.append(t_i)
-                        except:
-                            pass
-                    terc_pq = df_terceros_all.loc[cand_idx[:4]].copy()
-                except:
-                    terc_pq = pd.DataFrame()
-                    
-            grupos_dict[pq_num] = {
-                "agente": ag_row,
-                "terceros": terc_pq,
-                "nombre": f"Paquete #{pq_num} - {ag_row['Proveedor'][:15]} (Fac {ag_row['Factura']})"
-            }
+                st.error(f"Diferencia de cuadre: ${dif_cuad_pq:,.2f}")
 
-        # Generar Excel estructurado por Paquetes de Importación individuales
-        todos_asientos_lista = []
-        resumen_paquetes_lista = []
-        detalle_facturas_lista = []
-        consecutivo_cruce = 1
-        
-        for g_k, g_v in grupos_dict.items():
-            ag_item = g_v["agente"]
-            terc_items = g_v["terceros"]
-            df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items)
+            st.markdown("---")
+            st.markdown("#### 📥 Exportar Control de Paquetes y Cruces de Importación:")
+            st.caption("Descarga un archivo Excel con el resumen de cada paquete, el detalle de facturas de terceros vinculadas y el asiento contable de control (sin generar aún notas de contabilidad en Siigo hasta que definas el procedimiento):")
+
+            # Generar Excel estructurado por Paquetes de Importación individuales
+            todos_asientos_lista = []
+            resumen_paquetes_lista = []
+            detalle_facturas_lista = []
+            consecutivo_cruce = 1
             
-            # 1. Asiento de Control de Cruces (Partida Doble para Revisión)
-            for _, fila_as in df_as_p.iterrows():
-                todos_asientos_lista.append({
+            facs_asignadas_en_algun_pq = []
+            
+            for g_k, g_v in pqs_actuales.items():
+                ag_item = g_v["agente"]
+                terc_items = g_v["terceros"]
+                enviar_nd_g = st.session_state.get(f"enviar_nd_pq_{g_k}", False)
+                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd_g)
+                
+                # 1. Asiento de Control de Cruces (Partida Doble para Revisión)
+                for _, fila_as in df_as_p.iterrows():
+                    todos_asientos_lista.append({
+                        "Paquete #": f"Paquete #{g_k}",
+                        "Fecha Operación": ag_item["Fecha"],
+                        "Código Cuenta": fila_as["Código Cuenta"],
+                        "Tercero / NIT": fila_as["Tercero / NIT"],
+                        "Descripción": fila_as["Descripción Cuenta"],
+                        "Débito ($)": fila_as["Débito ($)"],
+                        "Crédito ($)": fila_as["Crédito ($)"]
+                    })
+                    
+                # 2. Resumen del Paquete
+                facs_terc_str = ", ".join([f"{r['Factura']} ({r['Proveedor'][:15]})" for _, r in terc_items.iterrows()]) if not terc_items.empty else "Ninguno"
+                tot_terc_sum = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in terc_items.iterrows()])
+                resumen_paquetes_lista.append({
                     "Paquete #": f"Paquete #{g_k}",
+                    "Agente Coordinador": ag_item["Proveedor"],
+                    "Factura Agente": ag_item["Factura"],
                     "Fecha Operación": ag_item["Fecha"],
-                    "Código Cuenta": fila_as["Código Cuenta"],
-                    "Tercero / NIT": fila_as["Tercero / NIT"],
-                    "Descripción": fila_as["Descripción Cuenta"],
-                    "Débito ($)": fila_as["Débito ($)"],
-                    "Crédito ($)": fila_as["Crédito ($)"]
+                    "Total Cobro Agente ($)": float(ag_item["Total"]),
+                    "Facturas Terceros Incluidas": facs_terc_str,
+                    "Total Cancelado Terceros ($)": tot_terc_sum,
+                    "Retenciones Asumidas ($)": ret_p,
+                    "Diferencia No Deducible ($)": dif_p,
+                    "Estado Cuadre": "✅ Cuadrado ($0.00)" if abs(float(ag_item["Total"]) - tot_terc_sum - ret_p - dif_p) < 1.0 else "Revisar"
                 })
                 
-            # 2. Resumen del Paquete
-            facs_terc_str = ", ".join([f"{r['Factura']} ({r['Proveedor'][:15]})" for _, r in terc_items.iterrows()]) if not terc_items.empty else "Ninguno"
-            tot_terc_sum = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in terc_items.iterrows()])
-            resumen_paquetes_lista.append({
-                "Paquete #": f"Paquete #{g_k}",
-                "Agente Coordinador": ag_item["Proveedor"],
-                "Factura Agente": ag_item["Factura"],
-                "Fecha Operación": ag_item["Fecha"],
-                "Total Cobro Agente ($)": float(ag_item["Total"]),
-                "Terceros Vinculados": facs_terc_str,
-                "Total Cancelado Terceros ($)": tot_terc_sum,
-                "Retenciones Asumidas ($)": ret_p,
-                "Diferencia No Deducible ($)": dif_p,
-                "Estado Cuadre": "✅ Cuadrado ($0.00)"
-            })
-            
-            # 3. Detalle de Facturas que componen el Paquete
-            detalle_facturas_lista.append({
-                "Paquete #": f"Paquete #{g_k}",
-                "Rol en Operación": "Agente Coordinador (Cobro Global)",
-                "Proveedor": ag_item["Proveedor"],
-                "NIT": ag_item["NIT Emisor"],
-                "Factura": ag_item["Factura"],
-                "Fecha": ag_item["Fecha"],
-                "Naturaleza": "Servicios Agenciamiento + Fletes / Impuestos",
-                "Base / Subtotal ($)": float(ag_item.get("Base", 0.0)),
-                "IVA ($)": float(ag_item.get("IVA", 0.0)),
-                "Retenciones ($)": 0.0,
-                "Saldo a Cruzar ($)": float(ag_item["Total"]),
-                "Cuenta Contable": "22050501"
-            })
-            
-            for _, tr_it in terc_items.iterrows():
-                tb = float(tr_it.get("Base", 0.0))
-                tiv = float(tr_it.get("IVA", 0.0))
-                rf = float(tr_it.get("ReteFuente", 0.0))
-                ri = float(tr_it.get("ReteICA", 0.0))
-                sc = float(tr_it.get("Total Neto", 0.0)) or round(tb + tiv, 2)
-                p_u = str(tr_it["Proveedor"]).upper()
-                rol_t = "Tercero Agenciamiento (Mandato)" if any(k in p_u for k in ["CARGO", "ADUANA"]) else ("Tercero Transporte / Flete" if "DHL" in p_u else "Tercero Logística / Puerto")
-                nat_t = "Honorario Propio Agenciamiento" if "COMISION" in str(tr_it.get("Descripcion", "")).upper() else "Gasto por Cuenta de Tercero"
+                # 3. Detalle de Facturas que componen el Paquete
                 detalle_facturas_lista.append({
                     "Paquete #": f"Paquete #{g_k}",
-                    "Rol en Operación": rol_t,
-                    "Proveedor": tr_it["Proveedor"],
-                    "NIT": tr_it["NIT Emisor"],
-                    "Factura": tr_it["Factura"],
-                    "Fecha": tr_it["Fecha"],
-                    "Naturaleza": nat_t,
-                    "Base / Subtotal ($)": tb,
-                    "IVA ($)": tiv,
-                    "Retenciones ($)": round(rf + ri, 2),
-                    "Saldo a Cruzar ($)": sc,
-                    "Cuenta Contable": str(tr_it.get("Cuenta Pasivo Especifica", "22050505"))
+                    "Rol en Operación": "Agente Coordinador (Cobro Global)",
+                    "Proveedor": ag_item["Proveedor"],
+                    "NIT": ag_item["NIT Emisor"],
+                    "Factura": ag_item["Factura"],
+                    "Fecha": ag_item["Fecha"],
+                    "Naturaleza": "Servicios Agenciamiento + Fletes / Impuestos",
+                    "Base / Subtotal ($)": float(ag_item.get("Base", 0.0)),
+                    "IVA ($)": float(ag_item.get("IVA", 0.0)),
+                    "Retenciones ($)": 0.0,
+                    "Saldo a Cruzar ($)": float(ag_item["Total"]),
+                    "Cuenta Contable": "22050501"
                 })
                 
-            consecutivo_cruce += 1
+                for _, tr_it in terc_items.iterrows():
+                    facs_asignadas_en_algun_pq.append(tr_it["Factura"])
+                    tb = float(tr_it.get("Base", 0.0))
+                    tiv = float(tr_it.get("IVA", 0.0))
+                    rf = float(tr_it.get("ReteFuente", 0.0))
+                    ri = float(tr_it.get("ReteICA", 0.0))
+                    sc = float(tr_it.get("Total Neto", 0.0)) or round(tb + tiv, 2)
+                    p_u = str(tr_it["Proveedor"]).upper()
+                    rol_t = "🚚 Tercero Transporte (DHL)" if "DHL" in p_u else ("🏢 Tercero Agenciamiento (Mandato)" if any(k in p_u for k in ["CARGO", "ADUANA"]) else "🏬 Tercero Garaje / Almacén")
+                    nat_t = "Honorario Propio Agenciamiento" if "COMISION" in str(tr_it.get("Descripcion", "")).upper() else "Gasto por Cuenta de Tercero"
+                    detalle_facturas_lista.append({
+                        "Paquete #": f"Paquete #{g_k}",
+                        "Rol en Operación": rol_t,
+                        "Proveedor": tr_it["Proveedor"],
+                        "NIT": tr_it["NIT Emisor"],
+                        "Factura": tr_it["Factura"],
+                        "Fecha": tr_it["Fecha"],
+                        "Naturaleza": nat_t,
+                        "Base / Subtotal ($)": tb,
+                        "IVA ($)": tiv,
+                        "Retenciones ($)": round(rf + ri, 2),
+                        "Saldo a Cruzar ($)": sc,
+                        "Cuenta Contable": str(tr_it.get("Cuenta Pasivo Especifica", "22050505"))
+                    })
+                    
+                consecutivo_cruce += 1
 
-        if todos_asientos_lista:
-            df_export_cruces = pd.DataFrame(todos_asientos_lista)
-            buf_cruce_ex = io.BytesIO()
-            with pd.ExcelWriter(buf_cruce_ex, engine="openpyxl") as wr_cr:
-                if resumen_paquetes_lista:
-                    pd.DataFrame(resumen_paquetes_lista).to_excel(wr_cr, sheet_name="Resumen_Paquetes", index=False)
-                if detalle_facturas_lista:
-                    pd.DataFrame(detalle_facturas_lista).to_excel(wr_cr, sheet_name="Detalle_Facturas_Paquete", index=False)
-                df_export_cruces.to_excel(wr_cr, sheet_name="Asiento_Control_Cruces", index=False)
-            buf_cruce_ex.seek(0)
-            
-            st.download_button(
-                label=f"📥 Descargar Control de Cruces de Importación en Excel ({len(grupos_dict)} Paquetes)",
-                data=buf_cruce_ex.getvalue(),
-                file_name=f"Control_Cruces_Importacion_{empresa['nombre'].replace(' ', '_')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            # Añadir facturas de terceros que quedaron libres (sin asignar a ningún paquete)
+            df_libres_exp = df_terceros_all[~df_terceros_all["Factura"].isin(facs_asignadas_en_algun_pq)]
+            for _, tr_lib in df_libres_exp.iterrows():
+                tb = float(tr_lib.get("Base", 0.0))
+                tiv = float(tr_lib.get("IVA", 0.0))
+                sc = float(tr_lib.get("Total Neto", 0.0)) or round(tb + tiv, 2)
+                p_u = str(tr_lib["Proveedor"]).upper()
+                rol_t = "🚚 Tercero Transporte (DHL)" if "DHL" in p_u else ("🏢 Tercero Agenciamiento (Mandato)" if any(k in p_u for k in ["CARGO", "ADUANA"]) else "🏬 Tercero Garaje / Almacén")
+                detalle_facturas_lista.append({
+                    "Paquete #": "⚪ Sin Asignar (Pendiente de Operación)",
+                    "Rol en Operación": rol_t,
+                    "Proveedor": tr_lib["Proveedor"],
+                    "NIT": tr_lib["NIT Emisor"],
+                    "Factura": tr_lib["Factura"],
+                    "Fecha": tr_lib["Fecha"],
+                    "Naturaleza": "Gasto por Cuenta de Tercero",
+                    "Base / Subtotal ($)": tb,
+                    "IVA ($)": tiv,
+                    "Retenciones ($)": float(tr_lib.get("ReteFuente", 0.0)) + float(tr_lib.get("ReteICA", 0.0)),
+                    "Saldo a Cruzar ($)": sc,
+                    "Cuenta Contable": str(tr_lib.get("Cuenta Pasivo Especifica", "22050505"))
+                })
+
+            if todos_asientos_lista:
+                df_export_cruces = pd.DataFrame(todos_asientos_lista)
+                buf_cruce_ex = io.BytesIO()
+                with pd.ExcelWriter(buf_cruce_ex, engine="openpyxl") as wr_cr:
+                    if resumen_paquetes_lista:
+                        pd.DataFrame(resumen_paquetes_lista).to_excel(wr_cr, sheet_name="Resumen_Paquetes", index=False)
+                    if detalle_facturas_lista:
+                        pd.DataFrame(detalle_facturas_lista).to_excel(wr_cr, sheet_name="Detalle_Facturas_Paquete", index=False)
+                    df_export_cruces.to_excel(wr_cr, sheet_name="Asiento_Control_Cruces", index=False)
+                buf_cruce_ex.seek(0)
+                
+                st.download_button(
+                    label=f"📥 Descargar Control de Cruces de Importación en Excel ({len(pqs_actuales)} Paquetes)",
+                    data=buf_cruce_ex.getvalue(),
+                    file_name=f"Control_Cruces_Importacion_{empresa['nombre'].replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
 
     else:
         st.info("💡 Sube el reporte Excel de la DIAN en la Pestaña 1 para habilitar la triangulación y cruce de importaciones.")
