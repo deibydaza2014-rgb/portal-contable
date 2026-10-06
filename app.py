@@ -43,6 +43,119 @@ if "empresa_activa" not in st.session_state:
 if "proceso_activo" not in st.session_state:
     st.session_state["proceso_activo"] = None
 
+# ==============================================================================
+# CONFIGURACIÓN DE DIRECTORIOS Y SISTEMA DE AUTO-GUARDADO CONTINUO
+# ==============================================================================
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "almacenamiento_contable")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def get_empresa_autosave_dir(empresa_dict):
+    nit_clean = re.sub(r'\D', '', str(empresa_dict.get("nit", "empresa")))
+    d = os.path.join(DATA_DIR, nit_clean, "autosave")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def ejecutar_guardado_automatico_sesion(empresa_dict):
+    """Guarda automáticamente la sesión activa en disco con fecha y hora cada vez que hay actividad."""
+    if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
+        return None
+    try:
+        a_dir = get_empresa_autosave_dir(empresa_dict)
+        with open(os.path.join(a_dir, "df_procesado.pkl"), "wb") as f:
+            pickle.dump(st.session_state["df_procesado"], f)
+        if st.session_state.get("excel_bytes"):
+            with open(os.path.join(a_dir, "excel_original.xlsx"), "wb") as f:
+                f.write(st.session_state["excel_bytes"])
+        if st.session_state.get("paquetes_importacion"):
+            with open(os.path.join(a_dir, "paquetes_importacion.pkl"), "wb") as f:
+                pickle.dump(st.session_state["paquetes_importacion"], f)
+        if st.session_state.get("asientos_triangulacion_por_factura"):
+            with open(os.path.join(a_dir, "asientos_triangulacion.pkl"), "wb") as f:
+                pickle.dump(st.session_state["asientos_triangulacion_por_factura"], f)
+        estado_flags = {
+            "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
+            "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
+            "enviar_h2": {k: v for k, v in st.session_state.items() if k.startswith("enviar_h2_pq_")},
+            "enviar_nd": {k: v for k, v in st.session_state.items() if k.startswith("enviar_nd_pq_")},
+            "facturas_no_contabilizar": list(st.session_state.get("facturas_no_contabilizar", set())),
+            "sel_paquete_activo_key": st.session_state.get("sel_paquete_activo_key", 1)
+        }
+        with open(os.path.join(a_dir, "estado_sesion.json"), "w", encoding="utf-8") as f:
+            json.dump(estado_flags, f, ensure_ascii=False, indent=2)
+            
+        now_dt = datetime.datetime.now()
+        now_str = now_dt.strftime("%d/%m/%Y %I:%M:%S %p")
+        meta = {
+            "fecha_autosave": now_str,
+            "archivo_excel": st.session_state.get("excel_nombre", "Reporte.xlsx"),
+            "total_facturas": len(st.session_state["df_procesado"]),
+            "timestamp": now_dt.timestamp()
+        }
+        with open(os.path.join(a_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+            
+        st.session_state["_ultimo_autosave_hora"] = now_str
+        return now_str
+    except Exception:
+        return None
+
+def verificar_y_recuperar_guardado_automatico(empresa_dict):
+    """Restaura automáticamente el último autoguardado si la sesión en memoria está vacía."""
+    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+        return False
+    if st.session_state.get("_sesion_limpiada_por_usuario", False):
+        return False
+    try:
+        a_dir = get_empresa_autosave_dir(empresa_dict)
+        pkl_path = os.path.join(a_dir, "df_procesado.pkl")
+        meta_path = os.path.join(a_dir, "meta.json")
+        if os.path.exists(pkl_path) and os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            with open(pkl_path, "rb") as f:
+                st.session_state["df_procesado"] = pickle.load(f)
+                
+            ex_path = os.path.join(a_dir, "excel_original.xlsx")
+            if os.path.exists(ex_path):
+                with open(ex_path, "rb") as f:
+                    st.session_state["excel_bytes"] = f.read()
+            st.session_state["excel_nombre"] = meta.get("archivo_excel", "Reporte.xlsx")
+            
+            pq_path = os.path.join(a_dir, "paquetes_importacion.pkl")
+            if os.path.exists(pq_path):
+                with open(pq_path, "rb") as f:
+                    st.session_state["paquetes_importacion"] = pickle.load(f)
+                    
+            as_path = os.path.join(a_dir, "asientos_triangulacion.pkl")
+            if os.path.exists(as_path):
+                with open(as_path, "rb") as f:
+                    st.session_state["asientos_triangulacion_por_factura"] = pickle.load(f)
+                    
+            st_path = os.path.join(a_dir, "estado_sesion.json")
+            if os.path.exists(st_path):
+                with open(st_path, "r", encoding="utf-8") as f:
+                    est = json.load(f)
+                for k, v in est.get("paquetes_listos", {}).items():
+                    st.session_state[k] = v
+                for k, v in est.get("enviar_gp", {}).items():
+                    st.session_state[k] = v
+                for k, v in est.get("enviar_h2", {}).items():
+                    st.session_state[k] = v
+                for k, v in est.get("enviar_nd", {}).items():
+                    st.session_state[k] = v
+                if "facturas_no_contabilizar" in est:
+                    st.session_state["facturas_no_contabilizar"] = set(est["facturas_no_contabilizar"])
+                if "sel_paquete_activo_key" in est:
+                    st.session_state["sel_paquete_activo_key"] = est["sel_paquete_activo_key"]
+                    
+            st.session_state["_sesion_auto_recuperada"] = meta.get("fecha_autosave", "")
+            st.session_state["_ultimo_autosave_hora"] = meta.get("fecha_autosave", "")
+            return True
+    except Exception:
+        pass
+    return False
+
+
 # PANTALLA 1: LOGIN
 if not st.session_state["autenticado"]:
     col1, col2, col3 = st.columns(3)
@@ -2170,62 +2283,6 @@ def ejecutar_guardado_automatico_sesion(empresa_dict):
         return now_str
     except Exception:
         return None
-
-def verificar_y_recuperar_guardado_automatico(empresa_dict):
-    """Restaura automáticamente el último autoguardado si la sesión en memoria está vacía."""
-    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-        return False
-    if st.session_state.get("_sesion_limpiada_por_usuario", False):
-        return False
-    try:
-        a_dir = get_empresa_autosave_dir(empresa_dict)
-        pkl_path = os.path.join(a_dir, "df_procesado.pkl")
-        meta_path = os.path.join(a_dir, "meta.json")
-        if os.path.exists(pkl_path) and os.path.exists(meta_path):
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            with open(pkl_path, "rb") as f:
-                st.session_state["df_procesado"] = pickle.load(f)
-
-            ex_path = os.path.join(a_dir, "excel_original.xlsx")
-            if os.path.exists(ex_path):
-                with open(ex_path, "rb") as f:
-                    st.session_state["excel_bytes"] = f.read()
-            st.session_state["excel_nombre"] = meta.get("archivo_excel", "Reporte.xlsx")
-
-            pq_path = os.path.join(a_dir, "paquetes_importacion.pkl")
-            if os.path.exists(pq_path):
-                with open(pq_path, "rb") as f:
-                    st.session_state["paquetes_importacion"] = pickle.load(f)
-
-            as_path = os.path.join(a_dir, "asientos_triangulacion.pkl")
-            if os.path.exists(as_path):
-                with open(as_path, "rb") as f:
-                    st.session_state["asientos_triangulacion_por_factura"] = pickle.load(f)
-
-            st_path = os.path.join(a_dir, "estado_sesion.json")
-            if os.path.exists(st_path):
-                with open(st_path, "r", encoding="utf-8") as f:
-                    est = json.load(f)
-                for k, v in est.get("paquetes_listos", {}).items():
-                    st.session_state[k] = v
-                for k, v in est.get("enviar_gp", {}).items():
-                    st.session_state[k] = v
-                for k, v in est.get("enviar_h2", {}).items():
-                    st.session_state[k] = v
-                for k, v in est.get("enviar_nd", {}).items():
-                    st.session_state[k] = v
-                if "facturas_no_contabilizar" in est:
-                    st.session_state["facturas_no_contabilizar"] = set(est["facturas_no_contabilizar"])
-                if "sel_paquete_activo_key" in est:
-                    st.session_state["sel_paquete_activo_key"] = est["sel_paquete_activo_key"]
-
-            st.session_state["_sesion_auto_recuperada"] = meta.get("fecha_autosave", "")
-            st.session_state["_ultimo_autosave_hora"] = meta.get("fecha_autosave", "")
-            return True
-    except Exception:
-        pass
-    return False
 
 def extraer_montos_items_pdf(pdf_bytes):
     """Extrae valores monetarios de los ítems o detalles de productos en el PDF de una factura."""
