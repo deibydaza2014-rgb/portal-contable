@@ -884,6 +884,8 @@ def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
         })
 
     tot_ret = round(rfte_val + rica_val, 2)
+    cta_rf_usar = str(fac_sel.get("Cta ReteFuente") or ("23652503" if es_aduanero else "23654001")).strip()
+    cta_ri_usar = str(fac_sel.get("Cta ReteICA") or ("23680505" if es_aduanero else "23680501")).strip()
 
     if asume_ret:
         if tot_ret > 0:
@@ -894,18 +896,18 @@ def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
                 "Débito ($)": tot_ret,
                 "Crédito ($)": 0.0
             })
-        if rfte_val > 0 and fac_sel.get("Cta ReteFuente"):
+        if rfte_val > 0:
             asiento_filas.append({
-                "Código Cuenta": str(fac_sel.get("Cta ReteFuente")),
-                "Descripción Cuenta": "ReteFuente Practicada",
+                "Código Cuenta": cta_rf_usar,
+                "Descripción Cuenta": f"ReteFuente Practicada ({cta_rf_usar}) Fac {fac_sel.get('Factura', '')}",
                 "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
                 "Débito ($)": 0.0,
                 "Crédito ($)": rfte_val
             })
-        if rica_val > 0 and fac_sel.get("Cta ReteICA"):
+        if rica_val > 0:
             asiento_filas.append({
-                "Código Cuenta": str(fac_sel.get("Cta ReteICA")),
-                "Descripción Cuenta": "Retención ICA Practicada",
+                "Código Cuenta": cta_ri_usar,
+                "Descripción Cuenta": f"Retención ICA Practicada ({cta_ri_usar}) Fac {fac_sel.get('Factura', '')}",
                 "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
                 "Débito ($)": 0.0,
                 "Crédito ($)": rica_val
@@ -919,18 +921,18 @@ def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
             "Crédito ($)": 0.0 if es_nc else saldo_cxp
         })
     else:
-        if rfte_val > 0 and fac_sel.get("Cta ReteFuente"):
+        if rfte_val > 0:
             asiento_filas.append({
-                "Código Cuenta": str(fac_sel.get("Cta ReteFuente")),
-                "Descripción Cuenta": "ReteFuente Practicada",
+                "Código Cuenta": cta_rf_usar,
+                "Descripción Cuenta": f"ReteFuente Practicada ({cta_rf_usar}) Fac {fac_sel.get('Factura', '')}",
                 "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
                 "Débito ($)": 0.0,
                 "Crédito ($)": rfte_val
             })
-        if rica_val > 0 and fac_sel.get("Cta ReteICA"):
+        if rica_val > 0:
             asiento_filas.append({
-                "Código Cuenta": str(fac_sel.get("Cta ReteICA")),
-                "Descripción Cuenta": "Retención ICA Practicada",
+                "Código Cuenta": cta_ri_usar,
+                "Descripción Cuenta": f"Retención ICA Practicada ({cta_ri_usar}) Fac {fac_sel.get('Factura', '')}",
                 "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
                 "Débito ($)": 0.0,
                 "Crédito ($)": rica_val
@@ -1133,14 +1135,83 @@ def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_d
         })
         diferencia_no_deducible = 0.0
 
-    # Crédito total al Agente Aduanero (Euro Shipping / Trade Global) por el 100% de su factura
-    asiento.append({
-        "Código Cuenta": CUENTA_CXP_EURO_SHIPPING,
-        "Descripción Cuenta": f"CxP Agente Aduanero - Fac {agente_row.get('Factura', '')}",
-        "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-        "Débito ($)": 0.0,
-        "Crédito ($)": tot_agente
-    })
+    # Retenciones practicadas sobre la factura del agente aduanero (Base propia / Fee / Agenciamiento)
+    rfte_ag = float(agente_row.get("ReteFuente", 0.0))
+    rica_ag = float(agente_row.get("ReteICA", 0.0))
+    tot_ret_ag = round(rfte_ag + rica_ag, 2)
+    asume_ret_ag = bool(agente_row.get("Impuestos Asumidos", True))
+    prov_ag_u = str(agente_row.get("Proveedor", "")).upper()
+    es_aduanero_ag = any(k in prov_ag_u for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL", "DHL", "EURO SHIPPING", "TRADE GLOBAL"])
+    
+    cta_rfte_ag = str(agente_row.get("Cta ReteFuente") or ("23652503" if es_aduanero_ag else "23654001")).strip()
+    cta_rica_ag = str(agente_row.get("Cta ReteICA") or ("23680505" if es_aduanero_ag else "23680501")).strip()
+    cta_cxp_ag = str(agente_row.get("Cuenta Pasivo Especifica") or CUENTA_CXP_EURO_SHIPPING).strip()
+
+    if tot_ret_ag > 0:
+        if asume_ret_ag:
+            asiento.append({
+                "Código Cuenta": CUENTA_RETENCION_ASUMIDA,
+                "Descripción Cuenta": f"Retenciones Asumidas Aduana / Agente Fac {agente_row.get('Factura', '')}",
+                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                "Débito ($)": tot_ret_ag,
+                "Crédito ($)": 0.0
+            })
+            if rfte_ag > 0:
+                asiento.append({
+                    "Código Cuenta": cta_rfte_ag,
+                    "Descripción Cuenta": f"ReteFuente Practicada ({cta_rfte_ag}) Fac {agente_row.get('Factura', '')}",
+                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                    "Débito ($)": 0.0,
+                    "Crédito ($)": rfte_ag
+                })
+            if rica_ag > 0:
+                asiento.append({
+                    "Código Cuenta": cta_rica_ag,
+                    "Descripción Cuenta": f"Retención ICA Practicada ({cta_rica_ag}) Fac {agente_row.get('Factura', '')}",
+                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                    "Débito ($)": 0.0,
+                    "Crédito ($)": rica_ag
+                })
+            asiento.append({
+                "Código Cuenta": cta_cxp_ag,
+                "Descripción Cuenta": f"CxP Agente Aduanero - Fac {agente_row.get('Factura', '')}",
+                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                "Débito ($)": 0.0,
+                "Crédito ($)": tot_agente
+            })
+        else:
+            if rfte_ag > 0:
+                asiento.append({
+                    "Código Cuenta": cta_rfte_ag,
+                    "Descripción Cuenta": f"ReteFuente Practicada ({cta_rfte_ag}) Fac {agente_row.get('Factura', '')}",
+                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                    "Débito ($)": 0.0,
+                    "Crédito ($)": rfte_ag
+                })
+            if rica_ag > 0:
+                asiento.append({
+                    "Código Cuenta": cta_rica_ag,
+                    "Descripción Cuenta": f"Retención ICA Practicada ({cta_rica_ag}) Fac {agente_row.get('Factura', '')}",
+                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                    "Débito ($)": 0.0,
+                    "Crédito ($)": rica_ag
+                })
+            saldo_neto_ag = round(tot_agente - tot_ret_ag, 2)
+            asiento.append({
+                "Código Cuenta": cta_cxp_ag,
+                "Descripción Cuenta": f"CxP Agente Aduanero (Neto) - Fac {agente_row.get('Factura', '')}",
+                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                "Débito ($)": 0.0,
+                "Crédito ($)": saldo_neto_ag
+            })
+    else:
+        asiento.append({
+            "Código Cuenta": cta_cxp_ag,
+            "Descripción Cuenta": f"CxP Agente Aduanero - Fac {agente_row.get('Factura', '')}",
+            "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+            "Débito ($)": 0.0,
+            "Crédito ($)": tot_agente
+        })
 
     df_asiento = pd.DataFrame(asiento)
     return df_asiento, max(0.0, diferencia_no_deducible), suma_ret_asumidas
@@ -3571,6 +3642,14 @@ with tab_auditoria:
                         df_p.at[r_idx, "Neto a Pagar"] = round(nueva_base + nuevo_iva - nueva_rfte - nuevo_rica - float(fac_sel.get("ReteIVA", 0.0)), 2)
 
                     st.session_state["df_procesado"] = df_p
+                    # Actualizar asiento contable de triangulación para que refleje de inmediato la ReteFuente
+                    fac_fn_act = str(df_p.at[r_idx, "Factura"]).strip()
+                    if "asientos_triangulacion_por_factura" in st.session_state:
+                        asientos_m = st.session_state["asientos_triangulacion_por_factura"]
+                        if fac_fn_act in asientos_m:
+                            asientos_m[fac_fn_act] = obtener_asiento_contable_hoja2(df_p.loc[r_idx], es_aduanero=es_aduanero)
+                            st.session_state["asientos_triangulacion_por_factura"] = asientos_m
+
                     # Guardar regla en la Memoria de Aprendizaje Continuo
                     guardar_regla_aprendizaje(
                         empresa,
