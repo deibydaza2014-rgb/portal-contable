@@ -664,8 +664,45 @@ def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_d
         if t_saldo_pagar <= 0:
             t_saldo_pagar = round(t_base + t_iva, 2)
             
-        if es_roja:
-            # Factura roja (ya registrada en Siigo)
+        # Evaluar si esta factura es un Gasto Propio que va a Inventarios en Tránsito (14650501)
+        # o un Cruce de Pasivo que cancela cuenta por pagar previa (22050505 / 23359501)
+        dest_val = str(t.get("Destino Contable") or t.get("destino_contable") or "").strip().upper()
+        if "INVENTARIO" in dest_val or "14650501" in dest_val or "GASTO PROPIO" in dest_val:
+            es_gasto_propio = True
+        elif "PASIVO" in dest_val or "CXP" in dest_val:
+            es_gasto_propio = False
+        else:
+            # Criterio automático por defecto:
+            # Facturas pendientes (blancas) van directamente a Inventarios en Tránsito (14650501)
+            # Facturas cuya cuenta asignada sea 14650501
+            if not es_roja or cta_cxp == CUENTA_IMPORTACION_TRANSITO or str(t.get("Cta Principal", "")).strip() == CUENTA_IMPORTACION_TRANSITO:
+                es_gasto_propio = True
+            else:
+                es_gasto_propio = False
+                
+        if es_gasto_propio:
+            # Gasto propio que entra al costo directo de importación (Inventarios en Tránsito - 14650501)
+            costo_neto = t_base
+            suma_costo_blancas += costo_neto
+            suma_iva_blancas += t_iva
+            
+            asiento.append({
+                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                "Descripción Cuenta": f"Inventarios en Tránsito {prov_nom[:16]} (Fac {fac_num})",
+                "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
+                "Débito ($)": costo_neto,
+                "Crédito ($)": 0.0
+            })
+            if t_iva > 0:
+                asiento.append({
+                    "Código Cuenta": CUENTA_IVA_IMPORTACION,
+                    "Descripción Cuenta": f"IVA Descontable Fac {fac_num}",
+                    "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
+                    "Débito ($)": t_iva,
+                    "Crédito ($)": 0.0
+                })
+        else:
+            # Cruce de pasivo: Cancela cuenta por pagar previamente registrada en Siigo (22050505 / 23359501)
             asume_en_causacion = bool(t.get("Impuestos Asumidos", False))
             
             if asume_en_causacion or tot_ret == 0:
@@ -701,27 +738,6 @@ def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_d
                         "Débito ($)": ret_a_asumir,
                         "Crédito ($)": 0.0
                     })
-        else:
-            # Factura blanca (pendiente por registrar)
-            costo_neto = t_base
-            suma_costo_blancas += costo_neto
-            suma_iva_blancas += t_iva
-            
-            asiento.append({
-                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
-                "Descripción Cuenta": f"Importación en Tránsito (Fac {fac_num})",
-                "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
-                "Débito ($)": costo_neto,
-                "Crédito ($)": 0.0
-            })
-            if t_iva > 0:
-                asiento.append({
-                    "Código Cuenta": CUENTA_IVA_IMPORTACION,
-                    "Descripción Cuenta": f"IVA Descontable Fac {fac_num}",
-                    "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
-                    "Débito ($)": t_iva,
-                    "Crédito ($)": 0.0
-                })
 
     # Si la factura del agente discrimina IVA o IVA de Importación
     if iva_agente > 0:
@@ -3400,17 +3416,24 @@ with tab_triangulacion:
                         cta_actual_tr = str(tr.get("Cuenta Pasivo Especifica", "22050505" if "CARGO" in str(tr["Proveedor"]).upper() else "23359501")).strip()
                         p_nom = str(tr["Proveedor"]).upper()
                         rol_dsp = "🚚 DHL (Flete)" if "DHL" in p_nom else ("🏢 Agencia (Aduana)" if any(k in p_nom for k in ["CARGO", "ADUANA"]) else "🏬 Garaje / Almacén")
+                        cur_dest = str(tr.get("Destino Contable") or tr.get("destino_contable") or "").strip()
+                        if not cur_dest:
+                            cur_dest = "📦 Gasto Propio (Inventarios en Tránsito 14650501)" if (not es_r or cta_actual_tr == "14650501" or str(tr.get("Cta Principal", "")).strip() == "14650501") else f"🏛️ Cancela CxP ({cta_actual_tr})"
+                        es_gp = "INVENTARIO" in cur_dest.upper() or "14650501" in cur_dest or "GASTO PROPIO" in cur_dest.upper()
+                        tag_cta = "📦 14650501 (Inventarios en Tránsito)" if es_gp else f"⚠️ {cta_actual_tr} (CxP)"
+                        
                         filas_terc_disp.append({
                             "Rol": rol_dsp,
                             "Fecha Factura": tr.get("Fecha", "-"),
                             "Concordancia Fecha": tr.get("Relación Fecha", "Concorde"),
                             "Estado Contable": badge_est,
+                            "Destino Contable": "📦 Gasto Propio (Inventarios en Tránsito)" if es_gp else "🏛️ Cruce Pasivo (Cancela CxP)",
                             "Proveedor Tercero": tr["Proveedor"][:22],
                             "Factura": tr["Factura"],
                             "Subtotal (Base)": t_b,
                             "IVA": t_iv,
                             "Saldo Cruce": s_cruce,
-                            "Cuenta Contable": f"⚠️ {cta_actual_tr} (CxP)" if es_r else "14650501 (Tránsito)"
+                            "Cuenta Imputada": tag_cta
                         })
                     df_terc_disp = pd.DataFrame(filas_terc_disp)
                     st.dataframe(df_terc_disp.style.format({
@@ -3427,9 +3450,39 @@ with tab_triangulacion:
                 else:
                     st.warning(f"⚠️ El Paquete #{pq_id_sel} no tiene facturas de terceros asignadas todavía.")
 
-            # Expander para agregar/quitar facturas manualmente a este paquete
-            with st.expander(f"⚙️ Modificar este Paquete #{pq_id_sel} (Sacar Facturas o Agregar Nuevas):", expanded=False):
-                st.caption("Administra las facturas asignadas a esta importación: saca las que no correspondan o añade nuevas facturas de DHL, Agencia o Garaje:")
+            # Expander para agregar/quitar facturas manualmente a este paquete y clasificar gastos propios
+            with st.expander(f"⚙️ Modificar este Paquete #{pq_id_sel} (Gastos Propios a Inventarios en Tránsito / Sacar o Agregar):", expanded=False):
+                st.caption("Administra este paquete: define cuáles son gastos propios a Inventarios en Tránsito (14650501), cuáles cancelan CxP, saca o añade facturas:")
+                
+                # SECCIÓN A: CLASIFICACIÓN DE GASTOS PROPIOS (INVENTARIOS EN TRÁNSITO 14650501) VS CANCELA CXP
+                if not terceros_actual.empty:
+                    st.markdown("##### 📦 Clasificar Gastos Propios (Inventarios en Tránsito 14650501) vs Cruce de Pasivo:")
+                    st.caption("Indica para cada factura si es un **Gasto Propio** que debe imputarse a **Inventarios en Tránsito (14650501)** o si es un **Cruce de Pasivo** que cancela la cuenta por pagar existente (22050505 / 23359501):")
+                    
+                    cols_gp = st.columns(min(3, max(1, len(terceros_actual))))
+                    for idx_g, (_, r_tr_g) in enumerate(terceros_actual.iterrows()):
+                        col_g = cols_gp[idx_g % len(cols_gp)]
+                        with col_g:
+                            f_g_num = r_tr_g["Factura"]
+                            cur_g_dest = str(r_tr_g.get("Destino Contable") or r_tr_g.get("destino_contable") or "").strip()
+                            if not cur_g_dest:
+                                cur_g_dest = "📦 Gasto Propio (Inventarios en Tránsito 14650501)" if (not r_tr_g.get("Ya Registrada", False) or str(r_tr_g.get("Cuenta Pasivo Especifica", "")).strip() == "14650501") else "🏛️ Cruce de Pasivo (Cancela CxP)"
+                            
+                            idx_radio = 0 if ("INVENTARIO" in cur_g_dest.upper() or "14650501" in cur_g_dest or "GASTO PROPIO" in cur_g_dest.upper()) else 1
+                            nuevo_g_dest = st.radio(
+                                f"Fac {f_g_num} ({r_tr_g['Proveedor'][:15]}):",
+                                ["📦 Inventarios en Tránsito (14650501)", "🏛️ Cruce Pasivo (Cancela CxP)"],
+                                index=idx_radio,
+                                key=f"rad_gp_{pq_id_sel}_{f_g_num}"
+                            )
+                            if nuevo_g_dest != cur_g_dest:
+                                r_idx_match = terceros_actual[terceros_actual["Factura"] == f_g_num].index
+                                if not r_idx_match.empty:
+                                    terceros_actual.at[r_idx_match[0], "Destino Contable"] = nuevo_g_dest
+                                    st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_actual
+                                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                                    st.rerun()
+                    st.markdown("---")
                 
                 # 1. SECCIÓN PARA SACAR / REDIRIGIR FACTURAS
                 st.markdown("##### ➖ Sacar y Redirigir una factura de este paquete:")
