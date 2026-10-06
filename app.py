@@ -538,7 +538,7 @@ def eliminar_trabajo_historial(empresa_dict, job_id):
             pass
 
 def exportar_respaldo_sesion_zip(empresa_dict, df_proc, dict_renom, dict_orig, excel_b, excel_n, zip_p=None):
-    """Empaqueta toda la sesión contable en un archivo ZIP descargable para respaldo indestructible."""
+    """Empaqueta toda la sesión contable en un archivo ZIP descargable para respaldo indestructible con paquetes y triangulaciones."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         if df_proc is not None:
@@ -547,16 +547,40 @@ def exportar_respaldo_sesion_zip(empresa_dict, df_proc, dict_renom, dict_orig, e
             zf.writestr("excel_original.xlsx", excel_b)
         if zip_p:
             zf.writestr("paquete_facturas.zip", zip_p)
+            
+        # Incluir paquetes de importación y asientos de triangulación si existen
+        if "paquetes_importacion" in st.session_state and st.session_state["paquetes_importacion"]:
+            zf.writestr("paquetes_importacion.pkl", pickle.dumps(st.session_state["paquetes_importacion"]))
+        if "asientos_triangulacion_por_factura" in st.session_state and st.session_state["asientos_triangulacion_por_factura"]:
+            zf.writestr("asientos_triangulacion.pkl", pickle.dumps(st.session_state["asientos_triangulacion_por_factura"]))
+            
+        # Incluir estado completo de la sesión
+        estado_flags = {
+            "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
+            "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
+            "enviar_h2": {k: v for k, v in st.session_state.items() if k.startswith("enviar_h2_pq_")},
+            "enviar_nd": {k: v for k, v in st.session_state.items() if k.startswith("enviar_nd_pq_")},
+            "facturas_no_contabilizar": list(st.session_state.get("facturas_no_contabilizar", set())),
+            "sel_paquete_activo_key": st.session_state.get("sel_paquete_activo_key", 1)
+        }
+        zf.writestr("estado_sesion.json", json.dumps(estado_flags, ensure_ascii=False, indent=2))
+        
+        now_str = datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p")
         meta = {
             "empresa": empresa_dict.get("nombre", ""),
             "nit": empresa_dict.get("nit", ""),
             "excel_nombre": excel_n or "Reporte.xlsx",
-            "fecha_respaldo": datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p"),
+            "archivo_excel": excel_n or "Reporte.xlsx",
+            "fecha_respaldo": now_str,
             "total_facturas": len(df_proc) if df_proc is not None else 0,
             "total_pdfs_renombrados": len(dict_renom) if dict_renom else 0,
             "total_pdfs_originales": len(dict_orig) if dict_orig else 0
         }
         zf.writestr("meta_sesion.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        mem_actual = cargar_memoria_aprendizaje(empresa_dict)
+        if mem_actual:
+            zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
+        zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
         if dict_renom:
             for fn, bdata in dict_renom.items():
                 zf.writestr(f"pdfs_renombrados/{fn}", bdata)
@@ -1265,9 +1289,83 @@ def calcular_base_con_regla_descuento(r, tot, iva, nom_emisor):
 
     return base, iva, desc_val, motivo_base
 
+
+# ==============================================================================
+# MOTOR DE MEMORIA Y APRENDIZAJE CONTINUO DE REGLAS CONTABLES
+# ==============================================================================
+PATH_MEMORIA_GLOBAL = "almacenamiento_contable/memoria_aprendizaje_contable.json"
+
+def cargar_memoria_aprendizaje(empresa_dict=None):
+    """Carga el banco histórico de aprendizaje con reglas auditadas por el usuario."""
+    nit_empresa = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if empresa_dict else "global"
+    path_esp = f"almacenamiento_contable/{nit_empresa}/memoria_aprendizaje_contable.json"
+    
+    for p in [path_esp, PATH_MEMORIA_GLOBAL]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+def guardar_regla_aprendizaje(empresa_dict, nit_emisor, nombre_emisor, cta_p=None, resp_fiscal=None, **kwargs):
+    """Memoriza una corrección o auditoría del usuario para aplicarla automáticamente en meses futuros."""
+    if not nit_emisor:
+        return
+    nit_clean = re.sub(r'\D', '', str(nit_emisor))
+    if not nit_clean:
+        return
+        
+    memoria = cargar_memoria_aprendizaje(empresa_dict)
+    regla = memoria.get(nit_clean, {
+        "proveedor": nombre_emisor,
+        "nit": nit_clean,
+        "veces_auditado": 0
+    })
+    if nombre_emisor:
+        regla["proveedor"] = nombre_emisor
+    if cta_p:
+        regla["cta_principal"] = str(cta_p).strip()
+    if resp_fiscal:
+        regla["regimen"] = str(resp_fiscal).strip()
+    for k, v in kwargs.items():
+        if v is not None:
+            regla[k] = v
+    regla["veces_auditado"] = regla.get("veces_auditado", 0) + 1
+    regla["ultima_actualizacion"] = datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p")
+    
+    memoria[nit_clean] = regla
+    
+    nit_empresa = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if empresa_dict else "global"
+    dir_esp = f"almacenamiento_contable/{nit_empresa}"
+    os.makedirs(dir_esp, exist_ok=True)
+    os.makedirs("almacenamiento_contable", exist_ok=True)
+    
+    try:
+        with open(f"{dir_esp}/memoria_aprendizaje_contable.json", "w", encoding="utf-8") as f:
+            json.dump(memoria, f, ensure_ascii=False, indent=2)
+        with open(PATH_MEMORIA_GLOBAL, "w", encoding="utf-8") as f:
+            json.dump(memoria, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return memoria
+
 def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_doc, resp_emisor="", empresa_compradora=None):
     nombre = str(nombre_emisor).upper()
     resp = str(resp_emisor).upper()
+    
+    # 0. MEMORIA DE APRENDIZAJE: Si el usuario ya auditó y guardó reglas para este proveedor previamente
+    cta_aprendida = None
+    memoria_ap = cargar_memoria_aprendizaje(empresa_compradora)
+    nit_clean_c = re.sub(r'\D', '', str(nit_emisor))
+    if nit_clean_c in memoria_ap:
+        r_ap = memoria_ap[nit_clean_c]
+        if not resp_emisor and r_ap.get("regimen"):
+            resp_emisor = r_ap["regimen"]
+            resp = resp_emisor.upper()
+        if r_ap.get("cta_principal"):
+            cta_aprendida = r_ap["cta_principal"]
     if empresa_compradora is None:
         empresa_compradora = {"es_gran_contribuyente": False, "es_autorretenedor": False}
         
@@ -1382,7 +1480,13 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_do
         cta_rica = cta_rica_b if rica > 0 else ""
         razon_rica = f"ReteICA liquidado (${rica:,.2f})" if rica > 0 else "Base no supera tope"
 
-    razon_total = f"{razon_b} | {razon_rfte} | {razon_reteiva}"
+    if cta_aprendida:
+        cta_p = cta_aprendida
+        cat = f"Aprendido ({cta_aprendida})"
+        razon_total = f"🧠 Cuenta aprendida de auditorías del usuario ({cta_aprendida}) | {razon_rfte} | {razon_reteiva}"
+    else:
+        razon_total = f"{razon_b} | {razon_rfte} | {razon_reteiva}"
+        
     audit_dict = {
         "es_gc": es_emisor_gc,
         "es_autorr": es_emisor_autorr,
@@ -1390,7 +1494,8 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_do
         "razon_rfte": razon_rfte,
         "razon_reteiva": razon_reteiva,
         "razon_reteica": razon_rica,
-        "razon_rica": razon_rica
+        "razon_rica": razon_rica,
+        "es_aprendido": bool(cta_aprendida)
     }
     return t_comp, op, cta_p, cta_c, desc, rfte, rica, reteiva, cta_rfte, cta_iva, cta_rica, cat, razon_total, audit_dict
 
@@ -2044,6 +2149,22 @@ def generar_respaldo_portatil_bytes(empresa_dict):
                 "total_facturas": len(st.session_state["df_procesado"])
             }
             zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+            zf.writestr("meta_sesion.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        mem_actual = cargar_memoria_aprendizaje(empresa_dict)
+        if mem_actual:
+            zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
+            
+            # 7. PDFs si existen en la sesión
+            dict_renom_s = st.session_state.get("dict_pdfs", {})
+            if dict_renom_s:
+                for fn, bdata in dict_renom_s.items():
+                    zf.writestr(f"pdfs_renombrados/{fn}", bdata)
+            dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
+            if dict_orig_s:
+                for fn, bdata in dict_orig_s.items():
+                    zf.writestr(f"pdfs_originales/{fn}", bdata)
+            if st.session_state.get("zip_pdfs"):
+                zf.writestr("paquete_facturas.zip", st.session_state["zip_pdfs"])
             
         buf.seek(0)
         return buf.getvalue()
@@ -2051,14 +2172,27 @@ def generar_respaldo_portatil_bytes(empresa_dict):
         return None
 
 def restaurar_desde_respaldo_bytes(empresa_dict, raw_zip_bytes):
-    """Restaura un archivo de respaldo portátil .indumaq directamente a la sesión activa."""
+    """Restaura un archivo de respaldo portátil (.indumaq o .zip) directamente a la sesión activa con facturas, paquetes y PDFs."""
     try:
         with zipfile.ZipFile(io.BytesIO(raw_zip_bytes), "r") as zf:
             namelist = zf.namelist()
+            if "memoria_aprendizaje.json" in namelist:
+                try:
+                    mem_rest = json.loads(zf.read("memoria_aprendizaje.json").decode("utf-8"))
+                    nit_emp = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if empresa_dict else "global"
+                    os.makedirs(f"almacenamiento_contable/{nit_emp}", exist_ok=True)
+                    with open(f"almacenamiento_contable/{nit_emp}/memoria_aprendizaje_contable.json", "w", encoding="utf-8") as f_mem:
+                        json.dump(mem_rest, f_mem, ensure_ascii=False, indent=2)
+                    with open(PATH_MEMORIA_GLOBAL, "w", encoding="utf-8") as f_mem:
+                        json.dump(mem_rest, f_mem, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
             if "df_procesado.pkl" in namelist:
                 st.session_state["df_procesado"] = pickle.loads(zf.read("df_procesado.pkl"))
             if "excel_original.xlsx" in namelist:
                 st.session_state["excel_bytes"] = zf.read("excel_original.xlsx")
+            if "paquete_facturas.zip" in namelist:
+                st.session_state["zip_pdfs"] = zf.read("paquete_facturas.zip")
             if "paquetes_importacion.pkl" in namelist:
                 st.session_state["paquetes_importacion"] = pickle.loads(zf.read("paquetes_importacion.pkl"))
             if "asientos_triangulacion.pkl" in namelist:
@@ -2079,10 +2213,30 @@ def restaurar_desde_respaldo_bytes(empresa_dict, raw_zip_bytes):
                     st.session_state["sel_paquete_activo_key"] = est["sel_paquete_activo_key"]
             if "meta.json" in namelist:
                 meta = json.loads(zf.read("meta.json").decode("utf-8"))
-                st.session_state["excel_nombre"] = meta.get("archivo_excel", "Reporte.xlsx")
+                st.session_state["excel_nombre"] = meta.get("archivo_excel", meta.get("excel_nombre", "Reporte.xlsx"))
                 st.session_state["_sesion_cargada_nombre"] = f"Respaldo {meta.get('fecha_respaldo', '')}"
+            elif "meta_sesion.json" in namelist:
+                meta = json.loads(zf.read("meta_sesion.json").decode("utf-8"))
+                st.session_state["excel_nombre"] = meta.get("excel_nombre", meta.get("archivo_excel", "Reporte.xlsx"))
+                st.session_state["_sesion_cargada_nombre"] = f"Respaldo {meta.get('fecha_respaldo', '')}"
+            
+            # Restaurar PDFs
+            dict_renom = {}
+            dict_orig = {}
+            for name in namelist:
+                if name.startswith("pdfs_renombrados/") and name.endswith(".pdf"):
+                    fn = name.replace("pdfs_renombrados/", "")
+                    dict_renom[fn] = zf.read(name)
+                elif name.startswith("pdfs_originales/") and name.endswith(".pdf"):
+                    fn = name.replace("pdfs_originales/", "")
+                    dict_orig[fn] = zf.read(name)
+            if dict_renom:
+                st.session_state["dict_pdfs"] = dict_renom
+                st.session_state["total_zip_pdfs"] = len(dict_renom)
+            if dict_orig:
+                st.session_state["raw_uploaded_pdfs"] = dict_orig
         return True
-    except Exception:
+    except Exception as e:
         return False
 
 # BANNER DE SESIÓN ACTIVA EN PANTALLA (CON GUARDADO Y RESPALDO PORTÁTIL)
@@ -2102,8 +2256,19 @@ if "df_procesado" in st.session_state and st.session_state["df_procesado"] is no
                 zip_bytes=st.session_state.get("zip_pdfs"),
                 job_id=st.session_state.get("job_actual_id")
             )
+            # Sincronizar todas las cuentas y regímenes auditados con la Memoria de Aprendizaje
+            for _, r_sav in st.session_state["df_procesado"].iterrows():
+                guardar_regla_aprendizaje(
+                    empresa,
+                    r_sav.get("NIT Emisor"),
+                    r_sav.get("Proveedor"),
+                    cta_p=r_sav.get("Cta Principal"),
+                    resp_fiscal=r_sav.get("Régimen Fiscal Emisor"),
+                    cta_cxp=r_sav.get("Cuenta Pasivo Especifica"),
+                    no_contabilizar=bool(r_sav.get("No Contabilizar", False))
+                )
             st.session_state["job_actual_id"] = jid
-            st.success("✅ ¡Progreso contable y triangulación guardados con éxito!")
+            st.success("✅ ¡Progreso contable guardado y reglas memorizadas para futuros meses!")
     with c_bnr3:
         b_resp = generar_respaldo_portatil_bytes(empresa)
         if b_resp:
@@ -3206,6 +3371,16 @@ with tab_auditoria:
                         df_p.at[r_idx, "Neto a Pagar"] = round(nueva_base + nuevo_iva - nueva_rfte - nuevo_rica - float(fac_sel.get("ReteIVA", 0.0)), 2)
                         
                     st.session_state["df_procesado"] = df_p
+                    # Guardar regla en la Memoria de Aprendizaje Continuo
+                    guardar_regla_aprendizaje(
+                        empresa,
+                        fac_sel.get("NIT Emisor"),
+                        fac_sel.get("Proveedor"),
+                        cta_p=fac_sel.get("Cta Principal"),
+                        resp_fiscal=cod_reg,
+                        cta_cxp=cta_clean,
+                        asumir_impuestos=asumir_imp
+                    )
                     guardar_trabajo_en_historial(
                         empresa, df_p,
                         excel_bytes=st.session_state.get("excel_bytes"),
@@ -3747,7 +3922,7 @@ with tab_triangulacion:
                                         target_usado_i = t_val
                                         tipo_target_i = t_tipo
                                 elif best_diff_i >= 0.05 and d_c_i < best_diff_i:
-                                    if d_c_i < 5.0 and score_c > 50:
+                                    if d_c_i < 2500.0 and score_c > 40:
                                         best_diff_i = d_c_i
                                         best_combo_i = list(combo_i)
                                         best_score_i = score_c
@@ -3758,8 +3933,8 @@ with tab_triangulacion:
                         if best_diff_i < 0.05:
                             break
                             
-                    # REGLA ESTRICTA: Si la diferencia no es exacta o casi exacta (< $5), NO asignar facturas aleatorias
-                    if best_diff_i >= 5.0:
+                    # REGLA DE CALIBRACIÓN: Permitir diferencias menores por ajuste de TRM, redondeo o centavos (< $2,500 COP)
+                    if best_diff_i >= 2500.0:
                         best_combo_i = []
                         dif_calc = tot_full_i
                     else:
@@ -3806,7 +3981,18 @@ with tab_triangulacion:
                 s_t = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in p_info["terceros"].iterrows()])
                 dif = abs(float(ag_i["Total"]) - s_t)
                 es_listo = st.session_state.get(f"paquete_listo_{p_num}", False)
-                badge_pq = "✅ LISTO" if es_listo else ("🟢 Cuadrado $0.00" if dif < 1.0 else f"⚠️ Dif ${dif:,.0f}")
+                es_transito = st.session_state.get(f"enviar_gp_pq_{p_num}", False)
+                es_h2 = st.session_state.get(f"enviar_h2_pq_{p_num}", False)
+                if es_listo:
+                    badge_pq = "✅ LISTO"
+                elif es_transito:
+                    badge_pq = "📦 TRÁNSITO DIRECTO"
+                elif es_h2:
+                    badge_pq = "📄 HOJA 2"
+                elif dif < 1.0:
+                    badge_pq = "🟢 Cuadrado $0.00"
+                else:
+                    badge_pq = f"⚠️ Dif ${dif:,.0f}"
                 return f"📦 Paquete #{p_num} [{badge_pq}]: {ag_i['Proveedor'][:16]} ({ag_i['Factura']}) — Cobro: ${ag_i['Total']:,.0f} | {n_t} Terceros (${s_t:,.0f})"
 
             # Barra de Acciones y Selección de Paquete Persistente
@@ -3876,20 +4062,19 @@ with tab_triangulacion:
                     <b>🏢 Gastos Propios con IVA (Seguro/Fee):</b> <span style="font-weight:bold; color:#475569;">${round(base_propia_val + iva_ag_val, 2):,.2f}</span>
                     """
                 
-                st.markdown(f"""
-                <div style="background:#fffbeb; border:1px solid #fde68a; border-left:5px solid #d97706; border-radius:8px; padding:14px; margin-bottom:12px;">
-                    <h4 style="margin:0 0 6px 0; color:#92400e;">🟡 Factura del Agente (Cobro Total)</h4>
-                    <p style="margin:0; font-size:14px; color:#78350f;">
-                        <b>Proveedor:</b> {agente_actual['Proveedor']}<br>
-                        <b>NIT:</b> {agente_actual['NIT Emisor']}<br>
-                        <b>Factura:</b> {agente_actual['Factura']}<br>
-                        <b>Fecha de Operación:</b> <span style="font-weight:bold; color:#0f172a;">{agente_actual['Fecha']}</span><br>
-                        <b>Total Facturado:</b> <span style="font-size:18px; font-weight:bold; color:#b45309;">${tot_agente_actual:,.2f}</span><br>
-                        <b>IVA Discriminado:</b> ${iva_ag_val:,.2f}
-                        {html_desglose_agente}
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
+                html_card_ag_clean = f"""<div style="background:#fffbeb; border:1px solid #fde68a; border-left:5px solid #d97706; border-radius:8px; padding:14px; margin-bottom:12px;">
+<h4 style="margin:0 0 6px 0; color:#92400e;">🟡 Factura del Agente (Cobro Total)</h4>
+<div style="margin:0; font-size:14px; color:#78350f; line-height:1.6;">
+<b>Proveedor:</b> {agente_actual['Proveedor']}<br>
+<b>NIT:</b> {agente_actual['NIT Emisor']}<br>
+<b>Factura:</b> {agente_actual['Factura']}<br>
+<b>Fecha de Operación:</b> <span style="font-weight:bold; color:#0f172a;">{agente_actual['Fecha']}</span><br>
+<b>Total Facturado:</b> <span style="font-size:18px; font-weight:bold; color:#b45309;">${tot_agente_actual:,.2f}</span><br>
+<b>IVA Discriminado:</b> ${iva_ag_val:,.2f}
+{html_desglose_agente}
+</div>
+</div>"""
+                st.markdown(html_card_ag_clean, unsafe_allow_html=True)
 
                 # Control para dejar listo este paquete para contabilidad
                 es_pq_listo = st.session_state.get(f"paquete_listo_{pq_id_sel}", False)
@@ -3979,7 +4164,15 @@ with tab_triangulacion:
                     else:
                         st.info(f"📊 Total Terceros: **${tot_s_terceros:,.2f}** | Objetivo a Cruzar (Sin IVA): **${target_comparar:,.2f}** | Diferencia: **${dif_pq_actual:,.2f}**")
                 else:
-                    st.warning(f"⚠️ El Paquete #{pq_id_sel} no tiene facturas de terceros asignadas todavía.")
+                    st.markdown(f"""
+                    <div style="background:#f0f9ff; border:1px solid #bae6fd; border-left:5px solid #0284c7; border-radius:8px; padding:14px; margin-bottom:14px;">
+                        <h5 style="margin:0 0 6px 0; color:#0369a1;">ℹ️ Factura de Operación Directa / Flete Propio (Sin Terceros)</h5>
+                        <p style="margin:0; font-size:14px; color:#0c4a6e; line-height:1.5;">
+                            Esta factura del agente corresponde a un servicio directo (ej. flete internacional o agenciamiento propio) sin facturas intermedias de terceros.<br>
+                            👉 <b>¿Cómo contabilizarla?</b> Haz clic abajo en <b>Opción 1: Mercancías en Tránsito (Cta 14650501)</b> o <b>Opción 2: Como en la Hoja 2</b> y luego pulsa <i>"Dejar Listo Paquete #{pq_id_sel}"</i>.
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
 
             # Expander para agregar/quitar facturas manualmente a este paquete y clasificar gastos propios
             with st.expander(f"⚙️ Modificar este Paquete #{pq_id_sel} (Gastos Propios a Inventarios en Tránsito / Sacar o Agregar):", expanded=False):
@@ -4359,7 +4552,8 @@ with tab_triangulacion:
                         "Factura": tr_it["Factura"],
                         "Fecha": tr_it["Fecha"],
                         "Naturaleza": nat_t,
-                        "Base / Subtotal ($)": tb,
+               
+         "Base / Subtotal ($)": tb,
                         "IVA ($)": tiv,
                         "Retenciones ($)": round(rf + ri, 2),
                         "Saldo a Cruzar ($)": sc,
@@ -4544,8 +4738,7 @@ with tab_siigo:
             cta_rica = item.get("Cta ReteICA", "23680501")
             
             ws_matriz.append([t_comp, cons, f_str, nit, pref, fac_num, desc, op, cta_p, base, iva, rfte, rica, riva, cta_c])
-        
-    
+            
             r = fila_r
             # Línea 1: Base Imponible
             ws_interfaz.append([
