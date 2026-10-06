@@ -516,6 +516,21 @@ CUENTA_CXP_AGENCIA_EXTERIOR = "22050505"
 CUENTA_CXP_DHL_NACIONAL = "23359501"
 CUENTA_CXP_EURO_SHIPPING = "22050501"
 
+def normalizar_fecha_dian(fecha_raw):
+    """Normaliza cualquier formato de fecha a DD/MM/AAAA para Siigo y DIAN."""
+    if not fecha_raw:
+        return ""
+    s = str(fecha_raw).strip()
+    m = re.match(r'^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$', s)
+    if m:
+        d, m_val, y = m.groups()
+        return f"{int(d):02d}/{int(m_val):02d}/{y}"
+    m_iso = re.match(r'^(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})', s)
+    if m_iso:
+        y, m_val, d = m_iso.groups()
+        return f"{int(d):02d}/{int(m_val):02d}/{y}"
+    return s
+
 def analizar_estado_filas_excel(excel_bytes):
     """
     Lee las celdas del archivo Excel DIAN (token) con openpyxl para detectar:
@@ -2587,11 +2602,52 @@ with tab_compras:
 
 with tab_auditoria:
     st.markdown("### Modulo de Auditoria Contable y Trazabilidad")
-    st.caption("Inspeccion de cuentas, deducciones y separacion de gastos por cuenta de terceros.")
+    st.caption("Inspección de cuentas, deducciones y separación de gastos por cuenta de terceros.")
     
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
-        opciones_fac = [f"[{r['Comprobante Siigo']}] {r['Fecha']} - {r['Factura']} - {r['Proveedor']} (${r['Total']:,.0f})" for _, r in df_p.iterrows()]
+        
+        # Inicializar conjunto de facturas excluidas de contabilización
+        if "facturas_no_contabilizar" not in st.session_state:
+            st.session_state["facturas_no_contabilizar"] = set(df_p[df_p.get("No Contabilizar", False) == True]["Factura"].tolist())
+        cur_no_contab = st.session_state["facturas_no_contabilizar"]
+
+        # Panel de exclusión masiva para marcar cuáles NO contabilizar
+        with st.expander("🚫 Panel: Marcar qué facturas NO debes contabilizar (Excluir de Siigo):", expanded=False):
+            st.caption("Selecciona aquí las facturas que NO deseas que pasen a la contabilidad ni se exporten a Siigo (por ejemplo, si ya fueron causadas manualmente, corresponden a otro período o no deben registrarse):")
+            lista_todas_facs_tags = [f"{r['Factura']} — {r['Proveedor'][:24]} (${r['Total']:,.0f}) [{'🔴 Ya Registrada' if r.get('Ya Registrada') else '⚪ Pendiente'}]" for _, r in df_p.iterrows()]
+            mapa_tags_to_fac = {f"{r['Factura']} — {r['Proveedor'][:24]} (${r['Total']:,.0f}) [{'🔴 Ya Registrada' if r.get('Ya Registrada') else '⚪ Pendiente'}]": r['Factura'] for _, r in df_p.iterrows()}
+            
+            defaults_seleccionados = [t for t, fn in mapa_tags_to_fac.items() if fn in cur_no_contab or bool(df_p[df_p["Factura"] == fn].iloc[0].get("No Contabilizar", False))]
+            
+            sel_excluidas_bulk = st.multiselect(
+                "Selecciona facturas que NO se deben contabilizar:",
+                options=lista_todas_facs_tags,
+                default=defaults_seleccionados,
+                key="ms_bulk_excluir_contab"
+            )
+            if st.button("💾 Guardar Exclusiones de Contabilidad", key="btn_save_bulk_excl"):
+                nuevas_ex = {mapa_tags_to_fac[t] for t in sel_excluidas_bulk}
+                st.session_state["facturas_no_contabilizar"] = nuevas_ex
+                for idx_row, r_row in df_p.iterrows():
+                    es_ex = r_row["Factura"] in nuevas_ex
+                    df_p.at[idx_row, "No Contabilizar"] = es_ex
+                    if es_ex:
+                        df_p.at[idx_row, "Estado Registro"] = "🚫 No Contabilizar (Excluida)"
+                    else:
+                        es_r = bool(r_row.get("Ya Registrada", False))
+                        cp = r_row.get("Comprobante Previo", "")
+                        df_p.at[idx_row, "Estado Registro"] = f"🔴 Ya Registrada ({cp})" if es_r else "⚪ Compra Pendiente"
+                st.session_state["df_procesado"] = df_p
+                st.success(f"¡Se han marcado {len(nuevas_ex)} facturas como NO contabilizables!")
+                st.rerun()
+
+        opciones_fac = []
+        for _, r in df_p.iterrows():
+            fn = r['Factura']
+            tag_ex = " 🚫 [NO CONTABILIZAR]" if (fn in cur_no_contab or r.get("No Contabilizar")) else ""
+            opciones_fac.append(f"[{r['Comprobante Siigo']}] {r['Fecha']} - {fn}{tag_ex} - {r['Proveedor']} (${r['Total']:,.0f})")
+            
         seleccion = st.selectbox("Selecciona una factura para auditar:", opciones_fac)
         
         comp_sel = seleccion.split("]")[0].replace("[", "")
@@ -2604,6 +2660,40 @@ with tab_auditoria:
             
         col_a1, col_a2 = st.columns(2)
         with col_a1:
+            # Control individual para marcar si no se debe contabilizar esta factura
+            fac_act_fn = fac_sel["Factura"]
+            esta_excl_ind = fac_act_fn in cur_no_contab or bool(fac_sel.get("No Contabilizar", False))
+            
+            c_tog_ex1, c_tog_ex2 = st.columns([2.4, 1.2])
+            with c_tog_ex1:
+                if esta_excl_ind:
+                    st.warning("🚫 **Esta factura está marcada como 'NO CONTABILIZAR'** — No se generará asiento ni se exportará a Siigo.")
+                else:
+                    st.caption("Estado contable activo para exportación a Siigo.")
+            with c_tog_ex2:
+                if not esta_excl_ind:
+                    if st.button("🚫 No Contabilizar", key=f"btn_excl_indiv_{fac_sel['Comprobante Siigo']}", help="Excluye esta factura de Siigo"):
+                        cur_no_contab.add(fac_act_fn)
+                        st.session_state["facturas_no_contabilizar"] = cur_no_contab
+                        m_idx = df_p[df_p["Factura"] == fac_act_fn].index
+                        if not m_idx.empty:
+                            df_p.at[m_idx[0], "No Contabilizar"] = True
+                            df_p.at[m_idx[0], "Estado Registro"] = "🚫 No Contabilizar (Excluida)"
+                            st.session_state["df_procesado"] = df_p
+                        st.rerun()
+                else:
+                    if st.button("✅ Reactivar", key=f"btn_react_indiv_{fac_sel['Comprobante Siigo']}", help="Vuelve a incluirla en la contabilidad"):
+                        cur_no_contab.discard(fac_act_fn)
+                        st.session_state["facturas_no_contabilizar"] = cur_no_contab
+                        m_idx = df_p[df_p["Factura"] == fac_act_fn].index
+                        if not m_idx.empty:
+                            df_p.at[m_idx[0], "No Contabilizar"] = False
+                            es_r = bool(df_p.at[m_idx[0], "Ya Registrada"])
+                            cp = df_p.at[m_idx[0], "Comprobante Previo"]
+                            df_p.at[m_idx[0], "Estado Registro"] = f"🔴 Ya Registrada ({cp})" if es_r else "⚪ Compra Pendiente"
+                            st.session_state["df_procesado"] = df_p
+                        st.rerun()
+
             st.markdown(f"""
             <div class="audit-card">
                 <h4>Detalle del Comprobante: {fac_sel['Comprobante Siigo']}</h4>
@@ -3199,37 +3289,60 @@ with tab_triangulacion:
 
             pqs_actuales = st.session_state["paquetes_importacion"]
 
-            # Barra de Acciones y Selección de Paquete
+            # Clave persistente para que NUNCA se devuelva al primer paquete al editar
+            pqs_keys = list(pqs_actuales.keys())
+            if "sel_paquete_activo_key" not in st.session_state or st.session_state["sel_paquete_activo_key"] not in pqs_keys:
+                st.session_state["sel_paquete_activo_key"] = pqs_keys[0] if pqs_keys else 1
+                
+            cur_pq_num = st.session_state["sel_paquete_activo_key"]
+            idx_pq_init = pqs_keys.index(cur_pq_num) if cur_pq_num in pqs_keys else 0
+
+            def format_tag_pq(p_num):
+                p_info = pqs_actuales[p_num]
+                ag_i = p_info["agente"]
+                n_t = len(p_info["terceros"])
+                s_t = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in p_info["terceros"].iterrows()])
+                dif = abs(float(ag_i["Total"]) - s_t)
+                es_listo = st.session_state.get(f"paquete_listo_{p_num}", False)
+                badge_pq = "✅ LISTO" if es_listo else ("🟢 Cuadrado $0.00" if dif < 1.0 else f"⚠️ Dif ${dif:,.0f}")
+                return f"📦 Paquete #{p_num} [{badge_pq}]: {ag_i['Proveedor'][:16]} ({ag_i['Factura']}) — Cobro: ${ag_i['Total']:,.0f} | {n_t} Terceros (${s_t:,.0f})"
+
+            # Barra de Acciones y Selección de Paquete Persistente
             c_top_pq1, c_top_pq2 = st.columns([2.5, 1])
             with c_top_pq1:
-                lista_pqs_titulos = []
-                for p_num, p_data in pqs_actuales.items():
-                    ag_t = p_data["agente"]
-                    n_terc = len(p_data["terceros"])
-                    s_terc = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in p_data["terceros"].iterrows()])
-                    tag_pq = f"📦 Paquete #{p_num}: {ag_t['Proveedor'][:16]} ({ag_t['Factura']}) — Cobro: ${ag_t['Total']:,.0f} | {n_terc} Facturas Terceros (${s_terc:,.0f})"
-                    lista_pqs_titulos.append(tag_pq)
-                    
-                sel_pq_idx = st.selectbox(
-                    "📦 Selecciona el Paquete de Importación que deseas revisar:",
-                    range(len(lista_pqs_titulos)),
-                    format_func=lambda i: lista_pqs_titulos[i],
-                    key="sel_paquete_importacion_activo"
+                pq_id_sel = st.selectbox(
+                    "📦 Selecciona el Paquete de Importación que deseas revisar o editar:",
+                    options=pqs_keys,
+                    index=idx_pq_init,
+                    format_func=format_tag_pq,
+                    key=f"sel_pq_box_{cur_pq_num}"
                 )
-                pq_id_sel = sel_pq_idx + 1
-                paquete_activo = pqs_actuales[pq_id_sel]
-                agente_actual = paquete_activo["agente"]
-                terceros_actual = paquete_activo["terceros"]
-                tot_agente_actual = float(agente_actual["Total"])
+                st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                
+            paquete_activo = pqs_actuales[pq_id_sel]
+            agente_actual = paquete_activo["agente"]
+            terceros_actual = paquete_activo["terceros"]
+            tot_agente_actual = float(agente_actual["Total"])
 
             with c_top_pq2:
                 st.write("")
                 st.write("")
-                if st.button("🪄 Re-calcular Auto-Empaquetado", key="btn_recalc_auto_pqs", help="Vuelve a calcular las combinaciones exactas de DHL + Agencia + Garaje para cada cobro de Euro"):
-                    pqs_re, _ = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all)
-                    st.session_state["paquetes_importacion"] = pqs_re
-                    st.success("¡Paquetes recalculados y separados!")
-                    st.rerun()
+                c_top_b1, c_top_b2 = st.columns(2)
+                with c_top_b1:
+                    if st.button("🪄 Re-calcular", key="btn_recalc_auto_pqs", help="Vuelve a calcular los paquetes"):
+                        pqs_re, _ = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all)
+                        st.session_state["paquetes_importacion"] = pqs_re
+                        st.session_state["sel_paquete_activo_key"] = 1
+                        st.success("¡Paquetes recalculados!")
+                        st.rerun()
+                with c_top_b2:
+                    if st.button("✅ Aprobar Cuadrados", key="btn_aprobar_todos_cuad", help="Marca como listos para contabilidad todos los paquetes cuadrados a $0.00"):
+                        for p_k, p_v in pqs_actuales.items():
+                            if p_v.get("diferencia", 999) < 1.0:
+                                st.session_state[f"paquete_listo_{p_k}"] = True
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        st.success("¡Paquetes cuadrados aprobados para contabilidad!")
+                        st.rerun()
 
             # Resumen visual del Paquete Seleccionado
             col_pq1, col_pq2 = st.columns([1.3, 2.5])
@@ -3241,12 +3354,28 @@ with tab_triangulacion:
                         <b>Proveedor:</b> {agente_actual['Proveedor']}<br>
                         <b>NIT:</b> {agente_actual['NIT Emisor']}<br>
                         <b>Factura:</b> {agente_actual['Factura']}<br>
-                        <b>Fecha:</b> {agente_actual['Fecha']}<br>
+                        <b>Fecha de Operación:</b> <span style="font-weight:bold; color:#0f172a;">{agente_actual['Fecha']}</span><br>
                         <b>Total Facturado:</b> <span style="font-size:18px; font-weight:bold; color:#b45309;">${tot_agente_actual:,.2f}</span><br>
                         <b>IVA Discriminado:</b> ${float(agente_actual.get('IVA', 0.0)):,.2f}
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
+
+                # Control para dejar listo este paquete para contabilidad
+                es_pq_listo = st.session_state.get(f"paquete_listo_{pq_id_sel}", False)
+                if not es_pq_listo:
+                    st.info(f"ℹ️ Cuando este paquete esté cuadrado, márcalo como listo para que pase a la contabilidad en su fecha (**{agente_actual['Fecha']}**).")
+                    if st.button(f"✅ Dejar Listo Paquete #{pq_id_sel} para Contabilidad", key=f"btn_marcar_listo_{pq_id_sel}", use_container_width=True):
+                        st.session_state[f"paquete_listo_{pq_id_sel}"] = True
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        st.success(f"¡Paquete #{pq_id_sel} listo para contabilidad!")
+                        st.rerun()
+                else:
+                    st.success(f"✅ **Paquete #{pq_id_sel} LISTO para Contabilidad** | Fecha: **{agente_actual['Fecha']}**")
+                    if st.button(f"↩️ Desmarcar Paquete #{pq_id_sel}", key=f"btn_desmarcar_listo_{pq_id_sel}", use_container_width=True):
+                        st.session_state[f"paquete_listo_{pq_id_sel}"] = False
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        st.rerun()
 
             with col_pq2:
                 st.markdown(f"##### Facturas de Terceros que Componen este Paquete #{pq_id_sel}:")
@@ -3359,6 +3488,7 @@ with tab_triangulacion:
                                 # 1. Retirar del paquete actual
                                 terceros_remanente = terceros_actual[terceros_actual["Factura"] != fac_nom_mover].copy()
                                 st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_remanente
+                                st.session_state["sel_paquete_activo_key"] = pq_id_sel
                                 
                                 # 2. Redirigir al destino
                                 if "Auto-Reubicar" in dest_sel and mejor_pq_sug is not None:
@@ -3418,6 +3548,7 @@ with tab_triangulacion:
                         fila_agregada = mapa_agregar[sel_para_agregar]
                         terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([fila_agregada])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
                         st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
                         st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel}!")
                         st.rerun()
 
@@ -3436,6 +3567,7 @@ with tab_triangulacion:
                     with c_btn_nd2:
                         if st.button(f"🔴 Enviar Faltante (${dif_faltante_prev:,.2f}) a No Deducibles (53950501)", key=f"btn_mandar_nd_{pq_id_sel}"):
                             st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
+                            st.session_state["sel_paquete_activo_key"] = pq_id_sel
                             st.success(f"¡Faltante de ${dif_faltante_prev:,.2f} enviado a la cuenta 53950501!")
                             st.rerun()
                 else:
@@ -3445,6 +3577,7 @@ with tab_triangulacion:
                     with c_msg_nd2:
                         if st.button("↩️ Deshacer envío a No Deducibles", key=f"btn_undo_nd_{pq_id_sel}"):
                             st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
+                            st.session_state["sel_paquete_activo_key"] = pq_id_sel
                             st.rerun()
 
             # CALCULAR ASIENTO CONTABLE CUADRADO DEL PAQUETE SELECCIONADO
@@ -3623,21 +3756,43 @@ with tab_siigo:
         # FILTRO DE PROTECCIÓN: Excluir facturas rojas (ya causadas en Siigo) y facturas que van por triangulación aduanera
         n_rojas = len(df_full[df_full.get("Ya Registrada", False) == True])
         
-        # Facturas que ya están en un paquete de triangulación aduanera
+        # 1. Facturas explícitamente excluidas de contabilidad (No Contabilizar)
+        excluidas_set = st.session_state.get("facturas_no_contabilizar", set())
+        n_excluidas = len(df_full[df_full["Factura"].isin(excluidas_set) | (df_full.get("No Contabilizar", False) == True)])
+        
+        # 2. Facturas que ya están en un paquete de triangulación aduanera
         facs_en_pqs_import = []
-        if "paquetes_importacion" in st.session_state:
-            for _, p_val in st.session_state["paquetes_importacion"].items():
+        pqs_actuales_siigo = st.session_state.get("paquetes_importacion", {})
+        if pqs_actuales_siigo:
+            for _, p_val in pqs_actuales_siigo.items():
                 if isinstance(p_val, dict) and "terceros" in p_val and not p_val["terceros"].empty:
                     facs_en_pqs_import.extend(p_val["terceros"]["Factura"].tolist())
                     
         df_p = df_full[
             (df_full.get("Ya Registrada", False) == False) & 
+            (df_full.get("No Contabilizar", False) == False) &
+            (~df_full["Factura"].isin(excluidas_set)) &
             (~df_full["Factura"].isin(facs_en_pqs_import)) &
             (~((df_full.get("Es Aduanera", False) == True) & (df_full.get("Grupo Importación", "") != "")))
         ].copy()
         
         if n_rojas > 0:
-            st.info(f"🛡️ **Protección contra duplicados:** Se excluyeron {n_rojas} facturas marcadas en rojo que ya estaban causadas en Siigo. Solo se están exportando las facturas nuevas.")
+            st.info(f"🛡️ **Protección contra duplicados:** Se excluyeron {n_rojas} facturas marcadas en rojo que ya estaban causadas en Siigo.")
+        if n_excluidas > 0:
+            st.warning(f"🚫 **Facturas Excluidas:** Se excluyeron {n_excluidas} facturas marcadas como **'NO CONTABILIZAR'**.")
+            
+        # Paquetes de triangulación listos para llevar a contabilidad en su fecha
+        pqs_listos_siigo = {k: v for k, v in pqs_actuales_siigo.items() if st.session_state.get(f"paquete_listo_{k}", False)}
+        
+        c_pqs_inc1, c_pqs_inc2 = st.columns([2.5, 1.5])
+        with c_pqs_inc1:
+            inc_pqs_listos = st.checkbox(
+                f"🔀 **Llevar a la contabilidad {len(pqs_listos_siigo)} Paquete(s) de Triangulación LISTO(S)**",
+                value=True if pqs_listos_siigo else False,
+                help="Inserta los asientos contables de los paquetes de importación listos en la planilla oficial de Siigo, cada uno en su fecha exacta de operación con partida doble cuadrada."
+            )
+        with c_pqs_inc2:
+            st.caption(f"Paquetes listos: **{len(pqs_listos_siigo)}** de **{len(pqs_actuales_siigo)}** totales.")
             
         wb = openpyxl.Workbook()
         
@@ -3748,6 +3903,81 @@ with tab_siigo:
             ])
             fila_r += 1
             
+        # 2.B AGREGAR A CONTABILIDAD CADA PAQUETE DE TRIANGULACIÓN LISTO EN SU FECHA EXACTA
+        if inc_pqs_listos and pqs_listos_siigo:
+            cons_cruce_base = 1
+            if "cons_ini_nota" in locals() and cons_ini_nota:
+                try:
+                    cons_cruce_base = int(cons_ini_nota)
+                except Exception:
+                    cons_cruce_base = 1
+            elif "cons_ini_nc" in locals() and cons_ini_nc:
+                try:
+                    cons_cruce_base = int(cons_ini_nc)
+                except Exception:
+                    cons_cruce_base = 1
+                    
+            idx_pq_cruce = 0
+            for p_k, p_v in pqs_listos_siigo.items():
+                ag_item = p_v["agente"]
+                terc_items = p_v["terceros"]
+                fecha_op_raw = ag_item["Fecha"]
+                fecha_op_clean = normalizar_fecha_dian(fecha_op_raw)
+                enviar_nd = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
+                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd)
+                
+                cons_cruce_actual = cons_cruce_base + idx_pq_cruce
+                idx_pq_cruce += 1
+                
+                # Asiento formal en interfaz_siigo
+                for _, f_as in df_as_p.iterrows():
+                    cta_num = str(f_as["Código Cuenta"]).strip()
+                    nit_terc_clean = re.sub(r'\D', '', str(f_as["Tercero / NIT"]).split("-")[0])
+                    deb_val = float(f_as["Débito ($)"])
+                    cred_val = float(f_as["Crédito ($)"])
+                    desc_linea = f_as["Descripción Cuenta"][:40]
+                    
+                    ws_interfaz.append([
+                        14,  # Tipo de Comprobante: 14 (Nota de Contabilidad / Cruces)
+                        cons_cruce_actual,
+                        fecha_op_clean,
+                        "COP",
+                        1,
+                        cta_num,
+                        nit_terc_clean,
+                        0,
+                        "", "", "", "",
+                        ag_item.get("Prefijo", "IMP"),
+                        ag_item.get("Folio", str(ag_item.get("Factura", ""))),
+                        1,
+                        fecha_op_clean,
+                        "", "", "",
+                        desc_linea,
+                        "",
+                        deb_val,
+                        cred_val,
+                        f"Cruce Importacion Pq #{p_k} {ag_item['Proveedor'][:15]}",
+                        0.0,
+                        0.0,
+                        ""
+                    ])
+                    
+                # Registro en matriz_captura
+                ws_matriz.append([
+                    14, cons_cruce_actual, fecha_op_clean,
+                    re.sub(r'\D', '', str(ag_item["NIT Emisor"])),
+                    ag_item.get("Prefijo", "IMP"),
+                    ag_item.get("Folio", str(ag_item.get("Factura", ""))),
+                    f"Cruce Importación Pq #{p_k} {ag_item['Proveedor'][:20]}",
+                    "Cruce Triangulación",
+                    "22050501",
+                    float(ag_item.get("Base", 0.0)),
+                    float(ag_item.get("IVA", 0.0)),
+                    0.0, 0.0, 0.0,
+                    "22050501"
+                ])
+                fila_r += 1
+                
         # 3. Hoja Parametrización
         ws_params = wb.create_sheet(title="Parametrización")
         ws_params.append(["Tipo Comprobante", "", "Impuesto", "Siigo_ID", "Tarifa", "Venta", "Compra", "Dev_Venta", "Dev_Compra"])
