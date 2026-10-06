@@ -616,7 +616,104 @@ def analizar_estado_filas_excel(excel_bytes):
         
     return estados
 
-def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_solo_cxp=False):
+def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
+    """Genera el asiento contable exacto de una factura tal como se calcula en la Hoja 2 (Auditoría)."""
+    asiento_filas = []
+    es_nc = "Devolucion" in str(fac_sel.get("Operacion", ""))
+    asume_ret = bool(fac_sel.get("Impuestos Asumidos", False))
+    cta_cxp_usar = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
+    cta_p = str(fac_sel.get("Cta Principal") or "14650501").strip()
+    cta_iva = str(fac_sel.get("Cta IVA") or "24081501").strip()
+    
+    base_val = float(fac_sel.get("Base", 0.0))
+    iva_val = float(fac_sel.get("IVA", 0.0))
+    tot_val = float(fac_sel.get("Total", 0.0))
+    rfte_val = float(fac_sel.get("ReteFuente", 0.0))
+    rica_val = float(fac_sel.get("ReteICA", 0.0))
+    
+    # 1. Base / Costo
+    asiento_filas.append({
+        "Código Cuenta": cta_p,
+        "Descripción Cuenta": f"{fac_sel.get('Categoría', 'Gasto/Costo')} - {str(fac_sel.get('Proveedor', ''))[:25]}",
+        "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+        "Débito ($)": 0.0 if es_nc else base_val,
+        "Crédito ($)": base_val if es_nc else 0.0
+    })
+    
+    # 2. IVA Descontable
+    if iva_val > 0:
+        asiento_filas.append({
+            "Código Cuenta": cta_iva,
+            "Descripción Cuenta": f"IVA Descontable (Base: ${base_val:,.0f})",
+            "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+            "Débito ($)": 0.0 if es_nc else iva_val,
+            "Crédito ($)": iva_val if es_nc else 0.0
+        })
+        
+    tot_ret = round(rfte_val + rica_val, 2)
+    
+    if asume_ret:
+        if tot_ret > 0:
+            asiento_filas.append({
+                "Código Cuenta": "53152001",
+                "Descripción Cuenta": "Retenciones Asumidas (Impuestos Asumidos Aduana)",
+                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+                "Débito ($)": tot_ret,
+                "Crédito ($)": 0.0
+            })
+        if rfte_val > 0 and fac_sel.get("Cta ReteFuente"):
+            asiento_filas.append({
+                "Código Cuenta": str(fac_sel.get("Cta ReteFuente")),
+                "Descripción Cuenta": "ReteFuente Practicada",
+                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+                "Débito ($)": 0.0,
+                "Crédito ($)": rfte_val
+            })
+        if rica_val > 0 and fac_sel.get("Cta ReteICA"):
+            asiento_filas.append({
+                "Código Cuenta": str(fac_sel.get("Cta ReteICA")),
+                "Descripción Cuenta": "Retención ICA Practicada",
+                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+                "Débito ($)": 0.0,
+                "Crédito ($)": rica_val
+            })
+        saldo_cxp = round(base_val + iva_val, 2)
+        asiento_filas.append({
+            "Código Cuenta": cta_cxp_usar,
+            "Descripción Cuenta": f"CxP Proveedor/Agente - Fac {fac_sel.get('Factura', '')}",
+            "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+            "Débito ($)": saldo_cxp if es_nc else 0.0,
+            "Crédito ($)": 0.0 if es_nc else saldo_cxp
+        })
+    else:
+        if rfte_val > 0 and fac_sel.get("Cta ReteFuente"):
+            asiento_filas.append({
+                "Código Cuenta": str(fac_sel.get("Cta ReteFuente")),
+                "Descripción Cuenta": "ReteFuente Practicada",
+                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+                "Débito ($)": 0.0,
+                "Crédito ($)": rfte_val
+            })
+        if rica_val > 0 and fac_sel.get("Cta ReteICA"):
+            asiento_filas.append({
+                "Código Cuenta": str(fac_sel.get("Cta ReteICA")),
+                "Descripción Cuenta": "Retención ICA Practicada",
+                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+                "Débito ($)": 0.0,
+                "Crédito ($)": rica_val
+            })
+        saldo_neto = round(base_val + iva_val - tot_ret, 2)
+        asiento_filas.append({
+            "Código Cuenta": cta_cxp_usar,
+            "Descripción Cuenta": f"CxP Proveedor/Agente - Fac {fac_sel.get('Factura', '')}",
+            "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+            "Débito ($)": saldo_neto if es_nc else 0.0,
+            "Crédito ($)": 0.0 if es_nc else saldo_neto
+        })
+        
+    return pd.DataFrame(asiento_filas)
+
+def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_hoja2=False, enviar_a_solo_cxp=False):
     """
     Calcula el asiento contable de partida doble para un paquete de importación triangulado:
     1. Débito a CxP Terceros (22050505/23359501) por el Saldo por Pagar real (Base + IVA, ej. .651.939).
@@ -765,11 +862,13 @@ def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_d
                 "Crédito ($)": 0.0
             })
             diferencia_no_deducible = 0.0
-        elif enviar_a_solo_cxp:
-            # Opción 2: Tener en cuenta solo la cuenta por pagar (CxP 22050505)
+        elif enviar_a_hoja2 or enviar_a_solo_cxp:
+            # Opción 2: Dejar contabilización como en la Hoja 2 (trae la cuenta principal de costo/gasto asignada en Hoja 2)
+            cta_h2_ag = str(agente_row.get("Cta Principal") or CUENTA_IMPORTACION_TRANSITO).strip()
+            cat_h2_ag = str(agente_row.get("Categoría") or "Gasto Importación / Agenciamiento").strip()
             asiento.append({
-                "Código Cuenta": CUENTA_CXP_AGENCIA_EXTERIOR,
-                "Descripción Cuenta": f"Cruce Pasivo CxP Agente (Fac {agente_row.get('Factura', '')})",
+                "Código Cuenta": cta_h2_ag,
+                "Descripción Cuenta": f"Contabilización Hoja 2: {cat_h2_ag} (Fac {agente_row.get('Factura', '')})",
                 "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
                 "Débito ($)": diferencia_faltante,
                 "Crédito ($)": 0.0
@@ -3639,70 +3738,94 @@ with tab_triangulacion:
                         st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel}!")
                         st.rerun()
 
-            # 3. BOTONES CLAVE DE CONTABILIZACIÓN: MERCANCÍAS EN TRÁNSITO (14650501) VS SOLO CUENTA POR PAGAR
+            # 3. BOTONES CLAVE DE CONTABILIZACIÓN: MERCANCÍAS EN TRÁNSITO VS DEJAR CONTABILIZACIÓN COMO LA HOJA DOS
             enviar_gp_activo = st.session_state.get(f"enviar_gp_pq_{pq_id_sel}", False)
-            enviar_cxp_activo = st.session_state.get(f"enviar_cxp_pq_{pq_id_sel}", False)
+            enviar_h2_activo = st.session_state.get(f"enviar_h2_pq_{pq_id_sel}", False)
             enviar_nd_activo = st.session_state.get(f"enviar_nd_pq_{pq_id_sel}", False)
             
             # Pre-cálculo para conocer el saldo o faltante
-            df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_solo_cxp=False)
+            df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_hoja2=False)
             
             st.markdown(f"""
-            <div style="background:#f8fafc; border:2px solid #0284c7; border-radius:8px; padding:16px; margin:14px 0;">
-                <h4 style="margin:0 0 6px 0; color:#0369a1;">⚖️ Destino Contable del Paquete #{pq_id_sel} (Cobro {agente_actual['Proveedor']}):</h4>
+            <div style="background:#f8fafc; border:2px solid #0070ba; border-radius:8px; padding:16px; margin:14px 0;">
+                <h4 style="margin:0 0 6px 0; color:#0070ba;">⚖️ Tratamiento Contable para el Paquete #{pq_id_sel} (Cobro {agente_actual['Proveedor']}):</h4>
                 <p style="margin:0 0 10px 0; font-size:13.5px; color:#334155;">
-                    Elige el tratamiento contable para cuadrar este paquete en su fecha de operación (<b>{agente_actual['Fecha']}</b>):
+                    Selecciona cómo deseas registrar este paquete en la fecha de operación (<b>{agente_actual['Fecha']}</b>):
                 </p>
             </div>
             """, unsafe_allow_html=True)
             
-            c_btn_mt, c_btn_cxp, c_btn_nd = st.columns([1.5, 1.6, 1.2])
+            c_btn_mt, c_btn_h2, c_btn_nd = st.columns([1.6, 1.8, 1.1])
             
             with c_btn_mt:
-                st.markdown("<b style='color:#0284c7;'>📦 Opción 1: Mercancía en Tránsito</b><br><span style='font-size:12px; color:#475569;'>Imputa el valor directamente al costo de importación (Cta 14650501):</span>", unsafe_allow_html=True)
-                lbl_btn_mt = f"📦 Mercancías en Tránsito (14650501) (${dif_faltante_prev:,.2f})" if dif_faltante_prev > 0.05 else "📦 Mercancías en Tránsito (14650501)"
+                st.markdown("<b style='color:#0284c7;'>📦 Opción 1: Mercancías en Tránsito</b><br><span style='font-size:12px; color:#475569;'>Envía el valor directamente a Inventarios en Tránsito (Cta 14650501):</span>", unsafe_allow_html=True)
+                lbl_btn_mt = f"📦 Mercancías en Tránsito (14650501)" if dif_faltante_prev <= 0.05 else f"📦 Mercancías en Tránsito (${dif_faltante_prev:,.2f})"
                 if st.button(lbl_btn_mt, key=f"btn_exact_mt_{pq_id_sel}", type="primary" if enviar_gp_activo else "secondary", use_container_width=True):
                     st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = True
-                    st.session_state[f"enviar_cxp_pq_{pq_id_sel}"] = False
+                    st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
                     st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
                     st.session_state["sel_paquete_activo_key"] = pq_id_sel
                     st.success("¡Asignado a Mercancías en Tránsito (14650501)!")
                     st.rerun()
                     
-            with c_btn_cxp:
-                st.markdown("<b style='color:#0f766e;'>🏛️ Opción 2: Solo Cuenta por Pagar</b><br><span style='font-size:12px; color:#475569;'>Deja la causación de la hoja 2 y solo cruza la cuenta por pagar:</span>", unsafe_allow_html=True)
-                lbl_btn_cxp = f"🏛️ Tener en cuenta solo la Cuenta por Pagar"
-                if st.button(lbl_btn_cxp, key=f"btn_exact_cxp_{pq_id_sel}", type="primary" if enviar_cxp_activo else "secondary", use_container_width=True):
-                    st.session_state[f"enviar_cxp_pq_{pq_id_sel}"] = True
+            with c_btn_h2:
+                st.markdown("<b style='color:#16a34a;'>📋 Opción 2: Como en la Hoja 2</b><br><span style='font-size:12px; color:#475569;'>Trae y deja la contabilización exactamente como en la Hoja 2 para validar:</span>", unsafe_allow_html=True)
+                lbl_btn_h2 = "📋 Dejar Contabilización como la Hoja Dos"
+                if st.button(lbl_btn_h2, key=f"btn_exact_h2_{pq_id_sel}", type="primary" if enviar_h2_activo else "secondary", use_container_width=True):
+                    st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = True
                     st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
                     st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
                     st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                    st.success("¡Asignado a Cruce de Cuenta por Pagar!")
+                    st.success("¡Contabilización de la Hoja 2 traída con éxito para validación!")
                     st.rerun()
                     
             with c_btn_nd:
-                st.markdown("<b style='color:#b91c1c;'>🔴 Opción 3: No Deducibles</b><br><span style='font-size:12px; color:#475569;'>Si es diferencia sin factura DIAN:</span>", unsafe_allow_html=True)
-                if st.button(f"🔴 No Deducibles (53950501)", key=f"btn_exact_nd_{pq_id_sel}", type="primary" if enviar_nd_activo else "secondary", use_container_width=True):
+                st.markdown("<b style='color:#b91c1c;'>🔴 Opción 3: No Deducibles</b><br><span style='font-size:12px; color:#475569;'>Diferencia sin soporte DIAN:</span>", unsafe_allow_html=True)
+                if st.button("🔴 No Deducibles (53950501)", key=f"btn_exact_nd_{pq_id_sel}", type="primary" if enviar_nd_activo else "secondary", use_container_width=True):
                     st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
                     st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
-                    st.session_state[f"enviar_cxp_pq_{pq_id_sel}"] = False
+                    st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
                     st.session_state["sel_paquete_activo_key"] = pq_id_sel
                     st.success("¡Enviado a Gastos No Deducibles (53950501)!")
                     st.rerun()
                     
             if enviar_gp_activo:
-                st.info(f"✅ **Tratamiento Activo:** Se imputaron **${dif_faltante_prev:,.2f}** a **Mercancías en Tránsito (Cuenta 14650501)** como costo directo del inventario.")
-            elif enviar_cxp_activo:
-                st.info(f"✅ **Tratamiento Activo:** Se tiene en cuenta **Únicamente la Cuenta por Pagar** cruzando el pasivo contra {agente_actual['Proveedor']} y manteniendo la causación original.")
+                st.info(f"✅ **Tratamiento Activo:** Se enviaron **${dif_faltante_prev:,.2f}** a **Mercancías en Tránsito (Cuenta 14650501)** como costo directo de inventario.")
+            elif enviar_h2_activo:
+                st.success(f"✅ **Tratamiento Activo:** Se trajo la contabilización **exactamente como en la Hoja 2** ({agente_actual.get('Categoría', 'Gasto')} Cta {agente_actual.get('Cta Principal', '14650501')}) para que la valides y apruebes.")
             elif enviar_nd_activo:
-                st.info(f"✅ **Tratamiento Activo:** Se imputaron **${dif_faltante_prev:,.2f}** a **Gastos No Deducibles (Cuenta 53950501)**.")
+                st.info(f"✅ **Tratamiento Activo:** Se enviaron **${dif_faltante_prev:,.2f}** a **Gastos No Deducibles (Cuenta 53950501)**.")
+
+            # SECCIÓN ESPECÍFICA DE VALIDACIÓN Y APROBACIÓN DE CONTABILIZACIÓN DE HOJA 2
+            if enviar_h2_activo:
+                st.markdown(f"#### 🔍 Validación de la Contabilización Traída de la Hoja 2 (Factura {agente_actual['Factura']}):")
+                st.caption(f"Revisa el asiento contable tal como quedó registrado en la Hoja 2 para {agente_actual['Proveedor']}. Si estás de acuerdo, haz clic en el botón verde para aprobarlo y chulearlo:")
+                
+                df_asiento_h2_val = obtener_asiento_contable_hoja2(agente_actual, es_aduanero=True)
+                st.dataframe(
+                    df_asiento_h2_val.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                c_val_b1, c_val_b2 = st.columns([2.5, 1])
+                with c_val_b1:
+                    sum_d_h2 = df_asiento_h2_val["Débito ($)"].sum()
+                    sum_c_h2 = df_asiento_h2_val["Crédito ($)"].sum()
+                    st.success(f"⚖️ **Partida Doble Cuadrada:** Débito: **${sum_d_h2:,.2f}** | Crédito: **${sum_c_h2:,.2f}** | Diferencia: **$0.00**")
+                with c_val_b2:
+                    if st.button("✅ Aprobar y Dejar Listo (Chulear)", key=f"btn_aprobar_h2_directo_{pq_id_sel}", type="primary", use_container_width=True):
+                        st.session_state[f"paquete_listo_{pq_id_sel}"] = True
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        st.success(f"¡Paquete #{pq_id_sel} validado, aprobado y chuleado con éxito!")
+                        st.rerun()
 
             # CALCULAR ASIENTO CONTABLE CUADRADO DEL PAQUETE SELECCIONADO
             df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(
                 agente_actual, terceros_actual,
                 enviar_a_no_deducible=enviar_nd_activo,
                 enviar_a_gastos_propios=enviar_gp_activo,
-                enviar_a_solo_cxp=enviar_cxp_activo
+                enviar_a_hoja2=enviar_h2_activo
             )
 
             st.markdown(f"#### ⚖️ Asiento Contable del Paquete #{pq_id_sel}:")
@@ -3750,8 +3873,8 @@ with tab_triangulacion:
                 terc_items = g_v["terceros"]
                 enviar_nd_g = st.session_state.get(f"enviar_nd_pq_{g_k}", False)
                 enviar_gp_g = st.session_state.get(f"enviar_gp_pq_{g_k}", False)
-                enviar_cxp_g = st.session_state.get(f"enviar_cxp_pq_{g_k}", False)
-                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd_g, enviar_a_gastos_propios=enviar_gp_g, enviar_a_solo_cxp=enviar_cxp_g)
+                enviar_h2_g = st.session_state.get(f"enviar_h2_pq_{g_k}", False)
+                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd_g, enviar_a_gastos_propios=enviar_gp_g, enviar_a_hoja2=enviar_h2_g)
                 
                 # 1. Asiento de Control de Cruces (Partida Doble para Revisión)
                 for _, fila_as in df_as_p.iterrows():
@@ -4054,8 +4177,8 @@ with tab_siigo:
                 fecha_op_clean = normalizar_fecha_dian(fecha_op_raw)
                 enviar_nd = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
                 enviar_gp_p = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
-                enviar_cxp_p = st.session_state.get(f"enviar_cxp_pq_{p_k}", False)
-                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd, enviar_a_gastos_propios=enviar_gp_p, enviar_a_solo_cxp=enviar_cxp_p)
+                enviar_h2_p = st.session_state.get(f"enviar_h2_pq_{p_k}", False)
+                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd, enviar_a_gastos_propios=enviar_gp_p, enviar_a_hoja2=enviar_h2_p)
                 
                 cons_cruce_actual = cons_cruce_base + idx_pq_cruce
                 idx_pq_cruce += 1
