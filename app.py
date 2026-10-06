@@ -1173,13 +1173,13 @@ def extraer_valores_fiscales_texto_pdf(texto):
     if not texto: return datos
 
     # 1. Notas Finales (formato clave: valor)
-    m_nf_rfte = re.search(r' retefuente\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_rfte = re.search(r'retefuente\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_rfte: datos['retefuente'] = parse_num_co(m_nf_rfte.group(1))
 
-    m_nf_rica = re.search(r' reteica\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_rica = re.search(r'reteica\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_rica: datos['reteica'] = parse_num_co(m_nf_rica.group(1))
 
-    m_nf_riva = re.search(r' reteiva\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_riva = re.search(r'reteiva\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_riva: datos['reteiva'] = parse_num_co(m_nf_riva.group(1))
 
     # 2. Descuentos globales por retención sugerida si no vino en notas
@@ -4640,8 +4640,7 @@ with tab_triangulacion:
                         st.rerun()
 
             # Asiento contable del paquete
-    
-        df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(
+            df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(
                 agente_actual, terceros_actual,
                 enviar_a_no_deducible=enviar_nd_activo,
                 enviar_a_gastos_propios=enviar_gp_activo,
