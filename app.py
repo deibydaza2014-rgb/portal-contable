@@ -249,8 +249,10 @@ def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, e
     try:
         base_dir = get_empresa_trabajos_dir(empresa_dict)
         if not job_id:
-            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            job_id = f"job_{now_str}"
+            job_id = st.session_state.get("job_actual_id")
+            if not job_id:
+                now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                job_id = f"job_{now_str}"
             
         job_dir = os.path.join(base_dir, job_id)
         os.makedirs(job_dir, exist_ok=True)
@@ -1005,7 +1007,8 @@ REGIMENES_EMISORES_CONOCIDOS = {
     '860502609': 'O-13;O-15',   # DHL EXPRESS COLOMBIA LTDA (Gran Contribuyente y Autorretenedor)
     '800215775': 'O-13;O-15',   # SOCIEDAD PORTUARIA REGIONAL DE BUENAVENTURA S.A.
     '890304099': 'O-13;O-15',   # HOTELES ESTELAR S.A.
-    '830048268': 'O-13;O-15',   # SIIGO S.A.S.
+    '830048145': 'O-13;O-15',   # SIIGO S.A.S.
+    '830048268': 'O-48',        # EURO SHIPPING SERVICES S.A.S (Responsable de IVA / Código 23 - 48)
     '800153993': 'O-13;O-15',   # COMUNICACION CELULAR S.A. COMCEL / CLARO
     '860006376': 'O-13;O-15',   # PANAMERICANA LIBRERIA Y PAPELERIA S.A.
     '890900608': 'O-13;O-15',   # BANCOLOMBIA S.A.
@@ -1063,6 +1066,10 @@ def escanear_regimen_texto_pdf(texto, nit_emisor=None):
         if ne_clean in REGIMENES_EMISORES_CONOCIDOS:
             return REGIMENES_EMISORES_CONOCIDOS[ne_clean]
     
+    # 1.1 Si el texto corresponde a Euro Shipping Services, es O-48 (Responsable de IVA / Común)
+    if "EURO SHIPPING" in txt_norm or "830048268" in txt_norm:
+        return "O-48"
+
     # 2. Analizar Gran Contribuyente (O-13 / 0-13 / Grandes Contribuyentes)
     es_gc = False
     if re.search(r'\b[O0]-13\b', txt_norm):
@@ -2206,40 +2213,34 @@ with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", exp
                 help="Descarga un solo archivo con TODO (Excel, cálculos, retenciones y PDFs vinculados)."
             )
         
-        # 2. Uploader para restaurar desde un archivo ZIP de respaldo previo
+        # 2. Uploader para restaurar desde un archivo de respaldo previo (con botón de confirmación para evitar bucles)
         archivo_zip_restaurar = st.file_uploader(
-            "📥 Restaurar Sesión desde Archivo de Respaldo (.zip):",
-            type=["zip"],
-            key="upl_zip_restore_historial"
+            "📥 Restaurar Sesión desde Archivo de Respaldo (.indumaq / .zip):",
+            type=["indumaq", "zip"],
+            key="upl_zip_restore_historial",
+            help="Sube tu archivo de respaldo para restaurar exactamente donde lo dejaste."
         )
         if archivo_zip_restaurar is not None:
-            with st.spinner("Restaurando sesión completa desde el respaldo..."):
-                df_res, renom_res, orig_res, ex_b_res, ex_n_res, zip_res = importar_respaldo_sesion_zip(
-                    archivo_zip_restaurar.getvalue(), empresa
-                )
-                if df_res is not None:
-                    st.session_state["df_procesado"] = df_res
-                    st.session_state["dict_pdfs"] = renom_res or {}
-                    st.session_state["raw_uploaded_pdfs"] = orig_res or {}
-                    st.session_state["excel_bytes"] = ex_b_res
-                    st.session_state["excel_nombre"] = ex_n_res
-                    st.session_state["zip_pdfs"] = zip_res
-                    st.session_state["total_zip_pdfs"] = len(renom_res) if renom_res else 0
-                    
-                    # Guardar también en el disco local
-                    guardar_trabajo_en_historial(
-                        empresa, df_res,
-                        excel_bytes=ex_b_res,
-                        excel_nombre=ex_n_res,
-                        dict_pdfs_renombrados=renom_res,
-                        dict_pdfs_originales=orig_res,
-                        zip_bytes=zip_res
-                    )
-                    st.session_state["_sesion_auto_recuperada"] = f"Respaldo {archivo_zip_restaurar.name}"
-                    st.success(f"¡Sesión restaurada con éxito! Se recuperaron {len(df_res)} facturas y {len(renom_res)} PDFs.")
-                    st.rerun()
-                else:
-                    st.error("El archivo ZIP no contiene un respaldo válido de sesión contable.")
+            if st.button("🚀 Cargar este Respaldo en Pantalla", key="btn_confirmar_cargar_zip_historial", use_container_width=True):
+                with st.spinner("Restaurando sesión y cálculos..."):
+                    raw_b = archivo_zip_restaurar.getvalue()
+                    ok_r = restaurar_desde_respaldo_bytes(empresa, raw_b)
+                    if not ok_r:
+                        df_res, renom_res, orig_res, ex_b_res, ex_n_res, zip_res = importar_respaldo_sesion_zip(raw_b, empresa)
+                        if df_res is not None:
+                            st.session_state["df_procesado"] = df_res
+                            st.session_state["dict_pdfs"] = renom_res or {}
+                            st.session_state["raw_uploaded_pdfs"] = orig_res or {}
+                            st.session_state["excel_bytes"] = ex_b_res
+                            st.session_state["excel_nombre"] = ex_n_res
+                            st.session_state["zip_pdfs"] = zip_res
+                            st.session_state["total_zip_pdfs"] = len(renom_res) if renom_res else 0
+                            ok_r = True
+                    if ok_r:
+                        st.success(f"¡Sesión restaurada con éxito desde {archivo_zip_restaurar.name}!")
+                        st.rerun()
+                    else:
+                        st.error("No se pudo restaurar el archivo de respaldo.")
 
 st.markdown("---")
 
@@ -4544,15 +4545,15 @@ with tab_siigo:
             
             ws_matriz.append([
                 t_comp, cons, f_str, nit, pref, fac_num,
-                desc, op, cta_p, base, iva, rfte, rica, riva, cta_c
+                desc, op, cta_p, base, iva, r
+fte, rica, riva, cta_c
             ])
             
             r = fila_r
             # Línea 1: Base Imponible
             ws_interfaz.append([
                 f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
-                f"=matriz_captura!I{r}", f"=matriz_captura!D{r}", 0, "", "", "", 
-"", "", "", "", "", "", "", "",
+                f"=matriz_captura!I{r}", f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "", "", "", "",
                 f"=matriz_captura!G{r}", "",
                 f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r})',
                 f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r}, 0)',
