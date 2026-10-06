@@ -2943,39 +2943,40 @@ with tab_triangulacion:
     if "df_procesado" in st.session_state:
         df_total = st.session_state["df_procesado"]
         
-        # Identificar facturas del gremio aduanero / logístico y de importación
-        cond_aduanera = (
-            (df_total.get("Es Aduanera", False) == True) | 
-            (df_total.get("Grupo Importación", "").astype(str).str.strip() != "") | 
-            df_total["Proveedor"].str.upper().str.contains("EURO|TRADE|CARGO|ADUANA|DHL|PORTUARIA|ALMACENADORA|TERMINAL|CONSOLCARGO|LOGISTICA|LOGISTICS|TRANSPORTE|BODEGA|ALMACEN|DEPOSITO|MARITIMA|AEREA|FEDEX|UPS|SERVIENTREGA|DEPRISA|COORDINADORA|COLTRANS|COLMAS|HUBEMAR|TIBA|DSV|PANALPINA|KUEHNE|SCHENKER|BLUE LOGISTICS|AGUNSA|MEDITERRANEAN|MAERSK|HAPAG|SEABOARD|HAMBURG|CMA CGM|EVERGREEN|COSCO|ONE|YANG MING")
+        # Identificar ÚNICAMENTE facturas del gremio aduanero / logístico y de importación (Cero compras ordinarias/domésticas)
+        prov_upper = df_total["Proveedor"].astype(str).str.upper()
+        desc_upper = df_total.get("Descripcion", "").astype(str).str.upper()
+        grp_imp_str = df_total.get("Grupo Importación", "").astype(str).str.strip()
+        cta_cxp_str = df_total.get("Cuenta Pasivo Especifica", "").astype(str).str.strip()
+        cta_p_str = df_total.get("Cta Principal", "").astype(str).str.strip()
+
+        # 1. Facturas explícitamente marcadas en Excel con Grupo de Importación o clasificadas como aduaneras
+        cond_grp = (grp_imp_str != "") & (~grp_imp_str.isin(["nan", "None", "0", "0.0"]))
+        cond_es_adu = df_total.get("Es Aduanera", False) == True
+
+        # 2. Cuentas contables específicas de importación / fletes DHL / agencias aduaneras
+        cond_ctas = cta_cxp_str.isin(["22050505", "23359501", "14650501"]) | (cta_p_str == "14650501")
+
+        # 3. Proveedores específicos de Comercio Exterior / Logística Internacional / Aduana / Puertos / Fletes
+        REGEX_IMPORTACION = (
+            r"EURO\s*SHIPPING|TRADE\s*GLOBAL|CONSOLCARGO|BLUE\s*LOGISTICS|"
+            r"KUEHNE|PANALPINA|DSV|EXPEDITORS|TIBA|HUBEMAR|SCHENKER|COLTRANS|COLMAS|"
+            r"DHL|FEDEX|UPS|CARGO|ADUANA|ADUANERA|AGENCIAMIENTO|PORTUARIA|PUERTO\s*BAHIA|"
+            r"CONTECAR|SPRC|SPB|COMPAS|ALPOPULAR|ALMAVIVA|RANSA|ALMACENADORA|"
+            r"MAERSK|HAPAG|SEABOARD|HAMBURG|CMA\s*CGM|EVERGREEN|COSCO|YANG\s*MING"
         )
+        cond_prov = prov_upper.str.contains(REGEX_IMPORTACION, regex=True, na=False)
 
-        c_inc1, c_inc2 = st.columns([2.8, 1.2])
-        with c_inc1:
-            incluir_todas_blancas = st.checkbox(
-                "⚪ **Relacionar también facturas NO contabilizadas (Pendientes / Blancas)** junto con las ya contabilizadas (🔴)",
-                value=True,
-                help="Cruza y relaciona tanto facturas de terceros ya causadas en Siigo (rojas) como las que aún no están contabilizadas (blancas), respetando fechas cronológicas de Enero a Diciembre y valor concorde al cobro del Agente.",
-                key="chk_triang_inc_todas_blancas"
-            )
-        with c_inc2:
-            solo_logistica_blancas = st.checkbox(
-                "Filtrar solo logísticas en pendientes",
-                value=False,
-                help="Si no se marca, cualquier factura pendiente libre podrá entrar a conciliar los cobros de Euro/Trade.",
-                key="chk_triang_solo_logistica_blancas"
-            )
+        # 4. Descripción que evidencia gastos de importación / desaduanamiento
+        REGEX_DESC_IMPORT = (
+            r"IMPORTACI[OÓ]N|AGENCIAMIENTO|ARANCEL|DESADUANAMIENTO|NACIONALIZACI[OÓ]N|"
+            r"BODEGAJE\s*PUERTO|ALMACENAJE\s*ADUANERO|MANDATO\s*ADUANERO|FLETE\s*INTERNACIONAL"
+        )
+        cond_desc = desc_upper.str.contains(REGEX_DESC_IMPORT, regex=True, na=False)
 
-        if incluir_todas_blancas:
-            if solo_logistica_blancas:
-                cond_pool = cond_aduanera
-            else:
-                # Incluye tanto facturas aduaneras como cualquier factura pendiente (blanca)
-                cond_pool = cond_aduanera | (df_total.get("Ya Registrada", False) == False)
-        else:
-            cond_pool = cond_aduanera
-
-        df_adu = df_total[cond_pool].copy()
+        # Condición estricta: ÚNICAMENTE facturas relacionadas con la importación (rojas y blancas de importación)
+        cond_aduanera = cond_grp | cond_es_adu | cond_ctas | cond_prov | cond_desc
+        df_adu = df_total[cond_aduanera].copy()
         
         # Configuración dinámica y extensible de Agentes Coordinadores (Forwarders)
         AGENTES_COORDINADORES_BASE = ["EURO SHIPPING", "TRADE GLOBAL", "CONSOLCARGO", "BLUE LOGISTICS", "KUEHNE", "PANALPINA", "DSV", "EXPEDITORS", "TIBA", "HUBEMAR"]
@@ -3395,7 +3396,7 @@ with tab_triangulacion:
                 # Facturas de terceros disponibles (tanto de df_terceros_all como de df_total no asignadas)
                 opciones_agregar = []
                 mapa_agregar = {}
-                cands_disp_agregar = pd.concat([df_terceros_all, df_total]).drop_duplicates(subset=["Factura"])
+                cands_disp_agregar = df_terceros_all.copy()
                 
                 for _, tr_cand in cands_disp_agregar.iterrows():
                     f_cand_num = tr_cand["Factura"]
