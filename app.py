@@ -4639,9 +4639,9 @@ with tab_triangulacion:
                         st.success(f"¡Paquete #{pq_id_sel} validado, aprobado y llevado a la Hoja 2 para la planilla oficial!")
                         st.rerun()
 
-            # CALCULAR ASIENTO CONTABLE CUADRAD
-O DEL PAQUETE SELECCIONADO
-            df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(
+            # Asiento contable del paquete
+    
+        df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(
                 agente_actual, terceros_actual,
                 enviar_a_no_deducible=enviar_nd_activo,
                 enviar_a_gastos_propios=enviar_gp_activo,
