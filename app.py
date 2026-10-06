@@ -616,7 +616,7 @@ def analizar_estado_filas_excel(excel_bytes):
         
     return estados
 
-def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_deducible=False):
+def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_solo_cxp=False):
     """
     Calcula el asiento contable de partida doble para un paquete de importación triangulado:
     1. Débito a CxP Terceros (22050505/23359501) por el Saldo por Pagar real (Base + IVA, ej. .651.939).
@@ -749,27 +749,53 @@ def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_d
             "Crédito ($)": 0.0
         })
 
-    # Calcular la diferencia no deducible sin factura DIAN (Cuenta 53950501)
+    # Calcular la diferencia no cubierta por terceros
     suma_justificada = suma_cxp_canceladas + suma_ret_asumidas + suma_costo_blancas + suma_iva_blancas + iva_agente
-    diferencia_no_deducible = round(tot_agente - suma_justificada, 2)
+    diferencia_faltante = round(tot_agente - suma_justificada, 2)
     
-    if diferencia_no_deducible > 0.01 and enviar_a_no_deducible:
-        asiento.append({
-            "Código Cuenta": CUENTA_NO_DEDUCIBLE,
-            "Descripción Cuenta": f"Gastos No Deducibles Importación (Diferencia sin soporte DIAN)",
-            "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-            "Débito ($)": diferencia_no_deducible,
-            "Crédito ($)": 0.0
-        })
-    elif diferencia_no_deducible < -0.01:
+    diferencia_no_deducible = 0.0
+    if diferencia_faltante > 0.01:
+        if enviar_a_gastos_propios:
+            # Opción 1: Mercancías en Tránsito (14650501)
+            asiento.append({
+                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                "Descripción Cuenta": f"Mercancías en Tránsito / Base Agente (Fac {agente_row.get('Factura', '')})",
+                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                "Débito ($)": diferencia_faltante,
+                "Crédito ($)": 0.0
+            })
+            diferencia_no_deducible = 0.0
+        elif enviar_a_solo_cxp:
+            # Opción 2: Tener en cuenta solo la cuenta por pagar (CxP 22050505)
+            asiento.append({
+                "Código Cuenta": CUENTA_CXP_AGENCIA_EXTERIOR,
+                "Descripción Cuenta": f"Cruce Pasivo CxP Agente (Fac {agente_row.get('Factura', '')})",
+                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                "Débito ($)": diferencia_faltante,
+                "Crédito ($)": 0.0
+            })
+            diferencia_no_deducible = 0.0
+        elif enviar_a_no_deducible:
+            diferencia_no_deducible = diferencia_faltante
+            asiento.append({
+                "Código Cuenta": CUENTA_NO_DEDUCIBLE,
+                "Descripción Cuenta": f"Gastos No Deducibles Importación (Diferencia sin soporte DIAN)",
+                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+                "Débito ($)": diferencia_no_deducible,
+                "Crédito ($)": 0.0
+            })
+        else:
+            diferencia_no_deducible = diferencia_faltante
+    elif diferencia_faltante < -0.01:
         # En caso de que la suma de terceros exceda ligeramente al agente por redondeo
         asiento.append({
             "Código Cuenta": CUENTA_NO_DEDUCIBLE,
             "Descripción Cuenta": f"Ajuste por Diferencia de Cuadre Importación",
             "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
             "Débito ($)": 0.0,
-            "Crédito ($)": abs(diferencia_no_deducible)
+            "Crédito ($)": abs(diferencia_faltante)
         })
+        diferencia_no_deducible = 0.0
 
     # Crédito total al Agente Aduanero (Euro Shipping / Trade Global) por el 100% de su factura
     asiento.append({
@@ -3613,36 +3639,71 @@ with tab_triangulacion:
                         st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel}!")
                         st.rerun()
 
-            # 3. VERIFICACIÓN DE FALTANTE Y BOTÓN DE ENVÍO A NO DEDUCIBLE
+            # 3. BOTONES CLAVE DE CONTABILIZACIÓN: MERCANCÍAS EN TRÁNSITO (14650501) VS SOLO CUENTA POR PAGAR
+            enviar_gp_activo = st.session_state.get(f"enviar_gp_pq_{pq_id_sel}", False)
+            enviar_cxp_activo = st.session_state.get(f"enviar_cxp_pq_{pq_id_sel}", False)
             enviar_nd_activo = st.session_state.get(f"enviar_nd_pq_{pq_id_sel}", False)
             
-            # Pre-cálculo para conocer si falta dinero
-            df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False)
+            # Pre-cálculo para conocer el saldo o faltante
+            df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_solo_cxp=False)
             
-            if dif_faltante_prev > 0.05:
-                if not enviar_nd_activo:
-                    st.warning(f"⚠️ **Faltan ${dif_faltante_prev:,.2f}** para completar el cobro del Agente ({agente_actual['Proveedor']} por ${tot_agente_actual:,.2f}). Faltan facturas de terceros (DHL, Cargo Aduana o Garaje) por aparecer o vincular.")
-                    c_btn_nd1, c_btn_nd2 = st.columns([2.2, 1.2])
-                    with c_btn_nd1:
-                        st.caption("💡 Si ya no queda de otra porque el agente no entregó soporte o no hay más facturas, presiona el botón para cerrar el cruce mandando la diferencia a No Deducibles:")
-                    with c_btn_nd2:
-                        if st.button(f"🔴 Enviar Faltante (${dif_faltante_prev:,.2f}) a No Deducibles (53950501)", key=f"btn_mandar_nd_{pq_id_sel}"):
-                            st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
-                            st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                            st.success(f"¡Faltante de ${dif_faltante_prev:,.2f} enviado a la cuenta 53950501!")
-                            st.rerun()
-                else:
-                    c_msg_nd1, c_msg_nd2 = st.columns([2.5, 1])
-                    with c_msg_nd1:
-                        st.info(f"ℹ️ **Cruce Cerrado con No Deducibles:** Se enviaron **${dif_faltante_prev:,.2f}** a la cuenta `53950501` (Gastos No Deducibles) al no existir soporte DIAN.")
-                    with c_msg_nd2:
-                        if st.button("↩️ Deshacer envío a No Deducibles", key=f"btn_undo_nd_{pq_id_sel}"):
-                            st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
-                            st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                            st.rerun()
+            st.markdown(f"""
+            <div style="background:#f8fafc; border:2px solid #0284c7; border-radius:8px; padding:16px; margin:14px 0;">
+                <h4 style="margin:0 0 6px 0; color:#0369a1;">⚖️ Destino Contable del Paquete #{pq_id_sel} (Cobro {agente_actual['Proveedor']}):</h4>
+                <p style="margin:0 0 10px 0; font-size:13.5px; color:#334155;">
+                    Elige el tratamiento contable para cuadrar este paquete en su fecha de operación (<b>{agente_actual['Fecha']}</b>):
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            c_btn_mt, c_btn_cxp, c_btn_nd = st.columns([1.5, 1.6, 1.2])
+            
+            with c_btn_mt:
+                st.markdown("<b style='color:#0284c7;'>📦 Opción 1: Mercancía en Tránsito</b><br><span style='font-size:12px; color:#475569;'>Imputa el valor directamente al costo de importación (Cta 14650501):</span>", unsafe_allow_html=True)
+                lbl_btn_mt = f"📦 Mercancías en Tránsito (14650501) (${dif_faltante_prev:,.2f})" if dif_faltante_prev > 0.05 else "📦 Mercancías en Tránsito (14650501)"
+                if st.button(lbl_btn_mt, key=f"btn_exact_mt_{pq_id_sel}", type="primary" if enviar_gp_activo else "secondary", use_container_width=True):
+                    st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = True
+                    st.session_state[f"enviar_cxp_pq_{pq_id_sel}"] = False
+                    st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
+                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                    st.success("¡Asignado a Mercancías en Tránsito (14650501)!")
+                    st.rerun()
+                    
+            with c_btn_cxp:
+                st.markdown("<b style='color:#0f766e;'>🏛️ Opción 2: Solo Cuenta por Pagar</b><br><span style='font-size:12px; color:#475569;'>Deja la causación de la hoja 2 y solo cruza la cuenta por pagar:</span>", unsafe_allow_html=True)
+                lbl_btn_cxp = f"🏛️ Tener en cuenta solo la Cuenta por Pagar"
+                if st.button(lbl_btn_cxp, key=f"btn_exact_cxp_{pq_id_sel}", type="primary" if enviar_cxp_activo else "secondary", use_container_width=True):
+                    st.session_state[f"enviar_cxp_pq_{pq_id_sel}"] = True
+                    st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
+                    st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
+                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                    st.success("¡Asignado a Cruce de Cuenta por Pagar!")
+                    st.rerun()
+                    
+            with c_btn_nd:
+                st.markdown("<b style='color:#b91c1c;'>🔴 Opción 3: No Deducibles</b><br><span style='font-size:12px; color:#475569;'>Si es diferencia sin factura DIAN:</span>", unsafe_allow_html=True)
+                if st.button(f"🔴 No Deducibles (53950501)", key=f"btn_exact_nd_{pq_id_sel}", type="primary" if enviar_nd_activo else "secondary", use_container_width=True):
+                    st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
+                    st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
+                    st.session_state[f"enviar_cxp_pq_{pq_id_sel}"] = False
+                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                    st.success("¡Enviado a Gastos No Deducibles (53950501)!")
+                    st.rerun()
+                    
+            if enviar_gp_activo:
+                st.info(f"✅ **Tratamiento Activo:** Se imputaron **${dif_faltante_prev:,.2f}** a **Mercancías en Tránsito (Cuenta 14650501)** como costo directo del inventario.")
+            elif enviar_cxp_activo:
+                st.info(f"✅ **Tratamiento Activo:** Se tiene en cuenta **Únicamente la Cuenta por Pagar** cruzando el pasivo contra {agente_actual['Proveedor']} y manteniendo la causación original.")
+            elif enviar_nd_activo:
+                st.info(f"✅ **Tratamiento Activo:** Se imputaron **${dif_faltante_prev:,.2f}** a **Gastos No Deducibles (Cuenta 53950501)**.")
 
             # CALCULAR ASIENTO CONTABLE CUADRADO DEL PAQUETE SELECCIONADO
-            df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=enviar_nd_activo)
+            df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(
+                agente_actual, terceros_actual,
+                enviar_a_no_deducible=enviar_nd_activo,
+                enviar_a_gastos_propios=enviar_gp_activo,
+                enviar_a_solo_cxp=enviar_cxp_activo
+            )
 
             st.markdown(f"#### ⚖️ Asiento Contable del Paquete #{pq_id_sel}:")
             st.caption("Detalle de partida doble de ESTE paquete: cancela las cuentas por pagar de DHL, Agencia y Garaje contra Euro Shipping:")
@@ -3688,7 +3749,9 @@ with tab_triangulacion:
                 ag_item = g_v["agente"]
                 terc_items = g_v["terceros"]
                 enviar_nd_g = st.session_state.get(f"enviar_nd_pq_{g_k}", False)
-                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd_g)
+                enviar_gp_g = st.session_state.get(f"enviar_gp_pq_{g_k}", False)
+                enviar_cxp_g = st.session_state.get(f"enviar_cxp_pq_{g_k}", False)
+                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd_g, enviar_a_gastos_propios=enviar_gp_g, enviar_a_solo_cxp=enviar_cxp_g)
                 
                 # 1. Asiento de Control de Cruces (Partida Doble para Revisión)
                 for _, fila_as in df_as_p.iterrows():
@@ -3990,7 +4053,9 @@ with tab_siigo:
                 fecha_op_raw = ag_item["Fecha"]
                 fecha_op_clean = normalizar_fecha_dian(fecha_op_raw)
                 enviar_nd = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
-                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd)
+                enviar_gp_p = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
+                enviar_cxp_p = st.session_state.get(f"enviar_cxp_pq_{p_k}", False)
+                df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd, enviar_a_gastos_propios=enviar_gp_p, enviar_a_solo_cxp=enviar_cxp_p)
                 
                 cons_cruce_actual = cons_cruce_base + idx_pq_cruce
                 idx_pq_cruce += 1
