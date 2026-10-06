@@ -35,19 +35,76 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. ESTADOS DE SESION
+# 1. ESTADOS DE SESION (CON PERSISTENCIA CONTRA REINICIOS Y TIMEOUT DE 1 HORA)
+ses_previa = verificar_sesion_persistente(timeout_segundos=3600)
+
 if "autenticado" not in st.session_state:
-    st.session_state["autenticado"] = False
+    st.session_state["autenticado"] = True if (ses_previa and ses_previa.get("autenticado")) else False
 if "empresa_activa" not in st.session_state:
     st.session_state["empresa_activa"] = None
 if "proceso_activo" not in st.session_state:
-    st.session_state["proceso_activo"] = None
+    st.session_state["proceso_activo"] = "facturacion" if (ses_previa and ses_previa.get("autenticado")) else None
 
 # ==============================================================================
 # CONFIGURACIÓN DE DIRECTORIOS Y SISTEMA DE AUTO-GUARDADO CONTINUO
 # ==============================================================================
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "almacenamiento_contable")
 os.makedirs(DATA_DIR, exist_ok=True)
+import time
+
+SESION_PERSISTENTE_FILE = os.path.join(DATA_DIR, "sesion_activa.json")
+
+def registrar_actividad_sesion(empresa_dict=None):
+    """Actualiza la marca de tiempo de la sesión activa en disco."""
+    try:
+        nit_emp = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if empresa_dict else None
+        data = {
+            "autenticado": True,
+            "empresa_nit": nit_emp,
+            "proceso_activo": "facturacion",
+            "ultima_actividad": time.time(),
+            "hora_legible": datetime.datetime.now().strftime("%d/%m/%Y %I:%M:%S %p")
+        }
+        with open(SESION_PERSISTENTE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def verificar_sesion_persistente(timeout_segundos=3600):
+    """Verifica si existe una sesión válida no expirada (menos de 1 hora de inactividad)."""
+    if not os.path.exists(SESION_PERSISTENTE_FILE):
+        return None
+    try:
+        with open(SESION_PERSISTENTE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        tiempo_inactivo = time.time() - float(data.get("ultima_actividad", 0))
+        if tiempo_inactivo < timeout_segundos:
+            # Sesión viva: actualizar última actividad
+            registrar_actividad_sesion()
+            return data
+        else:
+            # Más de 1 hora sin movimiento: cerrar y expirar sesión
+            try:
+                os.remove(SESION_PERSISTENTE_FILE)
+            except Exception:
+                pass
+            return None
+    except Exception:
+        return None
+
+def cerrar_sesion_usuario():
+    """Cierra la sesión y limpia el archivo de persistencia."""
+    if os.path.exists(SESION_PERSISTENTE_FILE):
+        try:
+            os.remove(SESION_PERSISTENTE_FILE)
+        except Exception:
+            pass
+    for k in list(st.session_state.keys()):
+        st.session_state.pop(k, None)
+    st.session_state["autenticado"] = False
+    st.session_state["empresa_activa"] = None
+    st.session_state["proceso_activo"] = None
+
 
 def get_empresa_autosave_dir(empresa_dict):
     nit_clean = re.sub(r'\D', '', str(empresa_dict.get("nit", "empresa")))
@@ -256,7 +313,8 @@ if not st.session_state["empresa_activa"]:
             if emp["estado"] == "ACTIVA":
                 if st.button(f"Ingresar a {emp['nombre']}", key=f"btn_emp_{i}"):
                     st.session_state["empresa_activa"] = emp
-                    st.session_state["proceso_activo"] = None
+                    st.session_state["proceso_activo"] = "facturacion"
+                    registrar_actividad_sesion(emp)
                     st.rerun()
             else:
                 st.button(f"Pendiente Datos / Parametrizacion ({emp['estado']})", key=f"btn_emp_{i}", disabled=True)
@@ -357,6 +415,61 @@ st.markdown("---")
 # ==============================================================================
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "almacenamiento_contable")
 os.makedirs(DATA_DIR, exist_ok=True)
+import time
+
+SESION_PERSISTENTE_FILE = os.path.join(DATA_DIR, "sesion_activa.json")
+
+def registrar_actividad_sesion(empresa_dict=None):
+    """Actualiza la marca de tiempo de la sesión activa en disco."""
+    try:
+        nit_emp = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if empresa_dict else None
+        data = {
+            "autenticado": True,
+            "empresa_nit": nit_emp,
+            "proceso_activo": "facturacion",
+            "ultima_actividad": time.time(),
+            "hora_legible": datetime.datetime.now().strftime("%d/%m/%Y %I:%M:%S %p")
+        }
+        with open(SESION_PERSISTENTE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def verificar_sesion_persistente(timeout_segundos=3600):
+    """Verifica si existe una sesión válida no expirada (menos de 1 hora de inactividad)."""
+    if not os.path.exists(SESION_PERSISTENTE_FILE):
+        return None
+    try:
+        with open(SESION_PERSISTENTE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        tiempo_inactivo = time.time() - float(data.get("ultima_actividad", 0))
+        if tiempo_inactivo < timeout_segundos:
+            # Sesión viva: actualizar última actividad
+            registrar_actividad_sesion()
+            return data
+        else:
+            # Más de 1 hora sin movimiento: cerrar y expirar sesión
+            try:
+                os.remove(SESION_PERSISTENTE_FILE)
+            except Exception:
+                pass
+            return None
+    except Exception:
+        return None
+
+def cerrar_sesion_usuario():
+    """Cierra la sesión y limpia el archivo de persistencia."""
+    if os.path.exists(SESION_PERSISTENTE_FILE):
+        try:
+            os.remove(SESION_PERSISTENTE_FILE)
+        except Exception:
+            pass
+    for k in list(st.session_state.keys()):
+        st.session_state.pop(k, None)
+    st.session_state["autenticado"] = False
+    st.session_state["empresa_activa"] = None
+    st.session_state["proceso_activo"] = None
+
 
 def get_empresa_trabajos_dir(empresa_dict):
     nit_clean = re.sub(r"\D", "", str(empresa_dict.get("nit", "empresa")))
@@ -2297,63 +2410,8 @@ if "df_procesado" not in st.session_state and trabajos_existentes:
 
 
 
-# ==============================================================================
-# SISTEMA DE AUTO-GUARDADO CONTINUO CON FECHA/HORA Y ESCANEO DE ITEMS PDF
-# ==============================================================================
-def get_empresa_autosave_dir(empresa_dict):
-    nit_clean = re.sub(r'\D', '', str(empresa_dict.get("nit", "empresa")))
-    d = os.path.join(DATA_DIR, nit_clean, "autosave")
-    os.makedirs(d, exist_ok=True)
-    return d
+# (Funciones de autosave reubicadas limpiamente al inicio)
 
-def ejecutar_guardado_automatico_sesion(empresa_dict):
-    """Guarda automáticamente la sesión activa en disco con fecha y hora cada vez que hay actividad."""
-    if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
-        return None
-    try:
-        a_dir = get_empresa_autosave_dir(empresa_dict)
-        # 1. df_procesado
-        with open(os.path.join(a_dir, "df_procesado.pkl"), "wb") as f:
-            pickle.dump(st.session_state["df_procesado"], f)
-        # 2. excel
-        if st.session_state.get("excel_bytes"):
-            with open(os.path.join(a_dir, "excel_original.xlsx"), "wb") as f:
-                f.write(st.session_state["excel_bytes"])
-        # 3. paquetes
-        if st.session_state.get("paquetes_importacion"):
-            with open(os.path.join(a_dir, "paquetes_importacion.pkl"), "wb") as f:
-                pickle.dump(st.session_state["paquetes_importacion"], f)
-        # 4. asientos
-        if st.session_state.get("asientos_triangulacion_por_factura"):
-            with open(os.path.join(a_dir, "asientos_triangulacion.pkl"), "wb") as f:
-                pickle.dump(st.session_state["asientos_triangulacion_por_factura"], f)
-        # 5. estado_sesion
-        estado_flags = {
-            "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
-            "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
-            "enviar_h2": {k: v for k, v in st.session_state.items() if k.startswith("enviar_h2_pq_")},
-            "enviar_nd": {k: v for k, v in st.session_state.items() if k.startswith("enviar_nd_pq_")},
-            "facturas_no_contabilizar": list(st.session_state.get("facturas_no_contabilizar", set())),
-            "sel_paquete_activo_key": st.session_state.get("sel_paquete_activo_key", 1)
-        }
-        with open(os.path.join(a_dir, "estado_sesion.json"), "w", encoding="utf-8") as f:
-            json.dump(estado_flags, f, ensure_ascii=False, indent=2)
-
-        now_dt = datetime.datetime.now()
-        now_str = now_dt.strftime("%d/%m/%Y %I:%M:%S %p")
-        meta = {
-            "fecha_autosave": now_str,
-            "archivo_excel": st.session_state.get("excel_nombre", "Reporte.xlsx"),
-            "total_facturas": len(st.session_state["df_procesado"]),
-            "timestamp": now_dt.timestamp()
-        }
-        with open(os.path.join(a_dir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-
-        st.session_state["_ultimo_autosave_hora"] = now_str
-        return now_str
-    except Exception:
-        return None
 
 def extraer_montos_items_pdf(pdf_bytes):
     """Extrae valores monetarios de los ítems o detalles de productos en el PDF de una factura."""
@@ -2514,7 +2572,8 @@ if "df_procesado" in st.session_state and st.session_state["df_procesado"] is no
     with c_bnr1:
         nom_ses = st.session_state.get("_sesion_cargada_nombre", st.session_state.get("excel_nombre", "Reporte de Facturas"))
         hora_as = st.session_state.get("_ultimo_autosave_hora", datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p"))
-        st.info(f"📋 **Trabajo Activo:** '{nom_ses}' ({len(st.session_state['df_procesado'])} facturas).  \n⏱️ **Auto-guardado activo:** `{hora_as}` (Progreso protegido contra salidas accidentales).")
+        registrar_actividad_sesion(empresa)
+        st.info(f"📋 **Trabajo Activo:** '{nom_ses}' ({len(st.session_state['df_procesado'])} facturas).  \n⏱️ **Auto-guardado activo:** `{hora_as}` (Sesión protegida contra reinicios. Expira tras 1 hora sin movimiento).")
     with c_bnr2:
         if st.button("💾 Guardar Progreso", key="btn_guardar_progreso_manual", use_container_width=True, help="Guarda en disco todo lo editado en Hoja 2 y Triangulación para no perder nada."):
             jid = guardar_trabajo_en_historial(
@@ -3803,6 +3862,21 @@ with tab_auditoria:
                         break
 
         if asiento_triang_aprobado is not None and not (isinstance(asiento_triang_aprobado, pd.DataFrame) and asiento_triang_aprobado.empty):
+            df_asiento = pd.DataFrame(asiento_triang_aprobado).copy()
+            if "Descripción de la Cuenta" not in df_asiento.columns and "Descripción Cuenta" in df_asiento.columns:
+                df_asiento["Descripción de la Cuenta"] = df_asiento["Descripción Cuenta"]
+                
+            # SALVAGUARDA DE RETENCIÓN EN LA FUENTE: Si la factura tiene ReteFuente calculada, debe figurar en el comprobante
+            val_rf_check = float(fac_sel.get("ReteFuente", 0.0))
+            cta_rf_esp = str(fac_sel.get("Cta ReteFuente") or ("23652503" if es_aduanero else "23654001")).strip()
+            cuentas_en_asiento = [str(c).strip() for c in df_asiento["Código Cuenta"].values] if "Código Cuenta" in df_asiento.columns else []
+            
+            if val_rf_check > 0 and cta_rf_esp not in cuentas_en_asiento:
+                # Regenerar asiento completo con ReteFuente garantizada
+                df_asiento = obtener_asiento_contable_hoja2(fac_sel, es_aduanero=es_aduanero)
+                asientos_map[fac_num_aud] = df_asiento
+                st.session_state["asientos_triangulacion_por_factura"] = asientos_map
+                
             st.markdown(f"""
             <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:12px 16px; margin-bottom:12px;">
                 <h5 style="margin:0 0 4px 0; color:#166534;">🔀 Contabilización Oficial Aprobada en Triangulación</h5>
@@ -3811,9 +3885,6 @@ with tab_auditoria:
                 </p>
             </div>
             """, unsafe_allow_html=True)
-            df_asiento = pd.DataFrame(asiento_triang_aprobado).copy()
-            if "Descripción de la Cuenta" not in df_asiento.columns and "Descripción Cuenta" in df_asiento.columns:
-                df_asiento["Descripción de la Cuenta"] = df_asiento["Descripción Cuenta"]
         else:
             asiento_filas = []
             es_nc = "Devolucion" in str(fac_sel["Operacion"])
