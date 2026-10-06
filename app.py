@@ -3057,7 +3057,9 @@ with tab_auditoria:
         
         fac_num_aud = str(fac_sel["Factura"]).strip()
         asientos_map = st.session_state.get("asientos_triangulacion_por_factura", {})
-        asiento_triang_aprobado = asientos_map.get(fac_num_aud) or st.session_state.get(f"asiento_triang_aprobado_{fac_num_aud}")
+        asiento_triang_aprobado = asientos_map.get(fac_num_aud)
+        if asiento_triang_aprobado is None:
+            asiento_triang_aprobado = st.session_state.get(f"asiento_triang_aprobado_{fac_num_aud}")
         
         # Si aún no está en el mapa, verificar si pertenece a algún paquete listo en triangulación
         if asiento_triang_aprobado is None and "paquetes_importacion" in st.session_state:
