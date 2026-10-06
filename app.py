@@ -2021,6 +2021,7 @@ with tab_compras:
                     "Proveedor": nom_e,
                     "NIT Emisor": nit_e,
                     "Ya Registrada": es_roja_reg,
+                    "No Contabilizar": False,
                     "Comprobante Previo": comp_prev,
                     "Grupo Importación": grp_imp,
                     "Cuenta Pasivo Especifica": cta_esp,
@@ -2607,9 +2608,14 @@ with tab_auditoria:
     if "df_procesado" in st.session_state:
         df_p = st.session_state["df_procesado"]
         
+        # Asegurar columna No Contabilizar en df_p
+        if "No Contabilizar" not in df_p.columns:
+            df_p["No Contabilizar"] = False
+            st.session_state["df_procesado"] = df_p
+
         # Inicializar conjunto de facturas excluidas de contabilización
         if "facturas_no_contabilizar" not in st.session_state:
-            st.session_state["facturas_no_contabilizar"] = set(df_p[df_p.get("No Contabilizar", False) == True]["Factura"].tolist())
+            st.session_state["facturas_no_contabilizar"] = set(df_p[df_p["No Contabilizar"] == True]["Factura"].dropna().tolist())
         cur_no_contab = st.session_state["facturas_no_contabilizar"]
 
         # Panel de exclusión masiva para marcar cuáles NO contabilizar
@@ -3032,6 +3038,8 @@ with tab_triangulacion:
 
     if "df_procesado" in st.session_state:
         df_total = st.session_state["df_procesado"]
+        if "No Contabilizar" not in df_total.columns:
+            df_total["No Contabilizar"] = False
         
         # Identificar ÚNICAMENTE facturas del gremio aduanero / logístico y de importación (Cero compras ordinarias/domésticas)
         prov_upper = df_total["Proveedor"].astype(str).str.upper()
@@ -3756,9 +3764,15 @@ with tab_siigo:
         # FILTRO DE PROTECCIÓN: Excluir facturas rojas (ya causadas en Siigo) y facturas que van por triangulación aduanera
         n_rojas = len(df_full[df_full.get("Ya Registrada", False) == True])
         
+        # Asegurar columna No Contabilizar en df_full
+        if "No Contabilizar" not in df_full.columns:
+            df_full["No Contabilizar"] = False
+            st.session_state["df_procesado"] = df_full
+
         # 1. Facturas explícitamente excluidas de contabilidad (No Contabilizar)
         excluidas_set = st.session_state.get("facturas_no_contabilizar", set())
-        n_excluidas = len(df_full[df_full["Factura"].isin(excluidas_set) | (df_full.get("No Contabilizar", False) == True)])
+        cond_excluidas = df_full["Factura"].isin(excluidas_set) | (df_full["No Contabilizar"] == True)
+        n_excluidas = int(cond_excluidas.sum())
         
         # 2. Facturas que ya están en un paquete de triangulación aduanera
         facs_en_pqs_import = []
@@ -3770,8 +3784,7 @@ with tab_siigo:
                     
         df_p = df_full[
             (df_full.get("Ya Registrada", False) == False) & 
-            (df_full.get("No Contabilizar", False) == False) &
-            (~df_full["Factura"].isin(excluidas_set)) &
+            (~cond_excluidas) &
             (~df_full["Factura"].isin(facs_en_pqs_import)) &
             (~((df_full.get("Es Aduanera", False) == True) & (df_full.get("Grupo Importación", "") != "")))
         ].copy()
