@@ -151,6 +151,12 @@ if not st.session_state["empresa_activa"]:
 
 empresa = st.session_state["empresa_activa"]
 
+# Auto-recuperación transparente al ingresar a la empresa si se cerró la ventana
+if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
+    verificar_y_recuperar_guardado_automatico(empresa)
+elif "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+    ejecutar_guardado_automatico_sesion(empresa)
+
 # PANTALLA 3: MENU DE PROCESOS OPERATIVOS
 PROCESOS_SISTEMA = [
     {
@@ -2106,6 +2112,141 @@ if "df_procesado" not in st.session_state and trabajos_existentes:
         st.caption("👈 Oprime aquí **únicamente** cuando desees restaurar el trabajo anterior. De lo contrario, continúa abajo con tus facturas nuevas.")
 
 
+
+# ==============================================================================
+# SISTEMA DE AUTO-GUARDADO CONTINUO CON FECHA/HORA Y ESCANEO DE ITEMS PDF
+# ==============================================================================
+def get_empresa_autosave_dir(empresa_dict):
+    nit_clean = re.sub(r'\D', '', str(empresa_dict.get("nit", "empresa")))
+    d = os.path.join(DATA_DIR, nit_clean, "autosave")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def ejecutar_guardado_automatico_sesion(empresa_dict):
+    """Guarda automáticamente la sesión activa en disco con fecha y hora cada vez que hay actividad."""
+    if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
+        return None
+    try:
+        a_dir = get_empresa_autosave_dir(empresa_dict)
+        # 1. df_procesado
+        with open(os.path.join(a_dir, "df_procesado.pkl"), "wb") as f:
+            pickle.dump(st.session_state["df_procesado"], f)
+        # 2. excel
+        if st.session_state.get("excel_bytes"):
+            with open(os.path.join(a_dir, "excel_original.xlsx"), "wb") as f:
+                f.write(st.session_state["excel_bytes"])
+        # 3. paquetes
+        if st.session_state.get("paquetes_importacion"):
+            with open(os.path.join(a_dir, "paquetes_importacion.pkl"), "wb") as f:
+                pickle.dump(st.session_state["paquetes_importacion"], f)
+        # 4. asientos
+        if st.session_state.get("asientos_triangulacion_por_factura"):
+            with open(os.path.join(a_dir, "asientos_triangulacion.pkl"), "wb") as f:
+                pickle.dump(st.session_state["asientos_triangulacion_por_factura"], f)
+        # 5. estado_sesion
+        estado_flags = {
+            "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
+            "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
+            "enviar_h2": {k: v for k, v in st.session_state.items() if k.startswith("enviar_h2_pq_")},
+            "enviar_nd": {k: v for k, v in st.session_state.items() if k.startswith("enviar_nd_pq_")},
+            "facturas_no_contabilizar": list(st.session_state.get("facturas_no_contabilizar", set())),
+            "sel_paquete_activo_key": st.session_state.get("sel_paquete_activo_key", 1)
+        }
+        with open(os.path.join(a_dir, "estado_sesion.json"), "w", encoding="utf-8") as f:
+            json.dump(estado_flags, f, ensure_ascii=False, indent=2)
+            
+        now_dt = datetime.datetime.now()
+        now_str = now_dt.strftime("%d/%m/%Y %I:%M:%S %p")
+        meta = {
+            "fecha_autosave": now_str,
+            "archivo_excel": st.session_state.get("excel_nombre", "Reporte.xlsx"),
+            "total_facturas": len(st.session_state["df_procesado"]),
+            "timestamp": now_dt.timestamp()
+        }
+        with open(os.path.join(a_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+            
+        st.session_state["_ultimo_autosave_hora"] = now_str
+        return now_str
+    except Exception:
+        return None
+
+def verificar_y_recuperar_guardado_automatico(empresa_dict):
+    """Restaura automáticamente el último autoguardado si la sesión en memoria está vacía."""
+    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+        return False
+    if st.session_state.get("_sesion_limpiada_por_usuario", False):
+        return False
+    try:
+        a_dir = get_empresa_autosave_dir(empresa_dict)
+        pkl_path = os.path.join(a_dir, "df_procesado.pkl")
+        meta_path = os.path.join(a_dir, "meta.json")
+        if os.path.exists(pkl_path) and os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            with open(pkl_path, "rb") as f:
+                st.session_state["df_procesado"] = pickle.load(f)
+                
+            ex_path = os.path.join(a_dir, "excel_original.xlsx")
+            if os.path.exists(ex_path):
+                with open(ex_path, "rb") as f:
+                    st.session_state["excel_bytes"] = f.read()
+            st.session_state["excel_nombre"] = meta.get("archivo_excel", "Reporte.xlsx")
+            
+            pq_path = os.path.join(a_dir, "paquetes_importacion.pkl")
+            if os.path.exists(pq_path):
+                with open(pq_path, "rb") as f:
+                    st.session_state["paquetes_importacion"] = pickle.load(f)
+                    
+            as_path = os.path.join(a_dir, "asientos_triangulacion.pkl")
+            if os.path.exists(as_path):
+                with open(as_path, "rb") as f:
+                    st.session_state["asientos_triangulacion_por_factura"] = pickle.load(f)
+                    
+            st_path = os.path.join(a_dir, "estado_sesion.json")
+            if os.path.exists(st_path):
+                with open(st_path, "r", encoding="utf-8") as f:
+                    est = json.load(f)
+                for k, v in est.get("paquetes_listos", {}).items():
+                    st.session_state[k] = v
+                for k, v in est.get("enviar_gp", {}).items():
+                    st.session_state[k] = v
+                for k, v in est.get("enviar_h2", {}).items():
+                    st.session_state[k] = v
+                for k, v in est.get("enviar_nd", {}).items():
+                    st.session_state[k] = v
+                if "facturas_no_contabilizar" in est:
+                    st.session_state["facturas_no_contabilizar"] = set(est["facturas_no_contabilizar"])
+                if "sel_paquete_activo_key" in est:
+                    st.session_state["sel_paquete_activo_key"] = est["sel_paquete_activo_key"]
+                    
+            st.session_state["_sesion_auto_recuperada"] = meta.get("fecha_autosave", "")
+            st.session_state["_ultimo_autosave_hora"] = meta.get("fecha_autosave", "")
+            return True
+    except Exception:
+        pass
+    return False
+
+def extraer_montos_items_pdf(pdf_bytes):
+    """Extrae valores monetarios de los ítems o detalles de productos en el PDF de una factura."""
+    if not pdf_bytes:
+        return []
+    try:
+        textos = cache_extraer_textos_pdf(pdf_bytes)
+        full_txt = " ".join(textos)
+        montos = []
+        encontrados = re.findall(r'(?:[\$]|(?:\s))\s*(\d{1,3}(?:\.\d{3})+(?:,\d{2})?)', full_txt)
+        for m in encontrados:
+            try:
+                val = float(m.replace(".", "").replace(",", "."))
+                if 20000 <= val <= 100000000:
+                    montos.append(val)
+            except Exception:
+                pass
+        return list(set(montos))
+    except Exception:
+        return []
+
 def generar_respaldo_portatil_bytes(empresa_dict):
     """Genera en memoria un archivo .indumaq (ZIP completo) con el progreso actual de auditoría y triangulación."""
     if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
@@ -2150,10 +2291,10 @@ def generar_respaldo_portatil_bytes(empresa_dict):
             }
             zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
             zf.writestr("meta_sesion.json", json.dumps(meta, ensure_ascii=False, indent=2))
-        mem_actual = cargar_memoria_aprendizaje(empresa_dict)
-        if mem_actual:
-            zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
-            
+            mem_actual = cargar_memoria_aprendizaje(empresa_dict)
+            if mem_actual:
+                zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
+                
             # 7. PDFs si existen en la sesión
             dict_renom_s = st.session_state.get("dict_pdfs", {})
             if dict_renom_s:
@@ -2165,7 +2306,7 @@ def generar_respaldo_portatil_bytes(empresa_dict):
                     zf.writestr(f"pdfs_originales/{fn}", bdata)
             if st.session_state.get("zip_pdfs"):
                 zf.writestr("paquete_facturas.zip", st.session_state["zip_pdfs"])
-            
+                
         buf.seek(0)
         return buf.getvalue()
     except Exception:
@@ -2244,7 +2385,8 @@ if "df_procesado" in st.session_state and st.session_state["df_procesado"] is no
     c_bnr1, c_bnr2, c_bnr3, c_bnr4 = st.columns([3.2, 1.4, 1.5, 1.2])
     with c_bnr1:
         nom_ses = st.session_state.get("_sesion_cargada_nombre", st.session_state.get("excel_nombre", "Reporte de Facturas"))
-        st.info(f"📋 **Trabajo Activo:** '{nom_ses}' ({len(st.session_state['df_procesado'])} facturas).")
+        hora_as = st.session_state.get("_ultimo_autosave_hora", datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p"))
+        st.info(f"📋 **Trabajo Activo:** '{nom_ses}' ({len(st.session_state['df_procesado'])} facturas).  \n⏱️ **Auto-guardado activo:** `{hora_as}` (Progreso protegido contra salidas accidentales).")
     with c_bnr2:
         if st.button("💾 Guardar Progreso", key="btn_guardar_progreso_manual", use_container_width=True, help="Guarda en disco todo lo editado en Hoja 2 y Triangulación para no perder nada."):
             jid = guardar_trabajo_en_historial(
@@ -2285,6 +2427,7 @@ if "df_procesado" in st.session_state and st.session_state["df_procesado"] is no
             )
     with c_bnr4:
         if st.button("🆕 Limpiar", key="btn_nuevo_trabajo_top", use_container_width=True, help="Limpia la pantalla para procesar un nuevo mes."):
+            st.session_state["_sesion_limpiada_por_usuario"] = True
             for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_sesion_cargada_nombre", "_sesion_auto_recuperada", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig", "paquetes_importacion", "asientos_triangulacion_por_factura"]:
                 st.session_state.pop(k, None)
             st.rerun()
@@ -3759,7 +3902,7 @@ with tab_triangulacion:
         else:
             # 1. FUNCIÓN DE AUTO-EMPAQUETAMIENTO INTELIGENTE
             # Algoritmo de combinación: encuentra para cada Euro Shipping el subconjunto de DHL + Agencia + Garaje que suma su valor
-            def auto_empaquetar_inteligente(df_ag, df_terc):
+            def auto_empaquetar_inteligente(df_ag, df_terc, dict_pdfs=None):
                 """
                 Algoritmo cronológico de alta precisión para Agencias Aduaneras (Euro Shipping / Trade Global):
                 1. Ordena cronológicamente de Enero hacia Diciembre.
@@ -3790,6 +3933,19 @@ with tab_triangulacion:
                     iva_ag_i = float(ag_i.get("IVA", 0.0))
                     base_ag_i = float(ag_i.get("Base", 0.0))
                     f_ag_dt_i = ag_i["_dt"]
+                    
+                    # Escanear montos de ítems y conceptos del PDF del agente si está disponible
+                    montos_items_pdf = []
+                    if dict_pdfs:
+                        f_ag_n = str(ag_i.get("Factura", "")).strip()
+                        fol_ag = str(ag_i.get("Folio", "")).strip()
+                        pdf_b_ag = None
+                        for k_p, v_p in dict_pdfs.items():
+                            if (f_ag_n and f_ag_n.replace("-", "").upper() in k_p.replace("-", "").upper()) or (fol_ag and fol_ag in k_p):
+                                pdf_b_ag = v_p
+                                break
+                        if pdf_b_ag:
+                            montos_items_pdf = extraer_montos_items_pdf(pdf_b_ag)
                     
                     # 1. Identificar ítems SIN IVA vs ítems CON IVA del Agente
                     # En importaciones (Euro Shipping, Trade Global):
@@ -3879,6 +4035,14 @@ with tab_triangulacion:
                         elif tiv_k > 0 and (tiv_k / (tb_k + tiv_k) >= 0.15):
                             score_iva = -100
                             
+                        # Bonus de coincidencia con ítems específicos escaneados del PDF
+                        score_item_pdf = 0
+                        if montos_items_pdf:
+                            for m_it in montos_items_pdf:
+                                if abs(sc_k - m_it) < 2500.0 or (sc_k <= m_it and (m_it - sc_k) < 15000.0):
+                                    score_item_pdf = 160
+                                    break
+                            
                         c_row_k_copy = c_row_k.copy()
                         c_row_k_copy["Relación Fecha"] = relacion_fecha_txt
                         c_row_k_copy["Diferencia Días"] = diff_dias
@@ -3889,7 +4053,7 @@ with tab_triangulacion:
                             "saldo": sc_k,
                             "rol": rol_k,
                             "diff_dias": diff_dias,
-                            "score_total": score_tiempo + score_mandato + score_iva,
+                            "score_total": score_tiempo + score_mandato + score_iva + score_item_pdf,
                             "row": c_row_k_copy
                         })
                         
@@ -3908,33 +4072,39 @@ with tab_triangulacion:
                         cands_ventana = cands_ventana[:25]
                         
                     for (t_val, t_tipo) in targets_evaluar:
+                        max_tol_residuo = max(35000.0, t_val * 0.05)
                         for k_c in range(1, min(5, len(cands_ventana) + 1)):
                             for combo_i in itertools.combinations(cands_ventana, k_c):
                                 s_c_i = round(sum(c["saldo"] for c in combo_i), 2)
                                 d_c_i = abs(s_c_i - t_val)
                                 score_c = sum(c["score_total"] for c in combo_i) / len(combo_i)
                                 
-                                if d_c_i < 0.05:
-                                    if score_c > best_score_i or best_diff_i >= 0.05:
+                                # 1. Coincidencia casi exacta (< $2,500 COP)
+                                if d_c_i < 2500.0:
+                                    if d_c_i < best_diff_i or score_c > best_score_i:
                                         best_diff_i = d_c_i
                                         best_combo_i = list(combo_i)
-                                        best_score_i = score_c
+                                        best_score_i = score_c + 60
                                         target_usado_i = t_val
                                         tipo_target_i = t_tipo
-                                elif best_diff_i >= 0.05 and d_c_i < best_diff_i:
-                                    if d_c_i < 2500.0 and score_c > 40:
-                                        best_diff_i = d_c_i
-                                        best_combo_i = list(combo_i)
-                                        best_score_i = score_c
-                                        target_usado_i = t_val
-                                        tipo_target_i = t_tipo
-                            if best_diff_i < 0.05 and best_score_i > 70:
+                                # 2. Valores aproximados que NO superen el cobro (s_c_i <= t_val + 50)
+                                elif s_c_i <= t_val + 50.0:
+                                    residuo = round(t_val - s_c_i, 2)
+                                    if 0 <= residuo <= max_tol_residuo:
+                                        if residuo < best_diff_i or best_diff_i > max_tol_residuo:
+                                            best_diff_i = residuo
+                                            best_combo_i = list(combo_i)
+                                            best_score_i = score_c
+                                            target_usado_i = t_val
+                                            tipo_target_i = t_tipo
+                            if best_diff_i < 50.0 and best_score_i > 70:
                                 break
-                        if best_diff_i < 0.05:
+                        if best_diff_i < 50.0:
                             break
                             
-                    # REGLA DE CALIBRACIÓN: Permitir diferencias menores por ajuste de TRM, redondeo o centavos (< $2,500 COP)
-                    if best_diff_i >= 2500.0:
+                    # REGLA ESTRICTA: Aceptar si es coincidencia exacta (< $2,500) o aproximada que no supere (residuo <= $35,000 o 5%)
+                    max_acep_lim = max(35000.0, target_usado_i * 0.05)
+                    if best_diff_i > max_acep_lim or not best_combo_i:
                         best_combo_i = []
                         dif_calc = tot_full_i
                     else:
@@ -3960,7 +4130,7 @@ with tab_triangulacion:
 
             # Inicializar o recuperar paquetes de importación
             if "paquetes_importacion" not in st.session_state or st.session_state.get("_ultimo_agentes_len") != len(df_agentes_all):
-                pqs_ini, libres_ini = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all)
+                pqs_ini, libres_ini = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all, dict_pdfs=st.session_state.get("dict_pdfs") or st.session_state.get("raw_uploaded_pdfs"))
                 st.session_state["paquetes_importacion"] = pqs_ini
                 st.session_state["_ultimo_agentes_len"] = len(df_agentes_all)
 
@@ -4083,6 +4253,7 @@ with tab_triangulacion:
                     if st.button(f"✅ Dejar Listo Paquete #{pq_id_sel} para Contabilidad", key=f"btn_marcar_listo_{pq_id_sel}", use_container_width=True):
                         st.session_state[f"paquete_listo_{pq_id_sel}"] = True
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        ejecutar_guardado_automatico_sesion(empresa)
                         
                         # Llevar y reemplazar la contabilización en la Hoja 2
                         df_as_aprob, _, _ = generar_asiento_triangulacion_paquete(
@@ -4299,7 +4470,8 @@ with tab_triangulacion:
                                     st.success(f"¡Factura {fac_nom_mover} retirada de importaciones y enviada a Compras Directas Ordinarias (Pestaña 1 y 4)!")
                                 else:
                                     st.success(f"¡Factura {fac_nom_mover} retirada del Paquete #{pq_id_sel} y devuelta a facturas libres!")
-                                    
+                                
+                                ejecutar_guardado_automatico_sesion(empresa)
                                 st.rerun()
                 else:
                     st.info("Este paquete no tiene facturas asignadas para retirar.")
@@ -4308,14 +4480,23 @@ with tab_triangulacion:
                 
                 # 2. SECCIÓN PARA AGREGAR NUEVAS FACTURAS
                 st.markdown("##### ➕ Añadir una factura a este paquete:")
-                # Facturas de terceros disponibles (tanto de df_terceros_all como de df_total no asignadas)
+                # RESTRICCIÓN ESTRICTA: Obtener todas las facturas asignadas a cualquier paquete
+                facturas_bloqueadas_global = set()
+                if "paquetes_importacion" in st.session_state:
+                    for p_id_g, p_val_g in st.session_state["paquetes_importacion"].items():
+                        df_tr_g = p_val_g.get("terceros")
+                        if df_tr_g is not None and not df_tr_g.empty:
+                            for f_asig in df_tr_g["Factura"].dropna():
+                                facturas_bloqueadas_global.add(str(f_asig).strip())
+
                 opciones_agregar = []
                 mapa_agregar = {}
                 cands_disp_agregar = df_terceros_all.copy()
                 
                 for _, tr_cand in cands_disp_agregar.iterrows():
-                    f_cand_num = tr_cand["Factura"]
-                    if f_cand_num not in facs_en_este:
+                    f_cand_num = str(tr_cand["Factura"]).strip()
+                    # Bloquear y restringir facturas ya trianguladas
+                    if f_cand_num not in facs_en_este and f_cand_num not in facturas_bloqueadas_global:
                         es_reg_c = bool(tr_cand.get("Ya Registrada", False))
                         tag_est = f"🔴 Registrada ({tr_cand.get('Comprobante Previo', '10-Prev')})" if es_reg_c else "⚪ No Contabilizada (Pendiente)"
                         sc_cand = float(tr_cand.get("Total Neto", 0.0)) or (float(tr_cand.get("Base", 0.0)) + float(tr_cand.get("IVA", 0.0)))
@@ -4334,7 +4515,8 @@ with tab_triangulacion:
                         terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([fila_agregada])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
                         st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                        st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel}!")
+                        ejecutar_guardado_automatico_sesion(empresa)
+                        st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel} y auto-guardada!")
                         st.rerun()
 
             # 3. BOTONES CLAVE DE CONTABILIZACIÓN: MERCANCÍAS EN TRÁNSITO VS DEJAR CONTABILIZACIÓN COMO LA HOJA DOS
@@ -4391,7 +4573,8 @@ with tab_triangulacion:
             if enviar_gp_activo:
                 st.info(f"✅ **Tratamiento Activo:** Se enviaron **${dif_faltante_prev:,.2f}** a **Mercancías en Tránsito (Cuenta 14650501)** como costo directo de inventario.")
             elif enviar_h2_activo:
-                st.success(f"✅ **Tratamiento Activo:** Se trajo la contabilización **exactamente como en la Hoja 2** ({agente_actual.get('Categoría', 'Gasto')} Cta {agente_actual.get('Cta Principal', '14650501')}) para que la valides y apruebes.")
+                st.success(f"✅ **Tratam
+iento Activo:** Se trajo la contabilización **exactamente como en la Hoja 2** ({agente_actual.get('Categoría', 'Gasto')} Cta {agente_actual.get('Cta Principal', '14650501')}) para que la valides y apruebes.")
             elif enviar_nd_activo:
                 st.info(f"✅ **Tratamiento Activo:** Se enviaron **${dif_faltante_prev:,.2f}** a **Gastos No Deducibles (Cuenta 53950501)**.")
 
@@ -4552,8 +4735,7 @@ with tab_triangulacion:
                         "Factura": tr_it["Factura"],
                         "Fecha": tr_it["Fecha"],
                         "Naturaleza": nat_t,
-               
-         "Base / Subtotal ($)": tb,
+                        "Base / Subtotal ($)": tb,
                         "IVA ($)": tiv,
                         "Retenciones ($)": round(rf + ri, 2),
                         "Saldo a Cruzar ($)": sc,
