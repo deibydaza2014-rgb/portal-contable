@@ -2613,33 +2613,37 @@ with tab_compras:
         dict_renom_mem = st.session_state.get("dict_pdfs", {})
         dict_orig_mem = st.session_state.get("raw_uploaded_pdfs", {})
         
-        # 1. Aplicar catálogo oficial de regímenes conocidos por NIT inmediatamente
-        for r_idx, r_row in df_proc.iterrows():
-            nit_d = re.sub(r'\D', '', str(r_row.get("NIT Emisor", "")))
-            nom_u = str(r_row.get("Proveedor", "")).upper()
-            reg_prev = str(r_row.get("Régimen Fiscal Emisor", ""))
-            
-            nuevo_reg = None
-            if nit_d in REGIMENES_EMISORES_CONOCIDOS:
-                nuevo_reg = REGIMENES_EMISORES_CONOCIDOS[nit_d]
-            elif any(k in nom_u for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
-                nuevo_reg = "O-13;O-15"
+        # 1. Aplicar catálogo oficial de regímenes conocidos por NIT (solo una vez al cargar archivo inicial)
+        if not st.session_state.get("_regimenes_conocidos_aplicados_v1", False):
+            for r_idx, r_row in df_proc.iterrows():
+                if bool(r_row.get("Editada Manualmente", False)):
+                    continue
+                nit_d = re.sub(r'\D', '', str(r_row.get("NIT Emisor", "")))
+                nom_u = str(r_row.get("Proveedor", "")).upper()
+                reg_prev = str(r_row.get("Régimen Fiscal Emisor", ""))
                 
-            if nuevo_reg and (nuevo_reg != reg_prev or "O-48" in reg_prev):
-                df_proc.at[r_idx, "Régimen Fiscal Emisor"] = nuevo_reg
-                t_c, op_c, c_p, c_c, desc_c, rfte_c, rica_c, riva_c, c_rf, c_iv, c_ri, cat_c, razon_c, audit_c = clasificar_factura(
-                    r_row["NIT Emisor"], r_row["Proveedor"],
-                    r_row["Base"], r_row["IVA"],
-                    r_row["Operacion"], nuevo_reg, empresa
-                )
-                df_proc.at[r_idx, "ReteFuente"] = rfte_c
-                df_proc.at[r_idx, "ReteICA"] = rica_c
-                df_proc.at[r_idx, "ReteIVA"] = riva_c
-                df_proc.at[r_idx, "Cta ReteFuente"] = c_rf
-                df_proc.at[r_idx, "Cta ReteICA"] = c_ri
-                df_proc.at[r_idx, "Razón Contable"] = razon_c
-                df_proc.at[r_idx, "Audit Info"] = audit_c
-                df_proc.at[r_idx, "Neto a Pagar"] = round(r_row["Total"] - rfte_c - rica_c - riva_c, 2)
+                nuevo_reg = None
+                if nit_d in REGIMENES_EMISORES_CONOCIDOS:
+                    nuevo_reg = REGIMENES_EMISORES_CONOCIDOS[nit_d]
+                elif any(k in nom_u for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
+                    nuevo_reg = "O-13;O-15"
+                    
+                if nuevo_reg and (nuevo_reg != reg_prev):
+                    df_proc.at[r_idx, "Régimen Fiscal Emisor"] = nuevo_reg
+                    t_c, op_c, c_p, c_c, desc_c, rfte_c, rica_c, riva_c, c_rf, c_iv, c_ri, cat_c, razon_c, audit_c = clasificar_factura(
+                        r_row["NIT Emisor"], r_row["Proveedor"],
+                        r_row["Base"], r_row["IVA"],
+                        r_row["Operacion"], nuevo_reg, empresa
+                    )
+                    df_proc.at[r_idx, "ReteFuente"] = rfte_c
+                    df_proc.at[r_idx, "ReteICA"] = rica_c
+                    df_proc.at[r_idx, "ReteIVA"] = riva_c
+                    df_proc.at[r_idx, "Cta ReteFuente"] = c_rf
+                    df_proc.at[r_idx, "Cta ReteICA"] = c_ri
+                    df_proc.at[r_idx, "Razón Contable"] = razon_c
+                    df_proc.at[r_idx, "Audit Info"] = audit_c
+                    df_proc.at[r_idx, "Neto a Pagar"] = round(r_row["Total"] - rfte_c - rica_c - riva_c, 2)
+            st.session_state["_regimenes_conocidos_aplicados_v1"] = True
 
         # 2. Si hay PDFs cargados en memoria, auditar automáticamente por contenido
         if (dict_renom_mem or dict_orig_mem) and not st.session_state.get("_regimenes_auditados_v2", False):
@@ -3129,6 +3133,7 @@ with tab_auditoria:
                     elif "O-49" in reg_actual: idx_actual = 5
                     
                     nuevo_reg_sel = st.selectbox("Selecciona Régimen Fiscal:", opciones_reg_man, index=idx_actual, key=f"sel_reg_{fac_sel['Comprobante Siigo']}")
+                    cod_reg_sel = nuevo_reg_sel.split()[0]
                     
                     cta_cxp_def = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
                     nueva_cta_cxp = st.text_input(
@@ -3140,12 +3145,32 @@ with tab_auditoria:
                     
                 with c_mod2:
                     c_v1, c_v2 = st.columns(2)
+                    base_cur_f = float(fac_sel["Base"]) if pd.notna(fac_sel["Base"]) else 0.0
+                    
+                    # Calcular sugerencia de retención si se selecciona O-48
+                    if "O-48" in cod_reg_sel:
+                        rf_sug = round(base_cur_f * 0.04, 2) if es_aduanero or "EURO" in str(fac_sel["Proveedor"]).upper() else round(base_cur_f * 0.025, 2)
+                        ri_sug = round(base_cur_f * 0.00966, 2)
+                    elif any(k in cod_reg_sel for k in ["O-15", "O-47"]):
+                        rf_sug = 0.0
+                        ri_sug = 0.0
+                    else:
+                        rf_sug = float(fac_sel.get("ReteFuente", 0.0))
+                        ri_sug = float(fac_sel.get("ReteICA", 0.0))
+                        
+                    val_rf_input = float(fac_sel.get("ReteFuente", 0.0))
+                    if val_rf_input == 0.0 and "O-48" in cod_reg_sel and rf_sug > 0:
+                        val_rf_input = rf_sug
+                    val_ri_input = float(fac_sel.get("ReteICA", 0.0))
+                    if val_ri_input == 0.0 and "O-48" in cod_reg_sel and ri_sug > 0:
+                        val_ri_input = ri_sug
+                        
                     with c_v1:
-                        nueva_base = st.number_input("Base Gravable / Subtotal ($):", value=float(fac_sel["Base"]), step=1000.0, key=f"nb_{fac_sel['Comprobante Siigo']}")
-                        nueva_rfte = st.number_input("ReteFuente ($):", value=float(fac_sel["ReteFuente"]), step=1000.0, key=f"nrf_{fac_sel['Comprobante Siigo']}")
+                        nueva_base = st.number_input("Base Gravable / Subtotal ($):", value=base_cur_f, step=1000.0, key=f"nb_{fac_sel['Comprobante Siigo']}")
+                        nueva_rfte = st.number_input("ReteFuente ($):", value=val_rf_input, step=100.0, key=f"nrf_{fac_sel['Comprobante Siigo']}")
                     with c_v2:
-                        nuevo_iva = st.number_input("IVA Descontable ($):", value=float(fac_sel["IVA"]), step=1000.0, key=f"niva_{fac_sel['Comprobante Siigo']}")
-                        nuevo_rica = st.number_input("ReteICA ($):", value=float(fac_sel.get("ReteICA", 0.0)), step=1000.0, key=f"nri_{fac_sel['Comprobante Siigo']}")
+                        nuevo_iva = st.number_input("IVA Descontable ($):", value=float(fac_sel["IVA"]), step=100.0, key=f"niva_{fac_sel['Comprobante Siigo']}")
+                        nuevo_rica = st.number_input("ReteICA ($):", value=val_ri_input, step=100.0, key=f"nri_{fac_sel['Comprobante Siigo']}")
                         
                 asumir_imp = st.checkbox(
                     "Asumir Impuestos / Retenciones (Cruza con Agente Aduanero / Triangulación)",
@@ -3170,6 +3195,7 @@ with tab_auditoria:
                     df_p.at[r_idx, "Cuenta Pasivo Especifica"] = cta_clean
                     df_p.at[r_idx, "Cta Contrapartida"] = cta_clean
                     df_p.at[r_idx, "Impuestos Asumidos"] = asumir_imp
+                    df_p.at[r_idx, "Editada Manualmente"] = True
                     
                     if asumir_imp:
                         saldo_p = round(nueva_base + nuevo_iva, 2)
@@ -3477,15 +3503,15 @@ with tab_triangulacion:
         cond_grp = (grp_imp_str != "") & (~grp_imp_str.isin(["nan", "None", "0", "0.0"]))
         cond_es_adu = df_total.get("Es Aduanera", False) == True
 
-        # 2. Cuentas contables específicas de importación / fletes DHL / agencias aduaneras
-        cond_ctas = cta_cxp_str.isin(["22050505", "23359501", "14650501"]) | (cta_p_str == "14650501")
+        # 2. Cuentas contables específicas de importación / aduanas (SIN 23359501 que es gasto doméstico)
+        cond_ctas = cta_cxp_str.isin(["22050505", "14650501"]) | (cta_p_str == "14650501")
 
-        # 3. Proveedores específicos de Comercio Exterior / Logística Internacional / Aduana / Puertos / Fletes
+        # 3. Proveedores específicos de Comercio Exterior / Aduana / Puertos / Fletes
         REGEX_IMPORTACION = (
             r"EURO\s*SHIPPING|TRADE\s*GLOBAL|CONSOLCARGO|BLUE\s*LOGISTICS|"
             r"KUEHNE|PANALPINA|DSV|EXPEDITORS|TIBA|HUBEMAR|SCHENKER|COLTRANS|COLMAS|"
-            r"DHL|FEDEX|UPS|CARGO|ADUANA|ADUANERA|AGENCIAMIENTO|PORTUARIA|PUERTO\s*BAHIA|"
-            r"CONTECAR|SPRC|SPB|COMPAS|ALPOPULAR|ALMAVIVA|RANSA|ALMACENADORA|"
+            r"DHL|CARGO\s*ADUANA|AGENCIA\s*DE\s*ADUANA|PORTUARIA|PUERTO\s*BAHIA|"
+            r"CONTECAR|SPRC|SPB|COMPAS|ALPOPULAR|ALMAVIVA|RANSA|ALMACENADORA\s*INTERAMERICANA|"
             r"MAERSK|HAPAG|SEABOARD|HAMBURG|CMA\s*CGM|EVERGREEN|COSCO|YANG\s*MING"
         )
         cond_prov = prov_upper.str.contains(REGEX_IMPORTACION, regex=True, na=False)
@@ -3497,8 +3523,17 @@ with tab_triangulacion:
         )
         cond_desc = desc_upper.str.contains(REGEX_DESC_IMPORT, regex=True, na=False)
 
-        # Condición estricta: ÚNICAMENTE facturas relacionadas con la importación (rojas y blancas de importación)
-        cond_aduanera = cond_grp | cond_es_adu | cond_ctas | cond_prov | cond_desc
+        # 5. FILTRO ESTRICTO: Excluir tajantemente proveedores domésticos que nada tienen que ver con importación
+        REGEX_EXCLUIR_NO_IMPORTACION = (
+            r"HOTEL|ESTELAR|GENOVA|VITTAPARK|RESTAURANTE|COMIDA|ALMUERZO|"
+            r"PANAMERICANA|LIBRERIA|PAPELERIA|CLARO|COMCEL|MOVISTAR|TIGO|"
+            r"SIIGO|CERTICAMARA|TORNILLOLOCO|FERROMENDEZ|CAUCHOS|MAFLEXCOL|"
+            r"ELECTRICO|ILUMINACION|DONUCAFE|MECANIZAR|MONTEZ|ASIMFER|BATTS\s*ZONE|CMS"
+        )
+        cond_excluir_domestico = prov_upper.str.contains(REGEX_EXCLUIR_NO_IMPORTACION, regex=True, na=False)
+
+        # Condición estricta: ÚNICAMENTE facturas relacionadas con la importación
+        cond_aduanera = (cond_grp | cond_es_adu | cond_ctas | cond_prov | cond_desc) & (~cond_excluir_domestico)
         df_adu = df_total[cond_aduanera].copy()
         
         # Configuración dinámica y extensible de Agentes Coordinadores (Forwarders)
@@ -3894,9 +3929,15 @@ with tab_triangulacion:
                     for _, tr in terceros_actual.iterrows():
                         es_r = tr.get("Ya Registrada", False)
                         badge_est = f"🔴 Ya en Siigo ({tr.get('Comprobante Previo', '10-Prev')})" if es_r else "⚪ No Contabilizada (Pendiente)"
-                        t_b = float(tr.get("Base", 0.0))
-                        t_iv = float(tr.get("IVA", 0.0))
-                        s_cruce = float(tr.get("Total Neto", 0.0)) or round(t_b + t_iv, 2)
+                        t_b = float(tr.get("Base", 0.0)) if pd.notna(tr.get("Base")) else 0.0
+                        t_iv = float(tr.get("IVA", 0.0)) if pd.notna(tr.get("IVA")) else 0.0
+                        tot_neto_val = tr.get("Total Neto")
+                        if pd.notna(tot_neto_val) and float(tot_neto_val) > 0:
+                            s_cruce = float(tot_neto_val)
+                        else:
+                            s_cruce = round(t_b + t_iv, 2)
+                            if s_cruce <= 0 and pd.notna(tr.get("Total")):
+                                s_cruce = float(tr.get("Total", 0.0))
                         tot_s_terceros += s_cruce
                         cta_actual_tr = str(tr.get("Cuenta Pasivo Especifica", "22050505" if "CARGO" in str(tr["Proveedor"]).upper() else "23359501")).strip()
                         p_nom = str(tr["Proveedor"]).upper()
@@ -4510,7 +4551,8 @@ with tab_siigo:
             # Línea 1: Base Imponible
             ws_interfaz.append([
                 f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
-                f"=matriz_captura!I{r}", f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "", "", "", "",
+                f"=matriz_captura!I{r}", f"=matriz_captura!D{r}", 0, "", "", "", 
+"", "", "", "", "", "", "", "",
                 f"=matriz_captura!G{r}", "",
                 f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r})',
                 f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r}, 0)',
