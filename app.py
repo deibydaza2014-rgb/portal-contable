@@ -3055,7 +3055,38 @@ with tab_auditoria:
         st.markdown("### 📋 Asiento Contable del Comprobante (Cómo se Contabilizó)")
         st.caption("Detalle de partida doble con imputación de cuentas, débitos, créditos y sumas iguales:")
         
-        asiento_filas = []
+        fac_num_aud = str(fac_sel["Factura"]).strip()
+        asientos_map = st.session_state.get("asientos_triangulacion_por_factura", {})
+        asiento_triang_aprobado = asientos_map.get(fac_num_aud) or st.session_state.get(f"asiento_triang_aprobado_{fac_num_aud}")
+        
+        # Si aún no está en el mapa, verificar si pertenece a algún paquete listo en triangulación
+        if asiento_triang_aprobado is None and "paquetes_importacion" in st.session_state:
+            for p_k, p_v in st.session_state["paquetes_importacion"].items():
+                if str(p_v["agente"]["Factura"]).strip() == fac_num_aud:
+                    if st.session_state.get(f"paquete_listo_{p_k}", False) or p_v.get("diferencia", 999) < 1.0:
+                        en_nd_k = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
+                        en_gp_k = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
+                        en_h2_k = st.session_state.get(f"enviar_h2_pq_{p_k}", False)
+                        df_as_k, _, _ = generar_asiento_triangulacion_paquete(p_v["agente"], p_v["terceros"], enviar_a_no_deducible=en_nd_k, enviar_a_gastos_propios=en_gp_k, enviar_a_hoja2=en_h2_k)
+                        asiento_triang_aprobado = df_as_k
+                        asientos_map[fac_num_aud] = df_as_k
+                        st.session_state["asientos_triangulacion_por_factura"] = asientos_map
+                        break
+                        
+        if asiento_triang_aprobado is not None and not (isinstance(asiento_triang_aprobado, pd.DataFrame) and asiento_triang_aprobado.empty):
+            st.markdown(f"""
+            <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:12px 16px; margin-bottom:12px;">
+                <h5 style="margin:0 0 4px 0; color:#166534;">🔀 Contabilización Oficial Aprobada en Triangulación</h5>
+                <p style="margin:0; color:#14532d; font-size:13.5px;">
+                    Esta factura fue conciliada en la Pestaña 3. El asiento contable real cancela las cuentas por pagar de terceros y traslada la deuda al agente aduanero:
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            df_asiento = pd.DataFrame(asiento_triang_aprobado).copy()
+            if "Descripción de la Cuenta" not in df_asiento.columns and "Descripción Cuenta" in df_asiento.columns:
+                df_asiento["Descripción de la Cuenta"] = df_asiento["Descripción Cuenta"]
+        else:
+            asiento_filas = []
         es_nc = "Devolucion" in str(fac_sel["Operacion"])
         asume_ret = bool(fac_sel.get("Impuestos Asumidos", False))
         cta_cxp_usar = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
@@ -3152,7 +3183,9 @@ with tab_auditoria:
                 "Crédito ($)": 0.0 if es_nc else neto_cxp
             })
         
-        df_asiento = pd.DataFrame(asiento_filas)
+        if 'df_asiento' not in locals() or df_asiento is None:
+            df_asiento = pd.DataFrame(asiento_filas)
+            
         st.dataframe(
             df_asiento.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
             use_container_width=True,
@@ -3486,11 +3519,20 @@ with tab_triangulacion:
                         st.rerun()
                 with c_top_b2:
                     if st.button("✅ Aprobar Cuadrados", key="btn_aprobar_todos_cuad", help="Marca como listos para contabilidad todos los paquetes cuadrados a $0.00"):
+                        if "asientos_triangulacion_por_factura" not in st.session_state:
+                            st.session_state["asientos_triangulacion_por_factura"] = {}
                         for p_k, p_v in pqs_actuales.items():
                             if p_v.get("diferencia", 999) < 1.0:
                                 st.session_state[f"paquete_listo_{p_k}"] = True
+                                ag_k = p_v["agente"]
+                                tr_k = p_v["terceros"]
+                                en_nd_k = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
+                                en_gp_k = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
+                                en_h2_k = st.session_state.get(f"enviar_h2_pq_{p_k}", False)
+                                df_as_k, _, _ = generar_asiento_triangulacion_paquete(ag_k, tr_k, enviar_a_no_deducible=en_nd_k, enviar_a_gastos_propios=en_gp_k, enviar_a_hoja2=en_h2_k)
+                                st.session_state["asientos_triangulacion_por_factura"][str(ag_k["Factura"]).strip()] = df_as_k
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                        st.success("¡Paquetes cuadrados aprobados para contabilidad!")
+                        st.success("¡Paquetes cuadrados aprobados y llevados a la Hoja 2 para la planilla!")
                         st.rerun()
 
             # Resumen visual del Paquete Seleccionado
@@ -3517,7 +3559,21 @@ with tab_triangulacion:
                     if st.button(f"✅ Dejar Listo Paquete #{pq_id_sel} para Contabilidad", key=f"btn_marcar_listo_{pq_id_sel}", use_container_width=True):
                         st.session_state[f"paquete_listo_{pq_id_sel}"] = True
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                        st.success(f"¡Paquete #{pq_id_sel} listo para contabilidad!")
+                        
+                        # Llevar y reemplazar la contabilización en la Hoja 2
+                        df_as_aprob, _, _ = generar_asiento_triangulacion_paquete(
+                            agente_actual, terceros_actual,
+                            enviar_a_no_deducible=enviar_nd_activo,
+                            enviar_a_gastos_propios=enviar_gp_activo,
+                            enviar_a_hoja2=enviar_h2_activo
+                        )
+                        if "asientos_triangulacion_por_factura" not in st.session_state:
+                            st.session_state["asientos_triangulacion_por_factura"] = {}
+                        ag_fac_str = str(agente_actual["Factura"]).strip()
+                        st.session_state["asientos_triangulacion_por_factura"][ag_fac_str] = df_as_aprob
+                        st.session_state[f"asiento_triang_aprobado_{ag_fac_str}"] = df_as_aprob
+                        
+                        st.success(f"¡Paquete #{pq_id_sel} aprobado! Se llevó la contabilización a la Hoja 2 y quedó lista para la planilla.")
                         st.rerun()
                 else:
                     st.success(f"✅ **Paquete #{pq_id_sel} LISTO para Contabilidad** | Fecha: **{agente_actual['Fecha']}**")
@@ -3817,7 +3873,21 @@ with tab_triangulacion:
                     if st.button("✅ Aprobar y Dejar Listo (Chulear)", key=f"btn_aprobar_h2_directo_{pq_id_sel}", type="primary", use_container_width=True):
                         st.session_state[f"paquete_listo_{pq_id_sel}"] = True
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                        st.success(f"¡Paquete #{pq_id_sel} validado, aprobado y chuleado con éxito!")
+                        
+                        # Llevar y reemplazar la contabilización en la Hoja 2
+                        df_as_aprob, _, _ = generar_asiento_triangulacion_paquete(
+                            agente_actual, terceros_actual,
+                            enviar_a_no_deducible=enviar_nd_activo,
+                            enviar_a_gastos_propios=enviar_gp_activo,
+                            enviar_a_hoja2=enviar_h2_activo
+                        )
+                        if "asientos_triangulacion_por_factura" not in st.session_state:
+                            st.session_state["asientos_triangulacion_por_factura"] = {}
+                        ag_fac_str = str(agente_actual["Factura"]).strip()
+                        st.session_state["asientos_triangulacion_por_factura"][ag_fac_str] = df_as_aprob
+                        st.session_state[f"asiento_triang_aprobado_{ag_fac_str}"] = df_as_aprob
+                        
+                        st.success(f"¡Paquete #{pq_id_sel} validado, aprobado y llevado a la Hoja 2 para la planilla oficial!")
                         st.rerun()
 
             # CALCULAR ASIENTO CONTABLE CUADRADO DEL PAQUETE SELECCIONADO
@@ -4071,10 +4141,41 @@ with tab_siigo:
         ws_interfaz.append(headers_interfaz)
         
         fila_r = 2
+        asientos_triang_map_siigo = st.session_state.get("asientos_triangulacion_por_factura", {})
+        
         for _, item in df_p.iterrows():
             t_comp = item["Tipo Comp"]
             cons = item["Consecutivo"]
             f_str = item["Fecha"]
+            fn_item = str(item["Factura"]).strip()
+            
+            # Si esta factura tiene contabilización aprobada desde triangulación, se exporta su asiento real
+            if fn_item in asientos_triang_map_siigo:
+                df_as_tr = asientos_triang_map_siigo[fn_item]
+                f_limpia_op = normalizar_fecha_dian(f_str)
+                for _, r_as in df_as_tr.iterrows():
+                    cta_code = str(r_as["Código Cuenta"]).strip()
+                    nit_clean = re.sub(r'\D', '', str(r_as["Tercero / NIT"]).split("-")[0])
+                    deb_v = float(r_as["Débito ($)"])
+                    cred_v = float(r_as["Crédito ($)"])
+                    desc_line = str(r_as.get("Descripción de la Cuenta") or r_as.get("Descripción Cuenta") or "")[:40]
+                    
+                    ws_interfaz.append([
+                        t_comp, cons, f_limpia_op, "COP", 1,
+                        cta_code, nit_clean, 0, "", "", "", "",
+                        item.get("Prefijo", "IMP"), item.get("Folio", str(item.get("Factura", ""))),
+                        1, f_limpia_op, "", "", "",
+                        desc_line, "", deb_v, cred_v,
+                        f"Triangulación {item['Proveedor'][:15]} Fac {item['Factura']}",
+                        0.0, 0.0, ""
+                    ])
+                    ws_matriz.append([
+                        t_comp, cons, f_limpia_op, nit_clean,
+                        item.get("Prefijo", "IMP"), item.get("Folio", str(item.get("Factura", ""))),
+                        desc_line, "Cruce Triangulación", cta_code, deb_v, 0.0, 0.0, 0.0, 0.0, "22050501"
+                    ])
+                fila_r += len(df_as_tr)
+                continue
             nit = item["NIT Emisor"]
             pref = item["Prefijo"]
             fac_num = item["Folio"]
