@@ -35,16 +35,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. ESTADOS DE SESION (CON PERSISTENCIA CONTRA REINICIOS Y TIMEOUT DE 1 HORA)
-ses_previa = verificar_sesion_persistente(timeout_segundos=3600)
 
-if "autenticado" not in st.session_state:
-    st.session_state["autenticado"] = True if (ses_previa and ses_previa.get("autenticado")) else False
-if "empresa_activa" not in st.session_state:
-    st.session_state["empresa_activa"] = None
-if "proceso_activo" not in st.session_state:
-    st.session_state["proceso_activo"] = "facturacion" if (ses_previa and ses_previa.get("autenticado")) else None
 
+# ==============================================================================
+# CONFIGURACIÓN DE DIRECTORIOS Y SISTEMA DE AUTO-GUARDADO CONTINUO
+# ==============================================================================
 # ==============================================================================
 # CONFIGURACIÓN DE DIRECTORIOS Y SISTEMA DE AUTO-GUARDADO CONTINUO
 # ==============================================================================
@@ -57,10 +52,12 @@ SESION_PERSISTENTE_FILE = os.path.join(DATA_DIR, "sesion_activa.json")
 def registrar_actividad_sesion(empresa_dict=None):
     """Actualiza la marca de tiempo de la sesión activa en disco."""
     try:
-        nit_emp = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if empresa_dict else None
+        nit_emp = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if (empresa_dict and isinstance(empresa_dict, dict)) else None
+        emp_guardar = empresa_dict if (empresa_dict and isinstance(empresa_dict, dict)) else st.session_state.get("empresa_activa")
         data = {
             "autenticado": True,
             "empresa_nit": nit_emp,
+            "empresa_dict": emp_guardar,
             "proceso_activo": "facturacion",
             "ultima_actividad": time.time(),
             "hora_legible": datetime.datetime.now().strftime("%d/%m/%Y %I:%M:%S %p")
@@ -80,7 +77,7 @@ def verificar_sesion_persistente(timeout_segundos=3600):
         tiempo_inactivo = time.time() - float(data.get("ultima_actividad", 0))
         if tiempo_inactivo < timeout_segundos:
             # Sesión viva: actualizar última actividad
-            registrar_actividad_sesion()
+            registrar_actividad_sesion(data.get("empresa_dict"))
             return data
         else:
             # Más de 1 hora sin movimiento: cerrar y expirar sesión
@@ -211,6 +208,17 @@ def verificar_y_recuperar_guardado_automatico(empresa_dict):
     except Exception:
         pass
     return False
+
+
+# 1. ESTADOS DE SESION (CON PERSISTENCIA CONTRA REINICIOS Y TIMEOUT DE 1 HORA)
+ses_previa = verificar_sesion_persistente(timeout_segundos=3600)
+
+if "autenticado" not in st.session_state:
+    st.session_state["autenticado"] = True if (ses_previa and ses_previa.get("autenticado")) else False
+if "empresa_activa" not in st.session_state:
+    st.session_state["empresa_activa"] = (ses_previa.get("empresa_dict") if (ses_previa and isinstance(ses_previa.get("empresa_dict"), dict)) else None)
+if "proceso_activo" not in st.session_state:
+    st.session_state["proceso_activo"] = "facturacion" if (ses_previa and ses_previa.get("autenticado")) else None
 
 
 # PANTALLA 1: LOGIN
@@ -413,62 +421,7 @@ st.markdown("---")
 # ==============================================================================
 # GESTOR DE HISTORIAL DE TRABAJOS Y AUDITORÍAS PASADAS (PERSISTENCIA TOTAL)
 # ==============================================================================
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "almacenamiento_contable")
-os.makedirs(DATA_DIR, exist_ok=True)
-import time
-
-SESION_PERSISTENTE_FILE = os.path.join(DATA_DIR, "sesion_activa.json")
-
-def registrar_actividad_sesion(empresa_dict=None):
-    """Actualiza la marca de tiempo de la sesión activa en disco."""
-    try:
-        nit_emp = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if empresa_dict else None
-        data = {
-            "autenticado": True,
-            "empresa_nit": nit_emp,
-            "proceso_activo": "facturacion",
-            "ultima_actividad": time.time(),
-            "hora_legible": datetime.datetime.now().strftime("%d/%m/%Y %I:%M:%S %p")
-        }
-        with open(SESION_PERSISTENTE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-def verificar_sesion_persistente(timeout_segundos=3600):
-    """Verifica si existe una sesión válida no expirada (menos de 1 hora de inactividad)."""
-    if not os.path.exists(SESION_PERSISTENTE_FILE):
-        return None
-    try:
-        with open(SESION_PERSISTENTE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        tiempo_inactivo = time.time() - float(data.get("ultima_actividad", 0))
-        if tiempo_inactivo < timeout_segundos:
-            # Sesión viva: actualizar última actividad
-            registrar_actividad_sesion()
-            return data
-        else:
-            # Más de 1 hora sin movimiento: cerrar y expirar sesión
-            try:
-                os.remove(SESION_PERSISTENTE_FILE)
-            except Exception:
-                pass
-            return None
-    except Exception:
-        return None
-
-def cerrar_sesion_usuario():
-    """Cierra la sesión y limpia el archivo de persistencia."""
-    if os.path.exists(SESION_PERSISTENTE_FILE):
-        try:
-            os.remove(SESION_PERSISTENTE_FILE)
-        except Exception:
-            pass
-    for k in list(st.session_state.keys()):
-        st.session_state.pop(k, None)
-    st.session_state["autenticado"] = False
-    st.session_state["empresa_activa"] = None
-    st.session_state["proceso_activo"] = None
+# Funciones de sesion y directorios centralizadas en la cabecera
 
 
 def get_empresa_trabajos_dir(empresa_dict):
