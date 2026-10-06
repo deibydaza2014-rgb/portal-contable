@@ -3087,103 +3087,102 @@ with tab_auditoria:
                 df_asiento["Descripción de la Cuenta"] = df_asiento["Descripción Cuenta"]
         else:
             asiento_filas = []
-        es_nc = "Devolucion" in str(fac_sel["Operacion"])
-        asume_ret = bool(fac_sel.get("Impuestos Asumidos", False))
-        cta_cxp_usar = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
-        
-        # 1. Base / Costo (Subtotal real del documento)
-        asiento_filas.append({
-            "Código Cuenta": fac_sel["Cta Principal"],
-            "Descripción de la Cuenta": f"{fac_sel['Categoría']} - {fac_sel['Proveedor'][:25]}",
-            "Tercero / NIT": fac_sel["NIT Emisor"],
-            "Débito ($)": 0.0 if es_nc else fac_sel["Base"],
-            "Crédito ($)": fac_sel["Base"] if es_nc else 0.0
-        })
-        
-        # 2. IVA Descontable
-        if fac_sel["IVA"] > 0:
+            es_nc = "Devolucion" in str(fac_sel["Operacion"])
+            asume_ret = bool(fac_sel.get("Impuestos Asumidos", False))
+            cta_cxp_usar = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
+            
+            # 1. Base / Costo (Subtotal real del documento)
             asiento_filas.append({
-                "Código Cuenta": fac_sel["Cta IVA"],
-                "Descripción de la Cuenta": f"IVA Descontable (Base: ${fac_sel['Base']:,.0f})",
+                "Código Cuenta": fac_sel["Cta Principal"],
+                "Descripción de la Cuenta": f"{fac_sel['Categoría']} - {fac_sel['Proveedor'][:25]}",
                 "Tercero / NIT": fac_sel["NIT Emisor"],
-                "Débito ($)": 0.0 if es_nc else fac_sel["IVA"],
-                "Crédito ($)": fac_sel["IVA"] if es_nc else 0.0
+                "Débito ($)": 0.0 if es_nc else fac_sel["Base"],
+                "Crédito ($)": fac_sel["Base"] if es_nc else 0.0
             })
             
-        tot_ret = round(float(fac_sel["ReteFuente"]) + float(fac_sel.get("ReteICA", 0.0)), 2)
-        
-        if asume_ret:
-            # IMPUESTOS ASUMIDOS (Cruza con Agente Aduanero / Triangulación)
-            if tot_ret > 0:
+            # 2. IVA Descontable
+            if fac_sel["IVA"] > 0:
                 asiento_filas.append({
-                    "Código Cuenta": "53152001",
-                    "Descripción de la Cuenta": "Retenciones Asumidas (Impuestos Asumidos Aduana)",
+                    "Código Cuenta": fac_sel["Cta IVA"],
+                    "Descripción de la Cuenta": f"IVA Descontable (Base: ${fac_sel['Base']:,.0f})",
                     "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": tot_ret,
-                    "Crédito ($)": 0.0
-                })
-            if fac_sel["ReteFuente"] > 0 and fac_sel["Cta ReteFuente"]:
-                asiento_filas.append({
-                    "Código Cuenta": fac_sel["Cta ReteFuente"],
-                    "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel['Categoría']})",
-                    "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": 0.0,
-                    "Crédito ($)": fac_sel["ReteFuente"]
-                })
-            if fac_sel.get("ReteICA", 0.0) > 0 and fac_sel.get("Cta ReteICA"):
-                asiento_filas.append({
-                    "Código Cuenta": fac_sel["Cta ReteICA"],
-                    "Descripción de la Cuenta": "Retención ICA Practicada",
-                    "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": 0.0,
-                    "Crédito ($)": fac_sel["ReteICA"]
-                })
-            # Saldo por pagar al pasivo es Base + IVA (ej. $1.388.770 + $263.169 = $1.651.939)
-            saldo_cxp = round(fac_sel["Base"] + fac_sel["IVA"], 2)
-            asiento_filas.append({
-                "Código Cuenta": cta_cxp_usar,
-                "Descripción de la Cuenta": f"CxP Agente / Proveedor - Fac {fac_sel['Factura']}",
-                "Tercero / NIT": fac_sel["NIT Emisor"],
-                "Débito ($)": saldo_cxp if es_nc else 0.0,
-                "Crédito ($)": 0.0 if es_nc else saldo_cxp
-            })
-        else:
-            # RETENCIONES ORDINARIAS PRACTICADAS AL PROVEEDOR
-            if fac_sel["ReteFuente"] > 0 and fac_sel["Cta ReteFuente"]:
-                asiento_filas.append({
-                    "Código Cuenta": fac_sel["Cta ReteFuente"],
-                    "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel['Categoría']})",
-                    "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": fac_sel["ReteFuente"] if es_nc else 0.0,
-                    "Crédito ($)": 0.0 if es_nc else fac_sel["ReteFuente"]
-                })
-            if fac_sel.get("ReteICA", 0.0) > 0 and fac_sel.get("Cta ReteICA"):
-                asiento_filas.append({
-                    "Código Cuenta": fac_sel["Cta ReteICA"],
-                    "Descripción de la Cuenta": "Retención ICA Practicada",
-                    "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": fac_sel["ReteICA"] if es_nc else 0.0,
-                    "Crédito ($)": 0.0 if es_nc else fac_sel["ReteICA"]
-                })
-            if fac_sel.get("ReteIVA", 0.0) > 0:
-                asiento_filas.append({
-                    "Código Cuenta": "23670101",
-                    "Descripción de la Cuenta": "Retención de IVA Practicada (15%)",
-                    "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": fac_sel["ReteIVA"] if es_nc else 0.0,
-                    "Crédito ($)": 0.0 if es_nc else fac_sel["ReteIVA"]
+                    "Débito ($)": 0.0 if es_nc else fac_sel["IVA"],
+                    "Crédito ($)": fac_sel["IVA"] if es_nc else 0.0
                 })
                 
-            neto_cxp = round(fac_sel["Base"] + fac_sel["IVA"] - fac_sel["ReteFuente"] - fac_sel.get("ReteICA", 0.0) - fac_sel.get("ReteIVA", 0.0), 2)
-            asiento_filas.append({
-                "Código Cuenta": cta_cxp_usar,
-                "Descripción de la Cuenta": f"Proveedores Nacionales - Fac {fac_sel['Factura']}",
-                "Tercero / NIT": fac_sel["NIT Emisor"],
-                "Débito ($)": neto_cxp if es_nc else 0.0,
-                "Crédito ($)": 0.0 if es_nc else neto_cxp
-            })
-        
-        if 'df_asiento' not in locals() or df_asiento is None:
+            tot_ret = round(float(fac_sel["ReteFuente"]) + float(fac_sel.get("ReteICA", 0.0)), 2)
+            
+            if asume_ret:
+                # IMPUESTOS ASUMIDOS (Cruza con Agente Aduanero / Triangulación)
+                if tot_ret > 0:
+                    asiento_filas.append({
+                        "Código Cuenta": "53152001",
+                        "Descripción de la Cuenta": "Retenciones Asumidas (Impuestos Asumidos Aduana)",
+                        "Tercero / NIT": fac_sel["NIT Emisor"],
+                        "Débito ($)": tot_ret,
+                        "Crédito ($)": 0.0
+                    })
+                if fac_sel["ReteFuente"] > 0 and fac_sel["Cta ReteFuente"]:
+                    asiento_filas.append({
+                        "Código Cuenta": fac_sel["Cta ReteFuente"],
+                        "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel['Categoría']})",
+                        "Tercero / NIT": fac_sel["NIT Emisor"],
+                        "Débito ($)": 0.0,
+                        "Crédito ($)": fac_sel["ReteFuente"]
+                    })
+                if fac_sel.get("ReteICA", 0.0) > 0 and fac_sel.get("Cta ReteICA"):
+                    asiento_filas.append({
+                        "Código Cuenta": fac_sel["Cta ReteICA"],
+                        "Descripción de la Cuenta": "Retención ICA Practicada",
+                        "Tercero / NIT": fac_sel["NIT Emisor"],
+                        "Débito ($)": 0.0,
+                        "Crédito ($)": fac_sel["ReteICA"]
+                    })
+                # Saldo por pagar al pasivo es Base + IVA (ej. $1.388.770 + $263.169 = $1.651.939)
+                saldo_cxp = round(fac_sel["Base"] + fac_sel["IVA"], 2)
+                asiento_filas.append({
+                    "Código Cuenta": cta_cxp_usar,
+                    "Descripción de la Cuenta": f"CxP Agente / Proveedor - Fac {fac_sel['Factura']}",
+                    "Tercero / NIT": fac_sel["NIT Emisor"],
+                    "Débito ($)": saldo_cxp if es_nc else 0.0,
+                    "Crédito ($)": 0.0 if es_nc else saldo_cxp
+                })
+            else:
+                # RETENCIONES ORDINARIAS PRACTICADAS AL PROVEEDOR
+                if fac_sel["ReteFuente"] > 0 and fac_sel["Cta ReteFuente"]:
+                    asiento_filas.append({
+                        "Código Cuenta": fac_sel["Cta ReteFuente"],
+                        "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel['Categoría']})",
+                        "Tercero / NIT": fac_sel["NIT Emisor"],
+                        "Débito ($)": fac_sel["ReteFuente"] if es_nc else 0.0,
+                        "Crédito ($)": 0.0 if es_nc else fac_sel["ReteFuente"]
+                    })
+                if fac_sel.get("ReteICA", 0.0) > 0 and fac_sel.get("Cta ReteICA"):
+                    asiento_filas.append({
+                        "Código Cuenta": fac_sel["Cta ReteICA"],
+                        "Descripción de la Cuenta": "Retención ICA Practicada",
+                        "Tercero / NIT": fac_sel["NIT Emisor"],
+                        "Débito ($)": fac_sel["ReteICA"] if es_nc else 0.0,
+                        "Crédito ($)": 0.0 if es_nc else fac_sel["ReteICA"]
+                    })
+                if fac_sel.get("ReteIVA", 0.0) > 0:
+                    asiento_filas.append({
+                        "Código Cuenta": "23670101",
+                        "Descripción de la Cuenta": "Retención de IVA Practicada (15%)",
+                        "Tercero / NIT": fac_sel["NIT Emisor"],
+                        "Débito ($)": fac_sel["ReteIVA"] if es_nc else 0.0,
+                        "Crédito ($)": 0.0 if es_nc else fac_sel["ReteIVA"]
+                    })
+                    
+                neto_cxp = round(fac_sel["Base"] + fac_sel["IVA"] - fac_sel["ReteFuente"] - fac_sel.get("ReteICA", 0.0) - fac_sel.get("ReteIVA", 0.0), 2)
+                asiento_filas.append({
+                    "Código Cuenta": cta_cxp_usar,
+                    "Descripción de la Cuenta": f"Proveedores Nacionales - Fac {fac_sel['Factura']}",
+                    "Tercero / NIT": fac_sel["NIT Emisor"],
+                    "Débito ($)": neto_cxp if es_nc else 0.0,
+                    "Crédito ($)": 0.0 if es_nc else neto_cxp
+                })
+            
             df_asiento = pd.DataFrame(asiento_filas)
             
         st.dataframe(
