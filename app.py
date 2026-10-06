@@ -3506,6 +3506,10 @@ with tab_triangulacion:
             agente_actual = paquete_activo["agente"]
             terceros_actual = paquete_activo["terceros"]
             tot_agente_actual = float(agente_actual["Total"])
+            
+            enviar_gp_activo = st.session_state.get(f"enviar_gp_pq_{pq_id_sel}", False)
+            enviar_h2_activo = st.session_state.get(f"enviar_h2_pq_{pq_id_sel}", False)
+            enviar_nd_activo = st.session_state.get(f"enviar_nd_pq_{pq_id_sel}", False)
 
             with c_top_pq2:
                 st.write("")
