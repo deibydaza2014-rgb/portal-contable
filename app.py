@@ -457,17 +457,21 @@ def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, e
             with open(os.path.join(job_dir, "excel_original.xlsx"), "wb") as f_ex:
                 f_ex.write(excel_bytes)
 
-        # 3. Guardar PDFs renombrados / separados
+        # 3. Guardar PDFs renombrados / separados (escritura inteligente: solo si no existe o cambió)
         if dict_pdfs_renombrados:
             for fname, bdata in dict_pdfs_renombrados.items():
-                with open(os.path.join(dir_renom, fname), "wb") as pf:
-                    pf.write(bdata)
+                p_ren = os.path.join(dir_renom, fname)
+                if not os.path.exists(p_ren) or os.path.getsize(p_ren) != len(bdata):
+                    with open(p_ren, "wb") as pf:
+                        pf.write(bdata)
 
-        # 4. Guardar PDFs originales subidos (unificados o separados)
+        # 4. Guardar PDFs originales subidos (escritura inteligente: solo si no existe o cambió)
         if dict_pdfs_originales:
             for fname, bdata in dict_pdfs_originales.items():
-                with open(os.path.join(dir_orig, fname), "wb") as pf:
-                    pf.write(bdata)
+                p_ori = os.path.join(dir_orig, fname)
+                if not os.path.exists(p_ori) or os.path.getsize(p_ori) != len(bdata):
+                    with open(p_ori, "wb") as pf:
+                        pf.write(bdata)
 
         # 5. Guardar paquete ZIP de facturas si existe
         if zip_bytes:
@@ -766,14 +770,39 @@ def exportar_respaldo_sesion_zip(empresa_dict, df_proc, dict_renom, dict_orig, e
         if mem_actual:
             zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
         zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        # PDFs ya vienen comprimidos internamente (FlateDecode). Usar compresión directa ultra-rápida
         if dict_renom:
             for fn, bdata in dict_renom.items():
-                zf.writestr(f"pdfs_renombrados/{fn}", bdata)
+                zinfo = zipfile.ZipInfo(f"pdfs_renombrados/{fn}")
+                zinfo.compress_type = zipfile.ZIP_STORED
+                zf.writestr(zinfo, bdata)
         if dict_orig:
             for fn, bdata in dict_orig.items():
-                zf.writestr(f"pdfs_originales/{fn}", bdata)
+                zinfo = zipfile.ZipInfo(f"pdfs_originales/{fn}")
+                zinfo.compress_type = zipfile.ZIP_STORED
+                zf.writestr(zinfo, bdata)
     buf.seek(0)
     return buf.getvalue()
+
+
+def obtener_respaldo_sesion_cached(empresa_dict):
+    """Devuelve el archivo de respaldo cacheado en memoria, regenerándolo solo cuando hay cambios."""
+    if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
+        return b""
+    df_p = st.session_state["df_procesado"]
+    d_ren = st.session_state.get("dict_pdfs", {})
+    d_ori = st.session_state.get("raw_uploaded_pdfs", {})
+    sig_actual = f"{len(df_p)}_{len(d_ren)}_{len(d_ori)}_{st.session_state.get('_ultimo_autosave_hora', '')}"
+    if st.session_state.get("_cached_respaldo_sig") != sig_actual or "_cached_respaldo_bytes" not in st.session_state:
+        b_data = exportar_respaldo_sesion_zip(
+            empresa_dict, df_p, d_ren, d_ori,
+            st.session_state.get("excel_bytes"),
+            st.session_state.get("excel_nombre", "Reporte.xlsx"),
+            st.session_state.get("zip_pdfs")
+        )
+        st.session_state["_cached_respaldo_bytes"] = b_data
+        st.session_state["_cached_respaldo_sig"] = sig_actual
+    return st.session_state.get("_cached_respaldo_bytes", b"")
 
 def importar_respaldo_sesion_zip(zip_bytes, empresa_dict):
     """Restaura una sesión contable completa desde un archivo ZIP de respaldo."""
@@ -2450,17 +2479,23 @@ def generar_respaldo_portatil_bytes(empresa_dict):
             if mem_actual:
                 zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
 
-            # 7. PDFs si existen en la sesión
+            # 7. PDFs si existen en la sesión (ZIP_STORED para que sea instantáneo sin bloquear CPU)
             dict_renom_s = st.session_state.get("dict_pdfs", {})
             if dict_renom_s:
                 for fn, bdata in dict_renom_s.items():
-                    zf.writestr(f"pdfs_renombrados/{fn}", bdata)
+                    zinfo = zipfile.ZipInfo(f"pdfs_renombrados/{fn}")
+                    zinfo.compress_type = zipfile.ZIP_STORED
+                    zf.writestr(zinfo, bdata)
             dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
             if dict_orig_s:
                 for fn, bdata in dict_orig_s.items():
-                    zf.writestr(f"pdfs_originales/{fn}", bdata)
+                    zinfo = zipfile.ZipInfo(f"pdfs_originales/{fn}")
+                    zinfo.compress_type = zipfile.ZIP_STORED
+                    zf.writestr(zinfo, bdata)
             if st.session_state.get("zip_pdfs"):
-                zf.writestr("paquete_facturas.zip", st.session_state["zip_pdfs"])
+                zinfo = zipfile.ZipInfo("paquete_facturas.zip")
+                zinfo.compress_type = zipfile.ZIP_STORED
+                zf.writestr(zinfo, st.session_state["zip_pdfs"])
 
         buf.seek(0)
         return buf.getvalue()
@@ -2568,7 +2603,7 @@ if "df_procesado" in st.session_state and st.session_state["df_procesado"] is no
             st.session_state["job_actual_id"] = jid
             st.success("✅ ¡Progreso contable guardado y reglas memorizadas para futuros meses!")
     with c_bnr3:
-        b_resp = generar_respaldo_portatil_bytes(empresa)
+        b_resp = obtener_respaldo_sesion_cached(empresa)
         if b_resp:
             nit_clean_f = re.sub(r'\D', '', str(empresa['nit']))
             stamp_f = datetime.datetime.now().strftime('%Y%m%d_%H%M')
@@ -2658,15 +2693,7 @@ with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", exp
 
         # 1. Botón para exportar respaldo de la sesión activa
         if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-            zip_respaldo_bytes = exportar_respaldo_sesion_zip(
-                empresa,
-                st.session_state.get("df_procesado"),
-                st.session_state.get("dict_pdfs", {}),
-                st.session_state.get("raw_uploaded_pdfs", {}),
-                st.session_state.get("excel_bytes"),
-                st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                st.session_state.get("zip_pdfs")
-            )
+            zip_respaldo_bytes = obtener_respaldo_sesion_cached(empresa)
             nom_respaldo = f"Respaldo_Sesion_{empresa['nombre'].replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d')}.zip"
             st.download_button(
                 label="💾 Descargar Respaldo Completo de esta Sesión (.zip)",
@@ -2945,14 +2972,7 @@ with tab_compras:
                     use_container_width=True
                 )
         with c_job4:
-            zip_respaldo_b = exportar_respaldo_sesion_zip(
-                empresa, df_proc,
-                st.session_state.get("dict_pdfs", {}),
-                st.session_state.get("raw_uploaded_pdfs", {}),
-                st.session_state.get("excel_bytes"),
-                st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                st.session_state.get("zip_pdfs")
-            )
+            zip_respaldo_b = obtener_respaldo_sesion_cached(empresa)
             st.download_button(
                 label="💾 Guardar Sesión (.zip)",
                 data=zip_respaldo_b,
