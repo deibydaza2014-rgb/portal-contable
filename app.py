@@ -126,6 +126,12 @@ def ejecutar_guardado_automatico_sesion(empresa_dict):
         if st.session_state.get("asientos_triangulacion_por_factura"):
             with open(os.path.join(a_dir, "asientos_triangulacion.pkl"), "wb") as f:
                 pickle.dump(st.session_state["asientos_triangulacion_por_factura"], f)
+        if st.session_state.get("dict_pdfs"):
+            with open(os.path.join(a_dir, "dict_pdfs.pkl"), "wb") as f:
+                pickle.dump(st.session_state["dict_pdfs"], f)
+        if st.session_state.get("raw_uploaded_pdfs"):
+            with open(os.path.join(a_dir, "raw_uploaded_pdfs.pkl"), "wb") as f:
+                pickle.dump(st.session_state["raw_uploaded_pdfs"], f)
         estado_flags = {
             "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
             "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
@@ -184,6 +190,23 @@ def verificar_y_recuperar_guardado_automatico(empresa_dict):
             if os.path.exists(as_path):
                 with open(as_path, "rb") as f:
                     st.session_state["asientos_triangulacion_por_factura"] = pickle.load(f)
+
+            pdf_ren_path = os.path.join(a_dir, "dict_pdfs.pkl")
+            if os.path.exists(pdf_ren_path):
+                try:
+                    with open(pdf_ren_path, "rb") as f:
+                        st.session_state["dict_pdfs"] = pickle.load(f)
+                        st.session_state["total_zip_pdfs"] = len(st.session_state["dict_pdfs"])
+                except Exception:
+                    pass
+
+            pdf_raw_path = os.path.join(a_dir, "raw_uploaded_pdfs.pkl")
+            if os.path.exists(pdf_raw_path):
+                try:
+                    with open(pdf_raw_path, "rb") as f:
+                        st.session_state["raw_uploaded_pdfs"] = pickle.load(f)
+                except Exception:
+                    pass
                     
             st_path = os.path.join(a_dir, "estado_sesion.json")
             if os.path.exists(st_path):
@@ -3161,21 +3184,29 @@ with tab_compras:
             st.info("💡 **Garantía de Factura Completa:** El motor inteligente detecta dónde empieza cada factura (Prefijo, Folio, NIT y marcadores de paginación). Todas las páginas de una misma factura se unen en un solo archivo PDF completo nombrado `Comp_10-XXX_Factura_Proveedor.pdf`.")
 
         if st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora"):
+            df_ref = st.session_state.get("df_procesado", pd.DataFrame())
+
+            # Lista de PDFs a procesar: los recién subidos o los almacenados en la sesión
+            pdfs_a_procesar = archivos_pdfs if archivos_pdfs else [
+                io.BytesIO(b_bytes) for b_bytes in st.session_state.get("raw_uploaded_pdfs", {}).values()
+            ]
+
+            if not pdfs_a_procesar:
+                st.warning("⚠️ No hay archivos PDF para procesar. Por favor sube tus facturas en el campo '2. Facturas en PDF (unificadas o separadas)' arriba antes de hacer clic en desbloquear.")
+                st.stop()
+
             buffer_zip = io.BytesIO()
             total_generados = 0
 
             if "dict_pdfs" not in st.session_state:
                 st.session_state["dict_pdfs"] = {}
 
+            total_pdfs_count = len(pdfs_a_procesar)
+            prog_bar_pdf = st.progress(0, text=f"Iniciando procesamiento de {total_pdfs_count} archivo(s) PDF...")
+
             with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                df_ref = st.session_state.get("df_procesado", pd.DataFrame())
-
-                # Lista de PDFs a procesar: los recién subidos o los almacenados en la sesión
-                pdfs_a_procesar = archivos_pdfs if archivos_pdfs else [
-                    io.BytesIO(b_bytes) for b_bytes in st.session_state.get("raw_uploaded_pdfs", {}).values()
-                ]
-
                 for idx_pdf, pdf_item in enumerate(pdfs_a_procesar):
+                    prog_bar_pdf.progress(min(1.0, (idx_pdf + 1) / total_pdfs_count), text=f"Procesando PDF {idx_pdf + 1} de {total_pdfs_count}...")
                     try:
                         pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
                         reader = PdfReader(pdf_item)
@@ -3434,6 +3465,7 @@ with tab_compras:
                     except Exception as e:
                         st.error(f"Error procesando {pdf_name}: {e}")
 
+            prog_bar_pdf.empty()
             buffer_zip.seek(0)
             st.session_state["zip_pdfs"] = buffer_zip.getvalue()
             st.session_state["total_zip_pdfs"] = total_generados
