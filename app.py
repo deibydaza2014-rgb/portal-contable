@@ -4520,12 +4520,26 @@ with tab_triangulacion:
                         st.rerun()
 
             # 3. BOTONES CLAVE DE CONTABILIZACIÓN: MERCANCÍAS EN TRÁNSITO VS DEJAR CONTABILIZACIÓN COMO LA HOJA DOS
-            enviar_gp_activo = st.session_state.get(f"enviar_gp_pq_{pq_id_sel}", False)
-            enviar_h2_activo = st.session_state.get(f"enviar_h2_pq_{pq_id_sel}", False)
-            enviar_nd_activo = st.session_state.get(f"enviar_nd_pq_{pq_id_sel}", False)
+            pid_str = str(pq_id_sel)
+            enviar_gp_activo = bool(st.session_state.get("enviar_gp_pq_" + pid_str, False))
+            enviar_h2_activo = bool(st.session_state.get("enviar_h2_pq_" + pid_str, False))
+            enviar_nd_activo = bool(st.session_state.get("enviar_nd_pq_" + pid_str, False))
             
+            # Helper seguro para alternar banderas de tratamiento contable sin f-strings
+            def aplicar_banderas_tratamiento(p_id, gp=False, h2=False, nd=False):
+                p_s = str(p_id)
+                st.session_state["enviar_gp_pq_" + p_s] = gp
+                st.session_state["enviar_h2_pq_" + p_s] = h2
+                st.session_state["enviar_nd_pq_" + p_s] = nd
+                st.session_state["sel_paquete_activo_key"] = p_id
+
             # Pre-cálculo para conocer el saldo o faltante
-            df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_hoja2=False)
+            df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(
+                agente_actual, terceros_actual,
+                enviar_a_no_deducible=False,
+                enviar_a_gastos_propios=False,
+                enviar_a_hoja2=False
+            )
             
             nom_ag_hdr = str(agente_actual.get("Proveedor", "Agente"))
             fec_ag_hdr = str(agente_actual.get("Fecha", ""))
@@ -4535,7 +4549,7 @@ with tab_triangulacion:
             
             hdr_html = (
                 '<div style="background:#f8fafc; border:2px solid #0070ba; border-radius:8px; padding:16px; margin:14px 0;">'
-                '<h4 style="margin:0 0 6px 0; color:#0070ba;">⚖️ Tratamiento Contable para el Paquete #' + str(pq_id_sel) + ' (Cobro ' + nom_ag_hdr + '):</h4>'
+                '<h4 style="margin:0 0 6px 0; color:#0070ba;">⚖️ Tratamiento Contable para el Paquete #' + pid_str + ' (Cobro ' + nom_ag_hdr + '):</h4>'
                 '<p style="margin:0 0 10px 0; font-size:13.5px; color:#334155;">'
                 'Selecciona cómo deseas registrar este paquete en la fecha de operación (<b>' + fec_ag_hdr + '</b>):'
                 '</p>'
@@ -4547,12 +4561,9 @@ with tab_triangulacion:
             
             with c_btn_mt:
                 st.markdown("<b style='color:#0284c7;'>📦 Opción 1: Mercancías en Tránsito</b><br><span style='font-size:12px; color:#475569;'>Envía el valor directamente a Inventarios en Tránsito (Cta 14650501):</span>", unsafe_allow_html=True)
-                lbl_btn_mt = "📦 Mercancías en Tránsito (14650501)" if dif_faltante_prev <= 0.05 else f"📦 Mercancías en Tránsito (${dif_faltante_prev:,.2f})"
-                if st.button(lbl_btn_mt, key=f"btn_exact_mt_{pq_id_sel}", type="primary" if enviar_gp_activo else "secondary", use_container_width=True):
-                    st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = True
-                    st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
-                    st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
-                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                lbl_btn_mt = "📦 Mercancías en Tránsito (14650501)" if dif_faltante_prev <= 0.05 else ("📦 Mercancías en Tránsito ($" + f"{dif_faltante_prev:,.2f}" + ")")
+                if st.button(lbl_btn_mt, key="btn_exact_mt_" + pid_str, type="primary" if enviar_gp_activo else "secondary", use_container_width=True):
+                    aplicar_banderas_tratamiento(pq_id_sel, gp=True, h2=False, nd=False)
                     ejecutar_guardado_automatico_sesion(empresa)
                     st.success("¡Asignado a Mercancías en Tránsito (14650501)!")
                     st.rerun()
@@ -4560,34 +4571,29 @@ with tab_triangulacion:
             with c_btn_h2:
                 st.markdown("<b style='color:#16a34a;'>📋 Opción 2: Como en la Hoja 2</b><br><span style='font-size:12px; color:#475569;'>Trae y deja la contabilización exactamente como en la Hoja 2 para validar:</span>", unsafe_allow_html=True)
                 lbl_btn_h2 = "📋 Dejar Contabilización como la Hoja Dos"
-                if st.button(lbl_btn_h2, key=f"btn_exact_h2_{pq_id_sel}", type="primary" if enviar_h2_activo else "secondary", use_container_width=True):
-                    st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = True
-                    st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
-                    st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
-                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                if st.button(lbl_btn_h2, key="btn_exact_h2_" + pid_str, type="primary" if enviar_h2_activo else "secondary", use_container_width=True):
+                    aplicar_banderas_tratamiento(pq_id_sel, gp=False, h2=True, nd=False)
                     ejecutar_guardado_automatico_sesion(empresa)
                     st.success("¡Contabilización de la Hoja 2 traída con éxito para validación!")
                     st.rerun()
                     
             with c_btn_nd:
                 st.markdown("<b style='color:#b91c1c;'>🔴 Opción 3: No Deducibles</b><br><span style='font-size:12px; color:#475569;'>Diferencia sin soporte DIAN:</span>", unsafe_allow_html=True)
-                if st.button("🔴 No Deducibles (53950501)", key=f"btn_exact_nd_{pq_id_sel}", type="primary" if enviar_nd_activo else "secondary", use_container_width=True):
-                    st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
-                    st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
-                    st.session_state[f"enviar_h2_
-pq_{pq_id_sel}"] = False
-                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                lbl_btn_nd = "🔴 No Deducibles (53950501)"
+                if st.button(lbl_btn_nd, key="btn_exact_nd_" + pid_str, type="primary" if enviar_nd_activo else "secondary", use_container_widt
+h=True):
+                    aplicar_banderas_tratamiento(pq_id_sel, gp=False, h2=False, nd=True)
                     ejecutar_guardado_automatico_sesion(empresa)
                     st.success("¡Enviado a Gastos No Deducibles (53950501)!")
                     st.rerun()
                     
             if enviar_gp_activo:
-                st.info(f"✅ **Tratamiento Activo:** Se enviaron **${dif_faltante_prev:,.2f}** a **Mercancías en Tránsito (Cuenta 14650501)** como costo directo de inventario.")
+                st.info("✅ **Tratamiento Activo:** Se enviaron **$" + f"{dif_faltante_prev:,.2f}" + "** a **Mercancías en Tránsito (Cuenta 14650501)** como costo directo de inventario.")
             elif enviar_h2_activo:
                 msg_h2_txt = "✅ **Tratamiento Activo:** Se trajo la contabilización **exactamente como en la Hoja 2** (" + cat_ag_h2 + " Cta " + cta_ag_h2 + ") para que la valides y apruebes."
                 st.success(msg_h2_txt)
             elif enviar_nd_activo:
-                st.info(f"✅ **Tratamiento Activo:** Se enviaron **${dif_faltante_prev:,.2f}** a **Gastos No Deducibles (Cuenta 53950501)**.")
+                st.info("✅ **Tratamiento Activo:** Se enviaron **$" + f"{dif_faltante_prev:,.2f}" + "** a **Gastos No Deducibles (Cuenta 53950501)**.")
 
             # SECCIÓN ESPECÍFICA DE VALIDACIÓN Y APROBACIÓN DE CONTABILIZACIÓN DE HOJA 2
             if enviar_h2_activo:
