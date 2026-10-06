@@ -4543,12 +4543,9 @@ with tab_siigo:
             cta_rfte = item.get("Cta ReteFuente", "23654001")
             cta_rica = item.get("Cta ReteICA", "23680501")
             
-            ws_matriz.append([
-                t_comp, cons, f_str, nit, pref, fac_num,
-                desc, op, cta_p, base, iva, r
-fte, rica, riva, cta_c
-            ])
-            
+            ws_matriz.append([t_comp, cons, f_str, nit, pref, fac_num, desc, op, cta_p, base, iva, rfte, rica, riva, cta_c])
+        
+    
             r = fila_r
             # Línea 1: Base Imponible
             ws_interfaz.append([
