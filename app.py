@@ -2769,11 +2769,17 @@ with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
     st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs (unificados o separados) para desbloquear, guardar y renombrar automáticamente por comprobante.")
 
+    # Si ya tenemos los documentos cargados en el autoguardado, mostrar confirmación visible
+    n_p_carg = len(st.session_state.get("raw_uploaded_pdfs", {}))
+    n_p_proc = len(st.session_state.get("dict_pdfs", {}))
+    if n_p_carg > 0:
+        st.success(f"✅ **Autoguardado Activo:** Tienes **{n_p_carg} facturas PDF cargadas en el sistema** ({n_p_proc} vinculadas con su comprobante). Ya están disponibles en la Pestaña 2 (Auditoría) y Pestaña 3 (Triangulación). No necesitas volver a subirlas.")
+
     col_u1, col_u2 = st.columns(2)
     with col_u1:
-        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
+        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"], help="Opcional si ya cargaste tu trabajo desde el Historial.")
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (unificadas o separadas)", type=["pdf"], accept_multiple_files=True)
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (unificadas o separadas)", type=["pdf"], accept_multiple_files=True, help="Sube nuevos PDFs o reemplázalos aquí si tienes adicionales.")
 
     st.markdown("##### 🔢 3. Consecutivos Iniciales por Tipo de Comprobante Siigo:")
     st.caption("Cada tipo de comprobante lleva su propia numeración independiente. Digita en qué número vas en cada uno:")
@@ -2809,7 +2815,10 @@ with tab_compras:
                 job_id=st.session_state.get("job_actual_id")
             )
             st.session_state["_ultimo_pdfs_proc_sig"] = pdfs_sig
-            st.success(f"💾 **{len(archivos_pdfs)} archivo(s) PDF guardados** en el Historial de {empresa['nombre']}.")
+            st.success(f"💾 **{len(archivos_pdfs)} archivo(s) PDF guardados y listos** en el Historial de {empresa['nombre']}.")
+            # Auto-vincular de inmediato si ya tenemos el reporte Excel cargado
+            if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+                st.session_state["_ejecutar_desbloqueo_ahora"] = True
 
     if archivo_excel is not None:
         excel_sig = f"{archivo_excel.name}_{archivo_excel.size}_{cons_ini_fac}_{cons_ini_nc}_{cons_ini_nota}"
@@ -3210,7 +3219,7 @@ with tab_compras:
             total_pdfs_count = len(pdfs_a_procesar)
             prog_bar_pdf = st.progress(0, text=f"Iniciando procesamiento de {total_pdfs_count} archivo(s) PDF...")
 
-            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_STORED) as zf:
                 for idx_pdf, pdf_item in enumerate(pdfs_a_procesar):
                     prog_bar_pdf.progress(min(1.0, (idx_pdf + 1) / total_pdfs_count), text=f"Procesando PDF {idx_pdf + 1} de {total_pdfs_count}...")
                     try:
