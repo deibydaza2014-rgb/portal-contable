@@ -131,12 +131,7 @@ def ejecutar_guardado_automatico_sesion(empresa_dict):
         if st.session_state.get("asientos_triangulacion_por_factura"):
             with open(os.path.join(a_dir, "asientos_triangulacion.pkl"), "wb") as f:
                 pickle.dump(st.session_state["asientos_triangulacion_por_factura"], f)
-        if st.session_state.get("dict_pdfs"):
-            with open(os.path.join(a_dir, "dict_pdfs.pkl"), "wb") as f:
-                pickle.dump(st.session_state["dict_pdfs"], f)
-        if st.session_state.get("raw_uploaded_pdfs"):
-            with open(os.path.join(a_dir, "raw_uploaded_pdfs.pkl"), "wb") as f:
-                pickle.dump(st.session_state["raw_uploaded_pdfs"], f)
+
         estado_flags = {
             "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
             "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
@@ -196,22 +191,7 @@ def verificar_y_recuperar_guardado_automatico(empresa_dict):
                 with open(as_path, "rb") as f:
                     st.session_state["asientos_triangulacion_por_factura"] = pickle.load(f)
 
-            pdf_ren_path = os.path.join(a_dir, "dict_pdfs.pkl")
-            if os.path.exists(pdf_ren_path):
-                try:
-                    with open(pdf_ren_path, "rb") as f:
-                        st.session_state["dict_pdfs"] = pickle.load(f)
-                        st.session_state["total_zip_pdfs"] = len(st.session_state["dict_pdfs"])
-                except Exception:
-                    pass
 
-            pdf_raw_path = os.path.join(a_dir, "raw_uploaded_pdfs.pkl")
-            if os.path.exists(pdf_raw_path):
-                try:
-                    with open(pdf_raw_path, "rb") as f:
-                        st.session_state["raw_uploaded_pdfs"] = pickle.load(f)
-                except Exception:
-                    pass
                     
             st_path = os.path.join(a_dir, "estado_sesion.json")
             if os.path.exists(st_path):
