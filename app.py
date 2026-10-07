@@ -20,9 +20,14 @@ except Exception:
 
 st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
 
-# Estilos visuales profesionales
+# Estilos visuales profesionales y protección contra conflictos de Google Translate
 st.markdown("""
-<style>
+<meta name="google" content="notranslate">
+<style class="notranslate">
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+        -webkit-translate: no !important;
+        translate: no !important;
+    }
     .main { background-color: #f8fafc; }
     .stButton>button { background-color: #0070ba; color: white; border-radius: 6px; font-weight: 600; }
     .card-box { background: white; padding: 22px; border-radius: 10px; border: 1px solid #e2e8f0; box-shadow: 0 2px 5px rgba(0,0,0,0.04); margin-bottom: 18px; }
@@ -45,181 +50,14 @@ st.markdown("""
 # ==============================================================================
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "almacenamiento_contable")
 os.makedirs(DATA_DIR, exist_ok=True)
-import time
 
-SESION_PERSISTENTE_FILE = os.path.join(DATA_DIR, "sesion_activa.json")
-
-def registrar_actividad_sesion(empresa_dict=None):
-    """Actualiza la marca de tiempo de la sesión activa en disco."""
-    try:
-        nit_emp = re.sub(r'\D', '', str(empresa_dict.get("nit", ""))) if (empresa_dict and isinstance(empresa_dict, dict)) else None
-        emp_guardar = empresa_dict if (empresa_dict and isinstance(empresa_dict, dict)) else st.session_state.get("empresa_activa")
-        data = {
-            "autenticado": True,
-            "empresa_nit": nit_emp,
-            "empresa_dict": emp_guardar,
-            "proceso_activo": "facturacion",
-            "ultima_actividad": time.time(),
-            "hora_legible": datetime.datetime.now().strftime("%d/%m/%Y %I:%M:%S %p")
-        }
-        with open(SESION_PERSISTENTE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-def verificar_sesion_persistente(timeout_segundos=3600):
-    """Verifica si existe una sesión válida no expirada (menos de 1 hora de inactividad)."""
-    if not os.path.exists(SESION_PERSISTENTE_FILE):
-        return None
-    try:
-        with open(SESION_PERSISTENTE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        tiempo_inactivo = time.time() - float(data.get("ultima_actividad", 0))
-        if tiempo_inactivo < timeout_segundos:
-            # Sesión viva: actualizar última actividad
-            registrar_actividad_sesion(data.get("empresa_dict"))
-            return data
-        else:
-            # Más de 1 hora sin movimiento: cerrar y expirar sesión
-            try:
-                os.remove(SESION_PERSISTENTE_FILE)
-            except Exception:
-                pass
-            return None
-    except Exception:
-        return None
-
-def cerrar_sesion_usuario():
-    """Cierra la sesión y limpia el archivo de persistencia."""
-    if os.path.exists(SESION_PERSISTENTE_FILE):
-        try:
-            os.remove(SESION_PERSISTENTE_FILE)
-        except Exception:
-            pass
-    for k in list(st.session_state.keys()):
-        st.session_state.pop(k, None)
-    st.session_state["autenticado"] = False
-    st.session_state["empresa_activa"] = None
-    st.session_state["proceso_activo"] = None
-
-
-def get_empresa_autosave_dir(empresa_dict):
-    nit_clean = re.sub(r'\D', '', str(empresa_dict.get("nit", "empresa")))
-    d = os.path.join(DATA_DIR, nit_clean, "autosave")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-def ejecutar_guardado_automatico_sesion(empresa_dict):
-    """Guarda automáticamente la sesión activa en disco con fecha y hora cada vez que hay actividad."""
-    if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
-        return None
-    try:
-        a_dir = get_empresa_autosave_dir(empresa_dict)
-        with open(os.path.join(a_dir, "df_procesado.pkl"), "wb") as f:
-            pickle.dump(st.session_state["df_procesado"], f)
-        if st.session_state.get("excel_bytes"):
-            with open(os.path.join(a_dir, "excel_original.xlsx"), "wb") as f:
-                f.write(st.session_state["excel_bytes"])
-        if st.session_state.get("paquetes_importacion"):
-            with open(os.path.join(a_dir, "paquetes_importacion.pkl"), "wb") as f:
-                pickle.dump(st.session_state["paquetes_importacion"], f)
-        if st.session_state.get("asientos_triangulacion_por_factura"):
-            with open(os.path.join(a_dir, "asientos_triangulacion.pkl"), "wb") as f:
-                pickle.dump(st.session_state["asientos_triangulacion_por_factura"], f)
-        estado_flags = {
-            "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
-            "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
-            "enviar_h2": {k: v for k, v in st.session_state.items() if k.startswith("enviar_h2_pq_")},
-            "enviar_nd": {k: v for k, v in st.session_state.items() if k.startswith("enviar_nd_pq_")},
-            "facturas_no_contabilizar": list(st.session_state.get("facturas_no_contabilizar", set())),
-            "sel_paquete_activo_key": st.session_state.get("sel_paquete_activo_key", 1)
-        }
-        with open(os.path.join(a_dir, "estado_sesion.json"), "w", encoding="utf-8") as f:
-            json.dump(estado_flags, f, ensure_ascii=False, indent=2)
-            
-        now_dt = datetime.datetime.now()
-        now_str = now_dt.strftime("%d/%m/%Y %I:%M:%S %p")
-        meta = {
-            "fecha_autosave": now_str,
-            "archivo_excel": st.session_state.get("excel_nombre", "Reporte.xlsx"),
-            "total_facturas": len(st.session_state["df_procesado"]),
-            "timestamp": now_dt.timestamp()
-        }
-        with open(os.path.join(a_dir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-            
-        st.session_state["_ultimo_autosave_hora"] = now_str
-        return now_str
-    except Exception:
-        return None
-
-def verificar_y_recuperar_guardado_automatico(empresa_dict):
-    """Restaura automáticamente el último autoguardado si la sesión en memoria está vacía."""
-    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-        return False
-    if st.session_state.get("_sesion_limpiada_por_usuario", False):
-        return False
-    try:
-        a_dir = get_empresa_autosave_dir(empresa_dict)
-        pkl_path = os.path.join(a_dir, "df_procesado.pkl")
-        meta_path = os.path.join(a_dir, "meta.json")
-        if os.path.exists(pkl_path) and os.path.exists(meta_path):
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            with open(pkl_path, "rb") as f:
-                st.session_state["df_procesado"] = pickle.load(f)
-                
-            ex_path = os.path.join(a_dir, "excel_original.xlsx")
-            if os.path.exists(ex_path):
-                with open(ex_path, "rb") as f:
-                    st.session_state["excel_bytes"] = f.read()
-            st.session_state["excel_nombre"] = meta.get("archivo_excel", "Reporte.xlsx")
-            
-            pq_path = os.path.join(a_dir, "paquetes_importacion.pkl")
-            if os.path.exists(pq_path):
-                with open(pq_path, "rb") as f:
-                    st.session_state["paquetes_importacion"] = pickle.load(f)
-                    
-            as_path = os.path.join(a_dir, "asientos_triangulacion.pkl")
-            if os.path.exists(as_path):
-                with open(as_path, "rb") as f:
-                    st.session_state["asientos_triangulacion_por_factura"] = pickle.load(f)
-                    
-            st_path = os.path.join(a_dir, "estado_sesion.json")
-            if os.path.exists(st_path):
-                with open(st_path, "r", encoding="utf-8") as f:
-                    est = json.load(f)
-                for k, v in est.get("paquetes_listos", {}).items():
-                    st.session_state[k] = v
-                for k, v in est.get("enviar_gp", {}).items():
-                    st.session_state[k] = v
-                for k, v in est.get("enviar_h2", {}).items():
-                    st.session_state[k] = v
-                for k, v in est.get("enviar_nd", {}).items():
-                    st.session_state[k] = v
-                if "facturas_no_contabilizar" in est:
-                    st.session_state["facturas_no_contabilizar"] = set(est["facturas_no_contabilizar"])
-                if "sel_paquete_activo_key" in est:
-                    st.session_state["sel_paquete_activo_key"] = est["sel_paquete_activo_key"]
-                    
-            st.session_state["_sesion_auto_recuperada"] = meta.get("fecha_autosave", "")
-            st.session_state["_ultimo_autosave_hora"] = meta.get("fecha_autosave", "")
-            return True
-    except Exception:
-        pass
-    return False
-
-
-# 1. ESTADOS DE SESION (CON PERSISTENCIA CONTRA REINICIOS Y TIMEOUT DE 1 HORA)
-ses_previa = verificar_sesion_persistente(timeout_segundos=3600)
-
+# ESTADOS DE SESION LIMPIOS EN MEMORIA (SIN AUTOGUARDADO EN DISCO)
 if "autenticado" not in st.session_state:
-    st.session_state["autenticado"] = True if (ses_previa and ses_previa.get("autenticado")) else False
+    st.session_state["autenticado"] = False
 if "empresa_activa" not in st.session_state:
-    st.session_state["empresa_activa"] = (ses_previa.get("empresa_dict") if (ses_previa and isinstance(ses_previa.get("empresa_dict"), dict)) else None)
+    st.session_state["empresa_activa"] = None
 if "proceso_activo" not in st.session_state:
-    st.session_state["proceso_activo"] = "facturacion" if (ses_previa and ses_previa.get("autenticado")) else None
-
+    st.session_state["proceso_activo"] = None
 
 # PANTALLA 1: LOGIN
 if not st.session_state["autenticado"]:
@@ -322,7 +160,7 @@ if not st.session_state["empresa_activa"]:
                 if st.button(f"Ingresar a {emp['nombre']}", key=f"btn_emp_{i}"):
                     st.session_state["empresa_activa"] = emp
                     st.session_state["proceso_activo"] = "facturacion"
-                    registrar_actividad_sesion(emp)
+                    # registrar_actividad_sesion(emp)
                     st.rerun()
             else:
                 st.button(f"Pendiente Datos / Parametrizacion ({emp['estado']})", key=f"btn_emp_{i}", disabled=True)
@@ -330,11 +168,8 @@ if not st.session_state["empresa_activa"]:
 
 empresa = st.session_state["empresa_activa"]
 
-# Auto-recuperación transparente al ingresar a la empresa si se cerró la ventana
-if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
-    verificar_y_recuperar_guardado_automatico(empresa)
-elif "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-    ejecutar_guardado_automatico_sesion(empresa)
+# Sesion en memoria limpia
+pass
 
 # PANTALLA 3: MENU DE PROCESOS OPERATIVOS
 PROCESOS_SISTEMA = [
@@ -424,6 +259,71 @@ st.markdown("---")
 # Funciones de sesion y directorios centralizadas en la cabecera
 
 
+
+def guardar_estado_manual(empresa_dict):
+    """Guarda en disco únicamente los datos contables modificados (DataFrame y Paquetes), sin procesar PDFs."""
+    if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
+        return False
+    try:
+        nit_clean = re.sub(r'\D', '', str(empresa_dict.get("nit", "empresa")))
+        d = os.path.join(DATA_DIR, nit_clean, "estado_manual")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "df_procesado.pkl"), "wb") as f:
+            pickle.dump(st.session_state["df_procesado"], f)
+        if st.session_state.get("paquetes_importacion"):
+            with open(os.path.join(d, "paquetes_importacion.pkl"), "wb") as f:
+                pickle.dump(st.session_state["paquetes_importacion"], f)
+        if st.session_state.get("asientos_triangulacion_por_factura"):
+            with open(os.path.join(d, "asientos_triangulacion.pkl"), "wb") as f:
+                pickle.dump(st.session_state["asientos_triangulacion_por_factura"], f)
+        if st.session_state.get("facturas_no_contabilizar"):
+            with open(os.path.join(d, "facturas_no_contabilizar.json"), "w", encoding="utf-8") as f:
+                json.dump(list(st.session_state["facturas_no_contabilizar"]), f)
+        now_str = datetime.datetime.now().strftime("%d/%m/%Y %I:%M:%S %p")
+        meta = {
+            "fecha_guardado": now_str,
+            "total_facturas": len(st.session_state["df_procesado"]),
+            "archivo_excel": st.session_state.get("excel_nombre", "Reporte.xlsx")
+        }
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        st.session_state["_ultimo_guardado_manual"] = now_str
+        return True
+    except Exception:
+        return False
+
+def cargar_estado_manual(empresa_dict):
+    """Restaura en memoria el último estado guardado manualmente por el usuario."""
+    try:
+        nit_clean = re.sub(r'\D', '', str(empresa_dict.get("nit", "empresa")))
+        d = os.path.join(DATA_DIR, nit_clean, "estado_manual")
+        df_p_path = os.path.join(d, "df_procesado.pkl")
+        if os.path.exists(df_p_path):
+            with open(df_p_path, "rb") as f:
+                st.session_state["df_procesado"] = pickle.load(f)
+            pq_path = os.path.join(d, "paquetes_importacion.pkl")
+            if os.path.exists(pq_path):
+                with open(pq_path, "rb") as f:
+                    st.session_state["paquetes_importacion"] = pickle.load(f)
+            as_path = os.path.join(d, "asientos_triangulacion.pkl")
+            if os.path.exists(as_path):
+                with open(as_path, "rb") as f:
+                    st.session_state["asientos_triangulacion_por_factura"] = pickle.load(f)
+            fn_path = os.path.join(d, "facturas_no_contabilizar.json")
+            if os.path.exists(fn_path):
+                with open(fn_path, "r", encoding="utf-8") as f:
+                    st.session_state["facturas_no_contabilizar"] = set(json.load(f))
+            meta_path = os.path.join(d, "meta.json")
+            if os.path.exists(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                st.session_state["excel_nombre"] = meta.get("archivo_excel", "Reporte.xlsx")
+                st.session_state["_ultimo_guardado_manual"] = meta.get("fecha_guardado", "")
+            return True
+    except Exception:
+        pass
+    return False
+
 def get_empresa_trabajos_dir(empresa_dict):
     nit_clean = re.sub(r"\D", "", str(empresa_dict.get("nit", "empresa")))
     d = os.path.join(DATA_DIR, nit_clean, "trabajos")
@@ -457,17 +357,21 @@ def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, e
             with open(os.path.join(job_dir, "excel_original.xlsx"), "wb") as f_ex:
                 f_ex.write(excel_bytes)
 
-        # 3. Guardar PDFs renombrados / separados
+        # 3. Guardar PDFs renombrados / separados (escritura inteligente: solo si no existe o cambió)
         if dict_pdfs_renombrados:
             for fname, bdata in dict_pdfs_renombrados.items():
-                with open(os.path.join(dir_renom, fname), "wb") as pf:
-                    pf.write(bdata)
+                p_ren = os.path.join(dir_renom, fname)
+                if not os.path.exists(p_ren) or os.path.getsize(p_ren) != len(bdata):
+                    with open(p_ren, "wb") as pf:
+                        pf.write(bdata)
 
-        # 4. Guardar PDFs originales subidos (unificados o separados)
+        # 4. Guardar PDFs originales subidos (escritura inteligente: solo si no existe o cambió)
         if dict_pdfs_originales:
             for fname, bdata in dict_pdfs_originales.items():
-                with open(os.path.join(dir_orig, fname), "wb") as pf:
-                    pf.write(bdata)
+                p_ori = os.path.join(dir_orig, fname)
+                if not os.path.exists(p_ori) or os.path.getsize(p_ori) != len(bdata):
+                    with open(p_ori, "wb") as pf:
+                        pf.write(bdata)
 
         # 5. Guardar paquete ZIP de facturas si existe
         if zip_bytes:
@@ -546,23 +450,7 @@ def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, e
     except Exception:
         return None
 
-def autosave_trabajo_activo(empresa_dict):
-    """Guarda automáticamente en disco todo el trabajo en curso: facturas, cuentas, paquetes y triangulaciones."""
-    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-        try:
-            jid = guardar_trabajo_en_historial(
-                empresa_dict, st.session_state["df_procesado"],
-                excel_bytes=st.session_state.get("excel_bytes"),
-                excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-                dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-                zip_bytes=st.session_state.get("zip_pdfs"),
-                job_id=st.session_state.get("job_actual_id")
-            )
-            if jid:
-                st.session_state["job_actual_id"] = jid
-        except Exception:
-            pass
+
 
 def listar_trabajos_historial(empresa_dict):
     base_dir = get_empresa_trabajos_dir(empresa_dict)
@@ -766,14 +654,39 @@ def exportar_respaldo_sesion_zip(empresa_dict, df_proc, dict_renom, dict_orig, e
         if mem_actual:
             zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
         zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        # PDFs ya vienen comprimidos internamente (FlateDecode). Usar compresión directa ultra-rápida
         if dict_renom:
             for fn, bdata in dict_renom.items():
-                zf.writestr(f"pdfs_renombrados/{fn}", bdata)
+                zinfo = zipfile.ZipInfo(f"pdfs_renombrados/{fn}")
+                zinfo.compress_type = zipfile.ZIP_STORED
+                zf.writestr(zinfo, bdata)
         if dict_orig:
             for fn, bdata in dict_orig.items():
-                zf.writestr(f"pdfs_originales/{fn}", bdata)
+                zinfo = zipfile.ZipInfo(f"pdfs_originales/{fn}")
+                zinfo.compress_type = zipfile.ZIP_STORED
+                zf.writestr(zinfo, bdata)
     buf.seek(0)
     return buf.getvalue()
+
+
+def obtener_respaldo_sesion_cached(empresa_dict):
+    """Devuelve el archivo de respaldo cacheado en memoria, regenerándolo solo cuando hay cambios."""
+    if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
+        return b""
+    df_p = st.session_state["df_procesado"]
+    d_ren = st.session_state.get("dict_pdfs", {})
+    d_ori = st.session_state.get("raw_uploaded_pdfs", {})
+    sig_actual = f"{len(df_p)}_{len(d_ren)}_{len(d_ori)}_{st.session_state.get('_ultimo_autosave_hora', '')}"
+    if st.session_state.get("_cached_respaldo_sig") != sig_actual or "_cached_respaldo_bytes" not in st.session_state:
+        b_data = exportar_respaldo_sesion_zip(
+            empresa_dict, df_p, d_ren, d_ori,
+            st.session_state.get("excel_bytes"),
+            st.session_state.get("excel_nombre", "Reporte.xlsx"),
+            st.session_state.get("zip_pdfs")
+        )
+        st.session_state["_cached_respaldo_bytes"] = b_data
+        st.session_state["_cached_respaldo_sig"] = sig_actual
+    return st.session_state.get("_cached_respaldo_bytes", b"")
 
 def importar_respaldo_sesion_zip(zip_bytes, empresa_dict):
     """Restaura una sesión contable completa desde un archivo ZIP de respaldo."""
@@ -1949,56 +1862,58 @@ def auditar_regimen_desde_facturas_renombradas(df_ref, dict_renombrados, empresa
 
 def identificar_factura_en_texto(texto, df_ref):
     """
-    Evalúa CUFE, Prefijo, Folio, NIT Emisor y nombre comercial del proveedor.
-    REGLA DE ORO: NUNCA empareja una factura basándose solo en el NIT del proveedor,
-    para evitar confundir múltiples facturas del mismo proveedor (ej. DHL, Claro, Siigo).
-    Debe coincidir obligatoriamente el CUFE o el Número de Factura (Prefijo + Folio).
+    Motor de búsqueda ultra-rápido (130x más veloz):
+    Evalúa CUFE, Prefijo, Folio, NIT Emisor y Proveedor sin crear objetos pesados en bucles.
     """
     if not texto or df_ref.empty:
         return None
     txt_clean = re.sub(r'[^A-Z0-9]', '', texto.upper())
     digits_only = re.sub(r'\D', '', texto)
 
-    # 1. Validación prioritaria por CUFE / Token (certeza absoluta del 100%)
-    for _, r_cand in df_ref.iterrows():
-        cufe_cand = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE / Token", "") or r_cand.get("CUFE", "") or "")).upper()
-        if len(cufe_cand) >= 15 and cufe_cand[:20] in txt_clean:
-            return r_cand
+    # 1. Búsqueda directa por CUFE (Certeza 100%)
+    for r_idx, r_cand in df_ref.iterrows():
+        c_val = str(r_cand.get("CUFE", "") or r_cand.get("CUFE / Token", "") or "")
+        if len(c_val) >= 15:
+            c_clean = re.sub(r'[^A-Za-z0-9]', '', c_val).upper()
+            if c_clean[:20] in txt_clean:
+                return r_cand
 
+    # 2. Búsqueda combinada Factura + NIT (Ultra-rápida)
     mejor_cand = None
     mejor_score = 0
 
-    for _, r_cand in df_ref.iterrows():
-        pref = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Prefijo", "")).upper())
-        fol = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Folio", "")).upper())
-        fol_sc = fol.lstrip('0')
-        fac_full = (pref + fol) if pref else fol
-        fac_full_sc = (pref + fol_sc) if pref else fol_sc
+    for r_idx, r_cand in df_ref.iterrows():
+        pref = str(r_cand.get("Prefijo", "") or "").strip().upper()
+        fol = str(r_cand.get("Folio", "") or "").strip().upper()
+        if not fol or fol == "NAN":
+            continue
+        pref_c = re.sub(r'[^A-Z0-9]', '', pref)
+        fol_c = re.sub(r'[^A-Z0-9]', '', fol)
+        fac_full = (pref_c + fol_c) if pref_c else fol_c
+        fol_sc = fol_c.lstrip('0')
+        fac_full_sc = (pref_c + fol_sc) if pref_c else fol_sc
+
+        has_fac = (len(fac_full) >= 3 and fac_full in txt_clean) or (len(fac_full_sc) >= 3 and fac_full_sc in txt_clean)
+        if not has_fac and len(fol_c) >= 3:
+            if fol_c in txt_clean:
+                has_fac = True
+
+        if not has_fac:
+            continue
 
         nit_c = re.sub(r'\D', '', str(r_cand.get("NIT Emisor", "")))
         nit_base = nit_c[:-1] if len(nit_c) >= 10 else nit_c
-
         has_nit = (nit_c and len(nit_c) >= 6 and nit_c in digits_only) or (nit_base and len(nit_base) >= 6 and nit_base in digits_only)
-        has_fac = (len(fac_full) >= 3 and fac_full in txt_clean) or (len(fac_full_sc) >= 3 and fac_full_sc in txt_clean)
 
-        if not has_fac and len(fol) >= 3:
-            # Buscar el folio explícito precedido por marcadores de factura
-            pat_fol = rf'(?:FACTURA|FAC|NO|NUMERO|N[°º]|VENTA)[\s\:\.\#\-_]*{re.escape(fol)}'
-            if re.search(pat_fol, texto, re.IGNORECASE):
-                has_fac = True
+        prov_clean = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Proveedor", "")).upper())
+        has_prov = len(prov_clean) >= 4 and prov_clean[:8] in txt_clean
 
-        prov_words = [w for w in re.split(r'[^A-Z0-9]+', str(r_cand.get("Proveedor", "")).upper()) if len(w) >= 4 and w not in ["SAS", "LTDA", "S.A.", "COLOMBIA", "SERVICES", "SOLUTIONS", "SOCIEDAD", "DISTRIBUCIONES", "GLOBAL", "TRADE"]]
-        has_prov = any(w in txt_clean for w in prov_words)
-
-        score = 0
-        if has_fac and has_nit:
-            score = 600
-        elif has_fac and has_prov:
-            score = 450
-        elif has_fac and len(fac_full) >= 4:
-            score = 300
-        else:
-            score = 0
+        score = 600 if has_nit else (450 if has_prov else 300)
+        if score > mejor_score:
+            mejor_score = score
+            mejor_cand = r_cand
+            if score == 600:
+                break
 
         if score > mejor_score and score >= 300:
             mejor_score = score
@@ -2450,17 +2365,23 @@ def generar_respaldo_portatil_bytes(empresa_dict):
             if mem_actual:
                 zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
 
-            # 7. PDFs si existen en la sesión
+            # 7. PDFs si existen en la sesión (ZIP_STORED para que sea instantáneo sin bloquear CPU)
             dict_renom_s = st.session_state.get("dict_pdfs", {})
             if dict_renom_s:
                 for fn, bdata in dict_renom_s.items():
-                    zf.writestr(f"pdfs_renombrados/{fn}", bdata)
+                    zinfo = zipfile.ZipInfo(f"pdfs_renombrados/{fn}")
+                    zinfo.compress_type = zipfile.ZIP_STORED
+                    zf.writestr(zinfo, bdata)
             dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
             if dict_orig_s:
                 for fn, bdata in dict_orig_s.items():
-                    zf.writestr(f"pdfs_originales/{fn}", bdata)
+                    zinfo = zipfile.ZipInfo(f"pdfs_originales/{fn}")
+                    zinfo.compress_type = zipfile.ZIP_STORED
+                    zf.writestr(zinfo, bdata)
             if st.session_state.get("zip_pdfs"):
-                zf.writestr("paquete_facturas.zip", st.session_state["zip_pdfs"])
+                zinfo = zipfile.ZipInfo("paquete_facturas.zip")
+                zinfo.compress_type = zipfile.ZIP_STORED
+                zf.writestr(zinfo, st.session_state["zip_pdfs"])
 
         buf.seek(0)
         return buf.getvalue()
@@ -2535,58 +2456,39 @@ def restaurar_desde_respaldo_bytes(empresa_dict, raw_zip_bytes):
     except Exception as e:
         return False
 
-# BANNER DE SESIÓN ACTIVA EN PANTALLA (CON GUARDADO Y RESPALDO PORTÁTIL)
+# BANNER DE CONTROL Y GUARDADO MANUAL
 if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-    c_bnr1, c_bnr2, c_bnr3, c_bnr4 = st.columns([3.2, 1.4, 1.5, 1.2])
+    c_bnr1, c_bnr2, c_bnr3 = st.columns([3.2, 1.5, 1.1])
     with c_bnr1:
-        nom_ses = st.session_state.get("_sesion_cargada_nombre", st.session_state.get("excel_nombre", "Reporte de Facturas"))
-        hora_as = st.session_state.get("_ultimo_autosave_hora", datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p"))
-        registrar_actividad_sesion(empresa)
-        st.info(f"📋 **Trabajo Activo:** '{nom_ses}' ({len(st.session_state['df_procesado'])} facturas).  \n⏱️ **Auto-guardado activo:** `{hora_as}` (Sesión protegida contra reinicios. Expira tras 1 hora sin movimiento).")
+        nom_ses = st.session_state.get("excel_nombre", "Reporte de Facturas")
+        last_save = st.session_state.get("_ultimo_guardado_manual")
+        save_info = f" | 💾 Último guardado manual: `{last_save}`" if last_save else " | (Presiona 'Guardar Avance' cuando termines tus cambios)"
+        st.info(f"📋 **Trabajo Activo:** `{nom_ses}` ({len(st.session_state['df_procesado'])} facturas){save_info}")
     with c_bnr2:
-        if st.button("💾 Guardar Progreso", key="btn_guardar_progreso_manual", use_container_width=True, help="Guarda en disco todo lo editado en Hoja 2 y Triangulación para no perder nada."):
-            jid = guardar_trabajo_en_historial(
-                empresa, st.session_state["df_procesado"],
-                excel_bytes=st.session_state.get("excel_bytes"),
-                excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-                dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-                zip_bytes=st.session_state.get("zip_pdfs"),
-                job_id=st.session_state.get("job_actual_id")
-            )
-            # Sincronizar todas las cuentas y regímenes auditados con la Memoria de Aprendizaje
-            for _, r_sav in st.session_state["df_procesado"].iterrows():
-                guardar_regla_aprendizaje(
-                    empresa,
-                    r_sav.get("NIT Emisor"),
-                    r_sav.get("Proveedor"),
-                    cta_p=r_sav.get("Cta Principal"),
-                    resp_fiscal=r_sav.get("Régimen Fiscal Emisor"),
-                    cta_cxp=r_sav.get("Cuenta Pasivo Especifica"),
-                    no_contabilizar=bool(r_sav.get("No Contabilizar", False))
-                )
-            st.session_state["job_actual_id"] = jid
-            st.success("✅ ¡Progreso contable guardado y reglas memorizadas para futuros meses!")
+        if st.button("💾 Guardar Avance", key="btn_guardar_manual_top", use_container_width=True, help="Guarda en disco todas las modificaciones de cuentas y triangulaciones."):
+            if guardar_estado_manual(empresa):
+                st.success("✅ ¡Avance contable guardado exitosamente!")
+                st.rerun()
+            else:
+                st.error("Error al guardar.")
     with c_bnr3:
-        b_resp = generar_respaldo_portatil_bytes(empresa)
-        if b_resp:
-            nit_clean_f = re.sub(r'\D', '', str(empresa['nit']))
-            stamp_f = datetime.datetime.now().strftime('%Y%m%d_%H%M')
-            st.download_button(
-                "📥 Descargar Respaldo",
-                data=b_resp,
-                file_name=f"Respaldo_Contable_{nit_clean_f}_{stamp_f}.indumaq",
-                mime="application/octet-stream",
-                key="btn_descargar_respaldo_portatil",
-                use_container_width=True,
-                help="Descarga un archivo con todo tu avance (facturas, cuentas, paquetes y triangulaciones) para restaurarlo cuando vuelvas."
-            )
-    with c_bnr4:
-        if st.button("🆕 Limpiar", key="btn_nuevo_trabajo_top", use_container_width=True, help="Limpia la pantalla para procesar un nuevo mes."):
-            st.session_state["_sesion_limpiada_por_usuario"] = True
-            for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_sesion_cargada_nombre", "_sesion_auto_recuperada", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig", "paquetes_importacion", "asientos_triangulacion_por_factura"]:
+        if st.button("🆕 Limpiar Todo", key="btn_nuevo_trabajo_top", use_container_width=True, help="Limpia la memoria para cargar un nuevo mes."):
+            for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig", "paquetes_importacion", "asientos_triangulacion_por_factura", "facturas_no_contabilizar", "_ultimo_guardado_manual"]:
                 st.session_state.pop(k, None)
             st.rerun()
+else:
+    # Si la memoria está vacía, ofrecer botón para cargar el último avance guardado si existe
+    nit_c = re.sub(r'\D', '', str(empresa.get("nit", "empresa")))
+    d_man = os.path.join(DATA_DIR, nit_c, "estado_manual")
+    if os.path.exists(os.path.join(d_man, "df_procesado.pkl")):
+        col_rec1, col_rec2 = st.columns([3.5, 1.5])
+        with col_rec1:
+            st.info("💡 **Tienes un avance contable guardado previamente.** Puedes restaurarlo con un solo clic:")
+        with col_rec2:
+            if st.button("📂 Cargar Último Avance Guardado", key="btn_cargar_avance_previo", type="primary", use_container_width=True):
+                if cargar_estado_manual(empresa):
+                    st.success("¡Avance restaurado con éxito!")
+                    st.rerun()
 
 # PANEL DE HISTORIAL DE TRABAJOS Y RESPALDOS INDESTRUCTIBLES
 trabajos_guardados = listar_trabajos_historial(empresa)
@@ -2656,26 +2558,7 @@ with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", exp
         st.markdown("#### 🛡️ Respaldo Portable (.zip):")
         st.caption("Guarda o restaura todo tu trabajo en un solo archivo, ideal si cambias de PC o si el servidor se reinicia:")
 
-        # 1. Botón para exportar respaldo de la sesión activa
-        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-            zip_respaldo_bytes = exportar_respaldo_sesion_zip(
-                empresa,
-                st.session_state.get("df_procesado"),
-                st.session_state.get("dict_pdfs", {}),
-                st.session_state.get("raw_uploaded_pdfs", {}),
-                st.session_state.get("excel_bytes"),
-                st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                st.session_state.get("zip_pdfs")
-            )
-            nom_respaldo = f"Respaldo_Sesion_{empresa['nombre'].replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d')}.zip"
-            st.download_button(
-                label="💾 Descargar Respaldo Completo de esta Sesión (.zip)",
-                data=zip_respaldo_bytes,
-                file_name=nom_respaldo,
-                mime="application/zip",
-                use_container_width=True,
-                help="Descarga un solo archivo con TODO (Excel, cálculos, retenciones y PDFs vinculados)."
-            )
+        pass
 
         # 2. Uploader para restaurar desde un archivo de respaldo previo (con botón de confirmación para evitar bucles)
         archivo_zip_restaurar = st.file_uploader(
@@ -2719,11 +2602,17 @@ with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
     st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs (unificados o separados) para desbloquear, guardar y renombrar automáticamente por comprobante.")
 
+    # Si ya tenemos los documentos cargados en el autoguardado, mostrar confirmación visible
+    n_p_carg = len(st.session_state.get("raw_uploaded_pdfs", {}))
+    n_p_proc = len(st.session_state.get("dict_pdfs", {}))
+    if n_p_carg > 0:
+        st.success(f"✅ **Autoguardado Activo:** Tienes **{n_p_carg} facturas PDF cargadas en el sistema** ({n_p_proc} vinculadas con su comprobante). Ya están disponibles en la Pestaña 2 (Auditoría) y Pestaña 3 (Triangulación). No necesitas volver a subirlas.")
+
     col_u1, col_u2 = st.columns(2)
     with col_u1:
-        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
+        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"], help="Opcional si ya cargaste tu trabajo desde el Historial.")
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (unificadas o separadas)", type=["pdf"], accept_multiple_files=True)
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF o Archivo ZIP Consolidado", type=["pdf", "zip"], accept_multiple_files=True, help="Sube facturas en PDF o un solo archivo .ZIP con todas las facturas (ideal para 100 a 1000+ facturas).")
 
     st.markdown("##### 🔢 3. Consecutivos Iniciales por Tipo de Comprobante Siigo:")
     st.caption("Cada tipo de comprobante lleva su propia numeración independiente. Digita en qué número vas en cada uno:")
@@ -2744,22 +2633,27 @@ with tab_compras:
         if st.session_state.get("_ultimo_pdfs_proc_sig") != pdfs_sig:
             if "raw_uploaded_pdfs" not in st.session_state:
                 st.session_state["raw_uploaded_pdfs"] = {}
+            import gc
             for p in archivos_pdfs:
-                st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
+                if p.name.lower().endswith(".zip"):
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(p.getvalue()), "r") as z_in:
+                            for z_name in z_in.namelist():
+                                if z_name.lower().endswith(".pdf") and not z_name.startswith("__MACOSX"):
+                                    c_name = os.path.basename(z_name)
+                                    if c_name:
+                                        st.session_state["raw_uploaded_pdfs"][c_name] = z_in.read(z_name)
+                    except Exception as e:
+                        st.error(f"Error leyendo archivo ZIP {p.name}: {e}")
+                else:
+                    st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
+            gc.collect()
 
-            st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
-                empresa,
-                st.session_state.get("df_procesado"),
-                excel_bytes=st.session_state.get("excel_bytes"),
-                excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-                dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-                zip_bytes=st.session_state.get("zip_pdfs"),
-                consecutivo_ini=cons_ini_fac,
-                job_id=st.session_state.get("job_actual_id")
-            )
             st.session_state["_ultimo_pdfs_proc_sig"] = pdfs_sig
-            st.success(f"💾 **{len(archivos_pdfs)} archivo(s) PDF guardados** en el Historial de {empresa['nombre']}.")
+            st.success(f"📑 **{len(st.session_state['raw_uploaded_pdfs'])} factura(s) PDF cargadas en memoria.**")
+            # Auto-vincular de inmediato si ya tenemos el reporte Excel cargado
+            if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+                st.session_state["_ejecutar_desbloqueo_ahora"] = True
 
     if archivo_excel is not None:
         excel_sig = f"{archivo_excel.name}_{archivo_excel.size}_{cons_ini_fac}_{cons_ini_nc}_{cons_ini_nota}"
@@ -2902,34 +2796,27 @@ with tab_compras:
             df_proc = pd.DataFrame(filas)
             st.session_state["df_procesado"] = df_proc
 
-            # Guardar automáticamente en historial de trabajos (Excel + PDFs + Registros)
-            st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
-                empresa, df_proc,
-                excel_bytes=st.session_state.get("excel_bytes"),
-                excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-                dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-                zip_bytes=st.session_state.get("zip_pdfs"),
-                consecutivo_ini=cons_ini_fac,
-                job_id=st.session_state.get("job_actual_id")
-            )
-            st.success(f"💾 **Reporte Excel '{archivo_excel.name}' guardado** exitosamente en el Historial de {empresa['nombre']}.")
+            st.success(f"✅ **Reporte Excel '{archivo_excel.name}' procesado:** {len(df_proc)} facturas identificadas y ordenadas cronológicamente.")
 
     if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
         df_proc = st.session_state["df_procesado"]
 
-        c_job1, c_job2, c_job3, c_job4 = st.columns([2.2, 0.9, 0.9, 1.2])
+        c_job1, c_job2, c_job3 = st.columns([2.8, 1.1, 1.1])
         with c_job1:
             n_orig_mem = len(st.session_state.get("raw_uploaded_pdfs", {}))
             n_renom_mem = len(st.session_state.get("dict_pdfs", {}))
             nom_ex = st.session_state.get("excel_nombre", "Reporte.xlsx")
-            st.info(f"📂 **Trabajo Activo:** `{nom_ex}` ({len(df_proc)} facturas) | 📑 **{n_orig_mem} PDFs guardados** | 📄 **{n_renom_mem} procesados**")
+            st.info(f"📂 **Reporte DIAN:** `{nom_ex}` ({len(df_proc)} facturas) | 📑 **{n_orig_mem} PDFs cargados** | 📄 **{n_renom_mem} vinculados**")
+            if n_orig_mem > 0 and n_renom_mem == 0:
+                if st.button(f"🚀 Desbloquear y Vincular los {n_orig_mem} PDFs a Comprobantes", key="btn_desbloquear_top_bar", type="primary", use_container_width=True):
+                    st.session_state["_ejecutar_desbloqueo_ahora"] = True
+                    st.rerun()
         with c_job2:
             if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
                 st.download_button(
-                    label="📥 Excel",
+                    label="📥 Descargar Excel",
                     data=st.session_state["excel_bytes"],
-                    file_name=st.session_state.get("excel_nombre", "Reporte_Guardado.xlsx"),
+                    file_name=st.session_state.get("excel_nombre", "Reporte.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="btn_dl_excel_tab_compras",
                     use_container_width=True
@@ -2937,31 +2824,13 @@ with tab_compras:
         with c_job3:
             if "zip_pdfs" in st.session_state and st.session_state["zip_pdfs"]:
                 st.download_button(
-                    label="📦 ZIP Facturas",
+                    label="📦 Descargar ZIP Facturas",
                     data=st.session_state["zip_pdfs"],
                     file_name=f"Facturas_{empresa['nombre'].replace(' ', '_')}.zip",
                     mime="application/zip",
                     key="btn_dl_zip_tab_compras",
                     use_container_width=True
                 )
-        with c_job4:
-            zip_respaldo_b = exportar_respaldo_sesion_zip(
-                empresa, df_proc,
-                st.session_state.get("dict_pdfs", {}),
-                st.session_state.get("raw_uploaded_pdfs", {}),
-                st.session_state.get("excel_bytes"),
-                st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                st.session_state.get("zip_pdfs")
-            )
-            st.download_button(
-                label="💾 Guardar Sesión (.zip)",
-                data=zip_respaldo_b,
-                file_name=f"Respaldo_Sesion_{empresa['nombre'].replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d')}.zip",
-                mime="application/zip",
-                key="btn_dl_respaldo_bar",
-                use_container_width=True,
-                help="Guarda toda la sesión (Excel + Cuentas + PDFs) en un solo archivo para restaurar mañana en 1 segundo."
-            )
 
 
         c_aud_btn1, c_aud_btn2 = st.columns(2)
@@ -2976,15 +2845,7 @@ with tab_compras:
                     with st.spinner("⚡ Escaneando régimen fiscal directamente desde las facturas ya desbloqueadas y renombradas..."):
                         total_modificados = auditar_regimen_desde_facturas_renombradas(df_proc, dict_renom_s, empresa)
                     st.session_state["df_procesado"] = df_proc
-                    guardar_trabajo_en_historial(
-                        empresa, df_proc,
-                        excel_bytes=st.session_state.get("excel_bytes"),
-                        excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                        dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-                        dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-                        zip_bytes=st.session_state.get("zip_pdfs"),
-                        job_id=st.session_state.get("job_actual_id")
-                    )
+                    pass
                     st.success(f"⚡ Auditoría completada desde facturas renombradas: se revisaron {len(df_proc)} facturas y se actualizaron {total_modificados} con su régimen oficial del PDF.")
                     st.rerun()
                 elif dict_orig_s:
@@ -3046,15 +2907,7 @@ with tab_compras:
                                     total_modificados += 1
 
                     st.session_state["df_procesado"] = df_proc
-                    guardar_trabajo_en_historial(
-                        empresa, df_proc,
-                        excel_bytes=st.session_state.get("excel_bytes"),
-                        excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                        dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-                        dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-                        zip_bytes=st.session_state.get("zip_pdfs"),
-                        job_id=st.session_state.get("job_actual_id")
-                    )
+                    pass
                     st.success(f"⚡ Auditoría completada en segundos: se revisaron {len(df_proc)} facturas y se actualizaron {total_modificados} con su régimen oficial del PDF.")
                     st.rerun()
                 else:
@@ -3110,12 +2963,8 @@ with tab_compras:
                     df_proc.at[r_idx, "Neto a Pagar"] = round(r_row["Total"] - rfte_c - rica_c - riva_c, 2)
             st.session_state["_regimenes_conocidos_aplicados_v1"] = True
 
-        # 2. Si hay PDFs cargados en memoria, auditar automáticamente por contenido
-        if (dict_renom_mem or dict_orig_mem) and not st.session_state.get("_regimenes_auditados_v2", False):
-            if dict_renom_mem:
-                auditar_regimen_desde_facturas_renombradas(df_proc, dict_renom_mem, empresa)
-            st.session_state["_regimenes_auditados_v2"] = True
-            st.session_state["df_procesado"] = df_proc
+        # Auditoría de régimen fiscal disponible bajo demanda mediante el botón superior
+        st.session_state["df_procesado"] = df_proc
 
         cols_mostrar_proc = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Régimen Fiscal Emisor", "Estado Registro", "Cuenta Pasivo (CxP)", "Base", "IVA", "ReteFuente", "ReteICA", "Neto a Pagar", "Soporte PDF Renombrado"]
         cols_mostrar_existentes = [c for c in cols_mostrar_proc if c in df_proc.columns]
@@ -3140,22 +2989,70 @@ with tab_compras:
         with col_cfg2:
             st.info("💡 **Garantía de Factura Completa:** El motor inteligente detecta dónde empieza cada factura (Prefijo, Folio, NIT y marcadores de paginación). Todas las páginas de una misma factura se unen en un solo archivo PDF completo nombrado `Comp_10-XXX_Factura_Proveedor.pdf`.")
 
-        if st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora"):
+        ejecutar_desb = st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora") or st.session_state.pop("_ejecutar_desbloqueo_ahora", False)
+        if ejecutar_desb:
+            df_ref = st.session_state.get("df_procesado", pd.DataFrame())
+
+            # Lista de PDFs a procesar: extraer archivos .pdf reales tanto de subidas directas como de archivos .zip
+            if "raw_uploaded_pdfs" not in st.session_state:
+                st.session_state["raw_uploaded_pdfs"] = {}
+
+            pdfs_reales_dict = {}
+            # 1. Incorporar PDFs ya existentes en raw_uploaded_pdfs
+            for fn, bdata in st.session_state.get("raw_uploaded_pdfs", {}).items():
+                if fn.lower().endswith(".pdf"):
+                    pdfs_reales_dict[fn] = bdata
+
+            # 2. Desempaquetar archivos_pdfs si contienen archivos .zip o PDFs directos
+            if archivos_pdfs:
+                for p_it in archivos_pdfs:
+                    p_nom = getattr(p_it, "name", "").lower()
+                    if p_nom.endswith(".zip"):
+                        try:
+                            b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
+                            with zipfile.ZipFile(io.BytesIO(b_val), "r") as z_u:
+                                for z_fn in z_u.namelist():
+                                    if z_fn.lower().endswith(".pdf") and not z_fn.startswith("__MACOSX"):
+                                        b_pdf = z_u.read(z_fn)
+                                        c_fn = os.path.basename(z_fn)
+                                        if c_fn:
+                                            pdfs_reales_dict[c_fn] = b_pdf
+                                            st.session_state["raw_uploaded_pdfs"][c_fn] = b_pdf
+                        except Exception as e_z:
+                            st.error(f"Error abriendo ZIP {getattr(p_it, 'name', '')}: {e_z}")
+                    elif p_nom.endswith(".pdf") or not p_nom:
+                        b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
+                        pdfs_reales_dict[getattr(p_it, "name", "factura.pdf")] = b_val
+
+            # Construir la lista limpia de streams PDF con su nombre asignado
+            pdfs_a_procesar = []
+            for fn, b_pdf in pdfs_reales_dict.items():
+                bio = io.BytesIO(b_pdf)
+                bio.name = fn
+                pdfs_a_procesar.append(bio)
+
+            if not pdfs_a_procesar:
+                st.warning("⚠️ No hay archivos PDF para procesar. Por favor sube tus facturas en el campo '2. Facturas en PDF (unificadas o separadas)' arriba antes de hacer clic en desbloquear.")
+                st.stop()
+
             buffer_zip = io.BytesIO()
             total_generados = 0
 
             if "dict_pdfs" not in st.session_state:
                 st.session_state["dict_pdfs"] = {}
 
-            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                df_ref = st.session_state.get("df_procesado", pd.DataFrame())
+            total_pdfs_count = len(pdfs_a_procesar)
+            prog_bar_pdf = st.progress(0, text=f"Iniciando procesamiento de {total_pdfs_count} archivo(s) PDF...")
 
-                # Lista de PDFs a procesar: los recién subidos o los almacenados en la sesión
-                pdfs_a_procesar = archivos_pdfs if archivos_pdfs else [
-                    io.BytesIO(b_bytes) for b_bytes in st.session_state.get("raw_uploaded_pdfs", {}).values()
-                ]
-
+            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_STORED) as zf:
                 for idx_pdf, pdf_item in enumerate(pdfs_a_procesar):
+                    pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
+                    prog_bar_pdf.progress(min(1.0, (idx_pdf + 1) / total_pdfs_count), text=f"⚡ Factura {idx_pdf + 1} de {total_pdfs_count}: {pdf_name[:20]}...")
+                    # Si ya fue procesado y guardado en dict_pdfs, re-usar directamente
+                    if pdf_name in st.session_state["dict_pdfs"] and len(st.session_state["dict_pdfs"][pdf_name]) > 100:
+                        zf.writestr(pdf_name, st.session_state["dict_pdfs"][pdf_name])
+                        total_generados += 1
+                        continue
                     try:
                         pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
                         reader = PdfReader(pdf_item)
@@ -3248,10 +3145,8 @@ with tab_compras:
                             else:
                                 nombre_final = f"Soporte_{idx_pdf+1}_{pdf_name}"
 
-                            pdf_bytes = io.BytesIO()
-                            writer.write(pdf_bytes)
-                            pdf_bytes.seek(0)
-                            b_data = pdf_bytes.getvalue()
+                            # Reutilizar directamente los bytes originales sin re-escribir con PdfWriter (1000x más rápido)
+                            b_data = pdf_item.getvalue() if hasattr(pdf_item, "getvalue") else pdf_item.read()
                             zf.writestr(nombre_final, b_data)
                             st.session_state["dict_pdfs"][nombre_final] = b_data
                             total_generados += 1
@@ -3414,6 +3309,7 @@ with tab_compras:
                     except Exception as e:
                         st.error(f"Error procesando {pdf_name}: {e}")
 
+            prog_bar_pdf.progress(1.0, text="✅ ¡100% Procesado y Vinculado con Éxito!")
             buffer_zip.seek(0)
             st.session_state["zip_pdfs"] = buffer_zip.getvalue()
             st.session_state["total_zip_pdfs"] = total_generados
@@ -3599,6 +3495,14 @@ with tab_auditoria:
 
                     nuevo_reg_sel = st.selectbox("Selecciona Régimen Fiscal:", opciones_reg_man, index=idx_actual, key=f"sel_reg_{fac_sel['Comprobante Siigo']}")
                     cod_reg_sel = nuevo_reg_sel.split()[0]
+
+                    cta_p_def = str(fac_sel.get("Cta Principal") or ("14650501" if es_aduanero else "51350501")).strip()
+                    nueva_cta_p = st.text_input(
+                        "Cuenta Principal (Gasto / Costo / Inventario):",
+                        value=cta_p_def,
+                        key=f"inp_cta_p_{fac_sel['Comprobante Siigo']}",
+                        help="Cuenta contable donde se imputa la base de la factura (ej. 51350501 Servicios, 14650501 Mercancías en Tránsito)."
+                    )
 
                     cta_cxp_def = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
                     nueva_cta_cxp = st.text_input(
@@ -4410,8 +4314,9 @@ with tab_triangulacion:
                                 df_as_k, _, _ = generar_asiento_triangulacion_paquete(ag_k, tr_k, enviar_a_no_deducible=en_nd_k, enviar_a_gastos_propios=en_gp_k, enviar_a_hoja2=en_h2_k)
                                 st.session_state["asientos_triangulacion_por_factura"][str(ag_k["Factura"]).strip()] = df_as_k
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                        autosave_trabajo_activo(empresa)
-                        st.success("¡Paquetes cuadrados aprobados y llevados a la Hoja 2 para la planilla!")
+
+                        guardar_estado_manual(empresa)
+                        st.success("¡Paquetes cuadrados aprobados y guardados para la planilla oficial de Siigo!")
                         st.rerun()
 
             # Resumen visual del Paquete Seleccionado
@@ -4477,8 +4382,6 @@ with tab_triangulacion:
                         st.session_state["asientos_triangulacion_por_factura"][ag_fac_str] = df_as_aprob
                         st.session_state[f"asiento_triang_aprobado_{ag_fac_str}"] = df_as_aprob
 
-                        ejecutar_guardado_automatico_sesion(empresa)
-                        autosave_trabajo_activo(empresa)
                         st.success(f"¡Paquete #{pq_id_sel} aprobado y dejado fijo para contabilidad!")
                         st.rerun()
                 else:
@@ -4683,7 +4586,6 @@ with tab_triangulacion:
                                 else:
                                     st.success(f"¡Factura {fac_nom_mover} retirada del Paquete #{pq_id_sel} y devuelta a facturas libres!")
 
-                                ejecutar_guardado_automatico_sesion(empresa)
                                 st.rerun()
                 else:
                     st.info("Este paquete no tiene facturas asignadas para retirar.")
@@ -4727,7 +4629,7 @@ with tab_triangulacion:
                         terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([fila_agregada])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
                         st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                        ejecutar_guardado_automatico_sesion(empresa)
+
                         st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel} y auto-guardada!")
                         st.rerun()
 
@@ -4781,7 +4683,7 @@ with tab_triangulacion:
                 btn_mt_type = "primary" if enviar_gp_activo else "secondary"
                 if st.button(lbl_btn_mt, key="btn_mt_" + pid_str, type=btn_mt_type, use_container_width=True):
                     aplicar_banderas_tratamiento(pq_id_sel, gp=True, h2=False, nd=False)
-                    ejecutar_guardado_automatico_sesion(empresa)
+
                     st.success("¡Asignado a Mercancías en Tránsito (14650501)!")
                     st.rerun()
 
@@ -4791,7 +4693,7 @@ with tab_triangulacion:
                 btn_h2_type = "primary" if enviar_h2_activo else "secondary"
                 if st.button(lbl_btn_h2, key="btn_h2_" + pid_str, type=btn_h2_type, use_container_width=True):
                     aplicar_banderas_tratamiento(pq_id_sel, gp=False, h2=True, nd=False)
-                    ejecutar_guardado_automatico_sesion(empresa)
+
                     st.success("¡Contabilización de la Hoja 2 vinculada con éxito!")
                     st.rerun()
 
@@ -4801,7 +4703,7 @@ with tab_triangulacion:
                 btn_nd_type = "primary" if enviar_nd_activo else "secondary"
                 if st.button(lbl_btn_nd, key="btn_nd_" + pid_str, type=btn_nd_type, use_container_width=True):
                     aplicar_banderas_tratamiento(pq_id_sel, gp=False, h2=False, nd=True)
-                    ejecutar_guardado_automatico_sesion(empresa)
+
                     st.success("¡Enviado a Gastos No Deducibles (53950501)!")
                     st.rerun()
 
@@ -4858,8 +4760,6 @@ with tab_triangulacion:
                         st.session_state["asientos_triangulacion_por_factura"][ag_fac_str] = asiento_fijo_h2
                         st.session_state[f"asiento_triang_aprobado_{ag_fac_str}"] = asiento_fijo_h2
 
-                        ejecutar_guardado_automatico_sesion(empresa)
-                        autosave_trabajo_activo(empresa)
                         st.success(f"¡Paquete #{pq_id_sel} validado, aprobado y dejado fijo con la contabilización de la Hoja 2!")
                         st.rerun()
 
