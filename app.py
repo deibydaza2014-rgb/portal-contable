@@ -2974,6 +2974,11 @@ with tab_compras:
             n_renom_mem = len(st.session_state.get("dict_pdfs", {}))
             nom_ex = st.session_state.get("excel_nombre", "Reporte.xlsx")
             st.info(f"📂 **Trabajo Activo:** `{nom_ex}` ({len(df_proc)} facturas) | 📑 **{n_orig_mem} PDFs guardados** | 📄 **{n_renom_mem} procesados**")
+            if n_orig_mem > 0 and n_renom_mem == 0:
+                st.warning(f"⚡ **Tus {n_orig_mem} PDFs ya están cargados y guardados.** Pulsa el botón a continuación para desbloquearlos y vincularlos a las facturas:")
+                if st.button(f"🚀 Desbloquear y Procesar los {n_orig_mem} PDFs Ahora Mismo", key="btn_desbloquear_top_bar", type="primary", use_container_width=True):
+                    st.session_state["_ejecutar_desbloqueo_ahora"] = True
+                    st.rerun()
         with c_job2:
             if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
                 st.download_button(
@@ -3183,7 +3188,8 @@ with tab_compras:
         with col_cfg2:
             st.info("💡 **Garantía de Factura Completa:** El motor inteligente detecta dónde empieza cada factura (Prefijo, Folio, NIT y marcadores de paginación). Todas las páginas de una misma factura se unen en un solo archivo PDF completo nombrado `Comp_10-XXX_Factura_Proveedor.pdf`.")
 
-        if st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora"):
+        ejecutar_desb = st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora") or st.session_state.pop("_ejecutar_desbloqueo_ahora", False)
+        if ejecutar_desb:
             df_ref = st.session_state.get("df_procesado", pd.DataFrame())
 
             # Lista de PDFs a procesar: los recién subidos o los almacenados en la sesión
