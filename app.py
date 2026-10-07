@@ -20,14 +20,9 @@ except Exception:
 
 st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
 
-# Estilos visuales profesionales y protección contra conflictos de Google Translate
+# Estilos visuales profesionales
 st.markdown("""
-<meta name="google" content="notranslate">
-<style class="notranslate">
-    html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
-        -webkit-translate: no !important;
-        translate: no !important;
-    }
+<style>
     .main { background-color: #f8fafc; }
     .stButton>button { background-color: #0070ba; color: white; border-radius: 6px; font-weight: 600; }
     .card-box { background: white; padding: 22px; border-radius: 10px; border: 1px solid #e2e8f0; box-shadow: 0 2px 5px rgba(0,0,0,0.04); margin-bottom: 18px; }
@@ -131,7 +126,6 @@ def ejecutar_guardado_automatico_sesion(empresa_dict):
         if st.session_state.get("asientos_triangulacion_por_factura"):
             with open(os.path.join(a_dir, "asientos_triangulacion.pkl"), "wb") as f:
                 pickle.dump(st.session_state["asientos_triangulacion_por_factura"], f)
-
         estado_flags = {
             "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
             "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
@@ -190,8 +184,6 @@ def verificar_y_recuperar_guardado_automatico(empresa_dict):
             if os.path.exists(as_path):
                 with open(as_path, "rb") as f:
                     st.session_state["asientos_triangulacion_por_factura"] = pickle.load(f)
-
-
                     
             st_path = os.path.join(a_dir, "estado_sesion.json")
             if os.path.exists(st_path):
@@ -465,21 +457,17 @@ def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, e
             with open(os.path.join(job_dir, "excel_original.xlsx"), "wb") as f_ex:
                 f_ex.write(excel_bytes)
 
-        # 3. Guardar PDFs renombrados / separados (escritura inteligente: solo si no existe o cambió)
+        # 3. Guardar PDFs renombrados / separados
         if dict_pdfs_renombrados:
             for fname, bdata in dict_pdfs_renombrados.items():
-                p_ren = os.path.join(dir_renom, fname)
-                if not os.path.exists(p_ren) or os.path.getsize(p_ren) != len(bdata):
-                    with open(p_ren, "wb") as pf:
-                        pf.write(bdata)
+                with open(os.path.join(dir_renom, fname), "wb") as pf:
+                    pf.write(bdata)
 
-        # 4. Guardar PDFs originales subidos (escritura inteligente: solo si no existe o cambió)
+        # 4. Guardar PDFs originales subidos (unificados o separados)
         if dict_pdfs_originales:
             for fname, bdata in dict_pdfs_originales.items():
-                p_ori = os.path.join(dir_orig, fname)
-                if not os.path.exists(p_ori) or os.path.getsize(p_ori) != len(bdata):
-                    with open(p_ori, "wb") as pf:
-                        pf.write(bdata)
+                with open(os.path.join(dir_orig, fname), "wb") as pf:
+                    pf.write(bdata)
 
         # 5. Guardar paquete ZIP de facturas si existe
         if zip_bytes:
@@ -778,39 +766,14 @@ def exportar_respaldo_sesion_zip(empresa_dict, df_proc, dict_renom, dict_orig, e
         if mem_actual:
             zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
         zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
-        # PDFs ya vienen comprimidos internamente (FlateDecode). Usar compresión directa ultra-rápida
         if dict_renom:
             for fn, bdata in dict_renom.items():
-                zinfo = zipfile.ZipInfo(f"pdfs_renombrados/{fn}")
-                zinfo.compress_type = zipfile.ZIP_STORED
-                zf.writestr(zinfo, bdata)
+                zf.writestr(f"pdfs_renombrados/{fn}", bdata)
         if dict_orig:
             for fn, bdata in dict_orig.items():
-                zinfo = zipfile.ZipInfo(f"pdfs_originales/{fn}")
-                zinfo.compress_type = zipfile.ZIP_STORED
-                zf.writestr(zinfo, bdata)
+                zf.writestr(f"pdfs_originales/{fn}", bdata)
     buf.seek(0)
     return buf.getvalue()
-
-
-def obtener_respaldo_sesion_cached(empresa_dict):
-    """Devuelve el archivo de respaldo cacheado en memoria, regenerándolo solo cuando hay cambios."""
-    if "df_procesado" not in st.session_state or st.session_state["df_procesado"] is None:
-        return b""
-    df_p = st.session_state["df_procesado"]
-    d_ren = st.session_state.get("dict_pdfs", {})
-    d_ori = st.session_state.get("raw_uploaded_pdfs", {})
-    sig_actual = f"{len(df_p)}_{len(d_ren)}_{len(d_ori)}_{st.session_state.get('_ultimo_autosave_hora', '')}"
-    if st.session_state.get("_cached_respaldo_sig") != sig_actual or "_cached_respaldo_bytes" not in st.session_state:
-        b_data = exportar_respaldo_sesion_zip(
-            empresa_dict, df_p, d_ren, d_ori,
-            st.session_state.get("excel_bytes"),
-            st.session_state.get("excel_nombre", "Reporte.xlsx"),
-            st.session_state.get("zip_pdfs")
-        )
-        st.session_state["_cached_respaldo_bytes"] = b_data
-        st.session_state["_cached_respaldo_sig"] = sig_actual
-    return st.session_state.get("_cached_respaldo_bytes", b"")
 
 def importar_respaldo_sesion_zip(zip_bytes, empresa_dict):
     """Restaura una sesión contable completa desde un archivo ZIP de respaldo."""
@@ -1986,58 +1949,56 @@ def auditar_regimen_desde_facturas_renombradas(df_ref, dict_renombrados, empresa
 
 def identificar_factura_en_texto(texto, df_ref):
     """
-    Motor de búsqueda ultra-rápido (130x más veloz):
-    Evalúa CUFE, Prefijo, Folio, NIT Emisor y Proveedor sin crear objetos pesados en bucles.
+    Evalúa CUFE, Prefijo, Folio, NIT Emisor y nombre comercial del proveedor.
+    REGLA DE ORO: NUNCA empareja una factura basándose solo en el NIT del proveedor,
+    para evitar confundir múltiples facturas del mismo proveedor (ej. DHL, Claro, Siigo).
+    Debe coincidir obligatoriamente el CUFE o el Número de Factura (Prefijo + Folio).
     """
     if not texto or df_ref.empty:
         return None
     txt_clean = re.sub(r'[^A-Z0-9]', '', texto.upper())
     digits_only = re.sub(r'\D', '', texto)
 
-    # 1. Búsqueda directa por CUFE (Certeza 100%)
-    for r_idx, r_cand in df_ref.iterrows():
-        c_val = str(r_cand.get("CUFE", "") or r_cand.get("CUFE / Token", "") or "")
-        if len(c_val) >= 15:
-            c_clean = re.sub(r'[^A-Za-z0-9]', '', c_val).upper()
-            if c_clean[:20] in txt_clean:
-                return r_cand
+    # 1. Validación prioritaria por CUFE / Token (certeza absoluta del 100%)
+    for _, r_cand in df_ref.iterrows():
+        cufe_cand = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE / Token", "") or r_cand.get("CUFE", "") or "")).upper()
+        if len(cufe_cand) >= 15 and cufe_cand[:20] in txt_clean:
+            return r_cand
 
-    # 2. Búsqueda combinada Factura + NIT (Ultra-rápida)
     mejor_cand = None
     mejor_score = 0
 
-    for r_idx, r_cand in df_ref.iterrows():
-        pref = str(r_cand.get("Prefijo", "") or "").strip().upper()
-        fol = str(r_cand.get("Folio", "") or "").strip().upper()
-        if not fol or fol == "NAN":
-            continue
-        pref_c = re.sub(r'[^A-Z0-9]', '', pref)
-        fol_c = re.sub(r'[^A-Z0-9]', '', fol)
-        fac_full = (pref_c + fol_c) if pref_c else fol_c
-        fol_sc = fol_c.lstrip('0')
-        fac_full_sc = (pref_c + fol_sc) if pref_c else fol_sc
-
-        has_fac = (len(fac_full) >= 3 and fac_full in txt_clean) or (len(fac_full_sc) >= 3 and fac_full_sc in txt_clean)
-        if not has_fac and len(fol_c) >= 3:
-            if fol_c in txt_clean:
-                has_fac = True
-
-        if not has_fac:
-            continue
+    for _, r_cand in df_ref.iterrows():
+        pref = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Prefijo", "")).upper())
+        fol = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Folio", "")).upper())
+        fol_sc = fol.lstrip('0')
+        fac_full = (pref + fol) if pref else fol
+        fac_full_sc = (pref + fol_sc) if pref else fol_sc
 
         nit_c = re.sub(r'\D', '', str(r_cand.get("NIT Emisor", "")))
         nit_base = nit_c[:-1] if len(nit_c) >= 10 else nit_c
+
         has_nit = (nit_c and len(nit_c) >= 6 and nit_c in digits_only) or (nit_base and len(nit_base) >= 6 and nit_base in digits_only)
+        has_fac = (len(fac_full) >= 3 and fac_full in txt_clean) or (len(fac_full_sc) >= 3 and fac_full_sc in txt_clean)
 
-        prov_clean = re.sub(r'[^A-Z0-9]', '', str(r_cand.get("Proveedor", "")).upper())
-        has_prov = len(prov_clean) >= 4 and prov_clean[:8] in txt_clean
+        if not has_fac and len(fol) >= 3:
+            # Buscar el folio explícito precedido por marcadores de factura
+            pat_fol = rf'(?:FACTURA|FAC|NO|NUMERO|N[°º]|VENTA)[\s\:\.\#\-_]*{re.escape(fol)}'
+            if re.search(pat_fol, texto, re.IGNORECASE):
+                has_fac = True
 
-        score = 600 if has_nit else (450 if has_prov else 300)
-        if score > mejor_score:
-            mejor_score = score
-            mejor_cand = r_cand
-            if score == 600:
-                break
+        prov_words = [w for w in re.split(r'[^A-Z0-9]+', str(r_cand.get("Proveedor", "")).upper()) if len(w) >= 4 and w not in ["SAS", "LTDA", "S.A.", "COLOMBIA", "SERVICES", "SOLUTIONS", "SOCIEDAD", "DISTRIBUCIONES", "GLOBAL", "TRADE"]]
+        has_prov = any(w in txt_clean for w in prov_words)
+
+        score = 0
+        if has_fac and has_nit:
+            score = 600
+        elif has_fac and has_prov:
+            score = 450
+        elif has_fac and len(fac_full) >= 4:
+            score = 300
+        else:
+            score = 0
 
         if score > mejor_score and score >= 300:
             mejor_score = score
@@ -2489,23 +2450,17 @@ def generar_respaldo_portatil_bytes(empresa_dict):
             if mem_actual:
                 zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
 
-            # 7. PDFs si existen en la sesión (ZIP_STORED para que sea instantáneo sin bloquear CPU)
+            # 7. PDFs si existen en la sesión
             dict_renom_s = st.session_state.get("dict_pdfs", {})
             if dict_renom_s:
                 for fn, bdata in dict_renom_s.items():
-                    zinfo = zipfile.ZipInfo(f"pdfs_renombrados/{fn}")
-                    zinfo.compress_type = zipfile.ZIP_STORED
-                    zf.writestr(zinfo, bdata)
+                    zf.writestr(f"pdfs_renombrados/{fn}", bdata)
             dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
             if dict_orig_s:
                 for fn, bdata in dict_orig_s.items():
-                    zinfo = zipfile.ZipInfo(f"pdfs_originales/{fn}")
-                    zinfo.compress_type = zipfile.ZIP_STORED
-                    zf.writestr(zinfo, bdata)
+                    zf.writestr(f"pdfs_originales/{fn}", bdata)
             if st.session_state.get("zip_pdfs"):
-                zinfo = zipfile.ZipInfo("paquete_facturas.zip")
-                zinfo.compress_type = zipfile.ZIP_STORED
-                zf.writestr(zinfo, st.session_state["zip_pdfs"])
+                zf.writestr("paquete_facturas.zip", st.session_state["zip_pdfs"])
 
         buf.seek(0)
         return buf.getvalue()
@@ -2613,7 +2568,7 @@ if "df_procesado" in st.session_state and st.session_state["df_procesado"] is no
             st.session_state["job_actual_id"] = jid
             st.success("✅ ¡Progreso contable guardado y reglas memorizadas para futuros meses!")
     with c_bnr3:
-        b_resp = obtener_respaldo_sesion_cached(empresa)
+        b_resp = generar_respaldo_portatil_bytes(empresa)
         if b_resp:
             nit_clean_f = re.sub(r'\D', '', str(empresa['nit']))
             stamp_f = datetime.datetime.now().strftime('%Y%m%d_%H%M')
@@ -2703,7 +2658,15 @@ with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", exp
 
         # 1. Botón para exportar respaldo de la sesión activa
         if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-            zip_respaldo_bytes = obtener_respaldo_sesion_cached(empresa)
+            zip_respaldo_bytes = exportar_respaldo_sesion_zip(
+                empresa,
+                st.session_state.get("df_procesado"),
+                st.session_state.get("dict_pdfs", {}),
+                st.session_state.get("raw_uploaded_pdfs", {}),
+                st.session_state.get("excel_bytes"),
+                st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                st.session_state.get("zip_pdfs")
+            )
             nom_respaldo = f"Respaldo_Sesion_{empresa['nombre'].replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d')}.zip"
             st.download_button(
                 label="💾 Descargar Respaldo Completo de esta Sesión (.zip)",
@@ -2756,17 +2719,11 @@ with tab_compras:
     st.markdown("### 1. Insumos DIAN y Facturas en PDF")
     st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs (unificados o separados) para desbloquear, guardar y renombrar automáticamente por comprobante.")
 
-    # Si ya tenemos los documentos cargados en el autoguardado, mostrar confirmación visible
-    n_p_carg = len(st.session_state.get("raw_uploaded_pdfs", {}))
-    n_p_proc = len(st.session_state.get("dict_pdfs", {}))
-    if n_p_carg > 0:
-        st.success(f"✅ **Autoguardado Activo:** Tienes **{n_p_carg} facturas PDF cargadas en el sistema** ({n_p_proc} vinculadas con su comprobante). Ya están disponibles en la Pestaña 2 (Auditoría) y Pestaña 3 (Triangulación). No necesitas volver a subirlas.")
-
     col_u1, col_u2 = st.columns(2)
     with col_u1:
-        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"], help="Opcional si ya cargaste tu trabajo desde el Historial.")
+        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"])
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF o Archivo ZIP Consolidado", type=["pdf", "zip"], accept_multiple_files=True, help="Sube facturas en PDF o un solo archivo .ZIP con todas las facturas (ideal para 100 a 1000+ facturas).")
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF (unificadas o separadas)", type=["pdf"], accept_multiple_files=True)
 
     st.markdown("##### 🔢 3. Consecutivos Iniciales por Tipo de Comprobante Siigo:")
     st.caption("Cada tipo de comprobante lleva su propia numeración independiente. Digita en qué número vas en cada uno:")
@@ -2787,21 +2744,8 @@ with tab_compras:
         if st.session_state.get("_ultimo_pdfs_proc_sig") != pdfs_sig:
             if "raw_uploaded_pdfs" not in st.session_state:
                 st.session_state["raw_uploaded_pdfs"] = {}
-            import gc
             for p in archivos_pdfs:
-                if p.name.lower().endswith(".zip"):
-                    try:
-                        with zipfile.ZipFile(io.BytesIO(p.getvalue()), "r") as z_in:
-                            for z_name in z_in.namelist():
-                                if z_name.lower().endswith(".pdf") and not z_name.startswith("__MACOSX"):
-                                    c_name = os.path.basename(z_name)
-                                    if c_name:
-                                        st.session_state["raw_uploaded_pdfs"][c_name] = z_in.read(z_name)
-                    except Exception as e:
-                        st.error(f"Error leyendo archivo ZIP {p.name}: {e}")
-                else:
-                    st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
-            gc.collect()
+                st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
 
             st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
                 empresa,
@@ -2815,10 +2759,7 @@ with tab_compras:
                 job_id=st.session_state.get("job_actual_id")
             )
             st.session_state["_ultimo_pdfs_proc_sig"] = pdfs_sig
-            st.success(f"💾 **{len(archivos_pdfs)} archivo(s) PDF guardados y listos** en el Historial de {empresa['nombre']}.")
-            # Auto-vincular de inmediato si ya tenemos el reporte Excel cargado
-            if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-                st.session_state["_ejecutar_desbloqueo_ahora"] = True
+            st.success(f"💾 **{len(archivos_pdfs)} archivo(s) PDF guardados** en el Historial de {empresa['nombre']}.")
 
     if archivo_excel is not None:
         excel_sig = f"{archivo_excel.name}_{archivo_excel.size}_{cons_ini_fac}_{cons_ini_nc}_{cons_ini_nota}"
@@ -2983,11 +2924,6 @@ with tab_compras:
             n_renom_mem = len(st.session_state.get("dict_pdfs", {}))
             nom_ex = st.session_state.get("excel_nombre", "Reporte.xlsx")
             st.info(f"📂 **Trabajo Activo:** `{nom_ex}` ({len(df_proc)} facturas) | 📑 **{n_orig_mem} PDFs guardados** | 📄 **{n_renom_mem} procesados**")
-            if n_orig_mem > 0 and n_renom_mem == 0:
-                st.warning(f"⚡ **Tus {n_orig_mem} PDFs ya están cargados y guardados.** Pulsa el botón a continuación para desbloquearlos y vincularlos a las facturas:")
-                if st.button(f"🚀 Desbloquear y Procesar los {n_orig_mem} PDFs Ahora Mismo", key="btn_desbloquear_top_bar", type="primary", use_container_width=True):
-                    st.session_state["_ejecutar_desbloqueo_ahora"] = True
-                    st.rerun()
         with c_job2:
             if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
                 st.download_button(
@@ -3009,7 +2945,14 @@ with tab_compras:
                     use_container_width=True
                 )
         with c_job4:
-            zip_respaldo_b = obtener_respaldo_sesion_cached(empresa)
+            zip_respaldo_b = exportar_respaldo_sesion_zip(
+                empresa, df_proc,
+                st.session_state.get("dict_pdfs", {}),
+                st.session_state.get("raw_uploaded_pdfs", {}),
+                st.session_state.get("excel_bytes"),
+                st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                st.session_state.get("zip_pdfs")
+            )
             st.download_button(
                 label="💾 Guardar Sesión (.zip)",
                 data=zip_respaldo_b,
@@ -3197,70 +3140,22 @@ with tab_compras:
         with col_cfg2:
             st.info("💡 **Garantía de Factura Completa:** El motor inteligente detecta dónde empieza cada factura (Prefijo, Folio, NIT y marcadores de paginación). Todas las páginas de una misma factura se unen en un solo archivo PDF completo nombrado `Comp_10-XXX_Factura_Proveedor.pdf`.")
 
-        ejecutar_desb = st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora") or st.session_state.pop("_ejecutar_desbloqueo_ahora", False)
-        if ejecutar_desb:
-            df_ref = st.session_state.get("df_procesado", pd.DataFrame())
-
-            # Lista de PDFs a procesar: extraer archivos .pdf reales tanto de subidas directas como de archivos .zip
-            if "raw_uploaded_pdfs" not in st.session_state:
-                st.session_state["raw_uploaded_pdfs"] = {}
-
-            pdfs_reales_dict = {}
-            # 1. Incorporar PDFs ya existentes en raw_uploaded_pdfs
-            for fn, bdata in st.session_state.get("raw_uploaded_pdfs", {}).items():
-                if fn.lower().endswith(".pdf"):
-                    pdfs_reales_dict[fn] = bdata
-
-            # 2. Desempaquetar archivos_pdfs si contienen archivos .zip o PDFs directos
-            if archivos_pdfs:
-                for p_it in archivos_pdfs:
-                    p_nom = getattr(p_it, "name", "").lower()
-                    if p_nom.endswith(".zip"):
-                        try:
-                            b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
-                            with zipfile.ZipFile(io.BytesIO(b_val), "r") as z_u:
-                                for z_fn in z_u.namelist():
-                                    if z_fn.lower().endswith(".pdf") and not z_fn.startswith("__MACOSX"):
-                                        b_pdf = z_u.read(z_fn)
-                                        c_fn = os.path.basename(z_fn)
-                                        if c_fn:
-                                            pdfs_reales_dict[c_fn] = b_pdf
-                                            st.session_state["raw_uploaded_pdfs"][c_fn] = b_pdf
-                        except Exception as e_z:
-                            st.error(f"Error abriendo ZIP {getattr(p_it, 'name', '')}: {e_z}")
-                    elif p_nom.endswith(".pdf") or not p_nom:
-                        b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
-                        pdfs_reales_dict[getattr(p_it, "name", "factura.pdf")] = b_val
-
-            # Construir la lista limpia de streams PDF con su nombre asignado
-            pdfs_a_procesar = []
-            for fn, b_pdf in pdfs_reales_dict.items():
-                bio = io.BytesIO(b_pdf)
-                bio.name = fn
-                pdfs_a_procesar.append(bio)
-
-            if not pdfs_a_procesar:
-                st.warning("⚠️ No hay archivos PDF para procesar. Por favor sube tus facturas en el campo '2. Facturas en PDF (unificadas o separadas)' arriba antes de hacer clic en desbloquear.")
-                st.stop()
-
+        if st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora"):
             buffer_zip = io.BytesIO()
             total_generados = 0
 
             if "dict_pdfs" not in st.session_state:
                 st.session_state["dict_pdfs"] = {}
 
-            total_pdfs_count = len(pdfs_a_procesar)
-            prog_bar_pdf = st.progress(0, text=f"Iniciando procesamiento de {total_pdfs_count} archivo(s) PDF...")
+            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                df_ref = st.session_state.get("df_procesado", pd.DataFrame())
 
-            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_STORED) as zf:
+                # Lista de PDFs a procesar: los recién subidos o los almacenados en la sesión
+                pdfs_a_procesar = archivos_pdfs if archivos_pdfs else [
+                    io.BytesIO(b_bytes) for b_bytes in st.session_state.get("raw_uploaded_pdfs", {}).values()
+                ]
+
                 for idx_pdf, pdf_item in enumerate(pdfs_a_procesar):
-                    pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
-                    prog_bar_pdf.progress(min(1.0, (idx_pdf + 1) / total_pdfs_count), text=f"⚡ Factura {idx_pdf + 1} de {total_pdfs_count}: {pdf_name[:20]}...")
-                    # Si ya fue procesado y guardado en dict_pdfs, re-usar directamente
-                    if pdf_name in st.session_state["dict_pdfs"] and len(st.session_state["dict_pdfs"][pdf_name]) > 100:
-                        zf.writestr(pdf_name, st.session_state["dict_pdfs"][pdf_name])
-                        total_generados += 1
-                        continue
                     try:
                         pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
                         reader = PdfReader(pdf_item)
@@ -3353,8 +3248,10 @@ with tab_compras:
                             else:
                                 nombre_final = f"Soporte_{idx_pdf+1}_{pdf_name}"
 
-                            # Reutilizar directamente los bytes originales sin re-escribir con PdfWriter (1000x más rápido)
-                            b_data = pdf_item.getvalue() if hasattr(pdf_item, "getvalue") else pdf_item.read()
+                            pdf_bytes = io.BytesIO()
+                            writer.write(pdf_bytes)
+                            pdf_bytes.seek(0)
+                            b_data = pdf_bytes.getvalue()
                             zf.writestr(nombre_final, b_data)
                             st.session_state["dict_pdfs"][nombre_final] = b_data
                             total_generados += 1
@@ -3517,7 +3414,6 @@ with tab_compras:
                     except Exception as e:
                         st.error(f"Error procesando {pdf_name}: {e}")
 
-            prog_bar_pdf.progress(1.0, text="✅ ¡100% Procesado y Vinculado con Éxito!")
             buffer_zip.seek(0)
             st.session_state["zip_pdfs"] = buffer_zip.getvalue()
             st.session_state["total_zip_pdfs"] = total_generados
