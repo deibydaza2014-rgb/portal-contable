@@ -3214,10 +3214,43 @@ with tab_compras:
         if ejecutar_desb:
             df_ref = st.session_state.get("df_procesado", pd.DataFrame())
 
-            # Lista de PDFs a procesar: los recién subidos o los almacenados en la sesión
-            pdfs_a_procesar = archivos_pdfs if archivos_pdfs else [
-                io.BytesIO(b_bytes) for b_bytes in st.session_state.get("raw_uploaded_pdfs", {}).values()
-            ]
+            # Lista de PDFs a procesar: extraer archivos .pdf reales tanto de subidas directas como de archivos .zip
+            if "raw_uploaded_pdfs" not in st.session_state:
+                st.session_state["raw_uploaded_pdfs"] = {}
+
+            pdfs_reales_dict = {}
+            # 1. Incorporar PDFs ya existentes en raw_uploaded_pdfs
+            for fn, bdata in st.session_state.get("raw_uploaded_pdfs", {}).items():
+                if fn.lower().endswith(".pdf"):
+                    pdfs_reales_dict[fn] = bdata
+
+            # 2. Desempaquetar archivos_pdfs si contienen archivos .zip o PDFs directos
+            if archivos_pdfs:
+                for p_it in archivos_pdfs:
+                    p_nom = getattr(p_it, "name", "").lower()
+                    if p_nom.endswith(".zip"):
+                        try:
+                            b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
+                            with zipfile.ZipFile(io.BytesIO(b_val), "r") as z_u:
+                                for z_fn in z_u.namelist():
+                                    if z_fn.lower().endswith(".pdf") and not z_fn.startswith("__MACOSX"):
+                                        b_pdf = z_u.read(z_fn)
+                                        c_fn = os.path.basename(z_fn)
+                                        if c_fn:
+                                            pdfs_reales_dict[c_fn] = b_pdf
+                                            st.session_state["raw_uploaded_pdfs"][c_fn] = b_pdf
+                        except Exception as e_z:
+                            st.error(f"Error abriendo ZIP {getattr(p_it, 'name', '')}: {e_z}")
+                    elif p_nom.endswith(".pdf") or not p_nom:
+                        b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
+                        pdfs_reales_dict[getattr(p_it, "name", "factura.pdf")] = b_val
+
+            # Construir la lista limpia de streams PDF con su nombre asignado
+            pdfs_a_procesar = []
+            for fn, b_pdf in pdfs_reales_dict.items():
+                bio = io.BytesIO(b_pdf)
+                bio.name = fn
+                pdfs_a_procesar.append(bio)
 
             if not pdfs_a_procesar:
                 st.warning("⚠️ No hay archivos PDF para procesar. Por favor sube tus facturas en el campo '2. Facturas en PDF (unificadas o separadas)' arriba antes de hacer clic en desbloquear.")
