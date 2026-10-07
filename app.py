@@ -2779,7 +2779,7 @@ with tab_compras:
     with col_u1:
         archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"], help="Opcional si ya cargaste tu trabajo desde el Historial.")
     with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF (unificadas o separadas)", type=["pdf"], accept_multiple_files=True, help="Sube nuevos PDFs o reemplázalos aquí si tienes adicionales.")
+        archivos_pdfs = st.file_uploader("2. Facturas en PDF o Archivo ZIP Consolidado", type=["pdf", "zip"], accept_multiple_files=True, help="Sube facturas en PDF o un solo archivo .ZIP con todas las facturas (ideal para 100 a 1000+ facturas).")
 
     st.markdown("##### 🔢 3. Consecutivos Iniciales por Tipo de Comprobante Siigo:")
     st.caption("Cada tipo de comprobante lleva su propia numeración independiente. Digita en qué número vas en cada uno:")
@@ -2800,8 +2800,21 @@ with tab_compras:
         if st.session_state.get("_ultimo_pdfs_proc_sig") != pdfs_sig:
             if "raw_uploaded_pdfs" not in st.session_state:
                 st.session_state["raw_uploaded_pdfs"] = {}
+            import gc
             for p in archivos_pdfs:
-                st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
+                if p.name.lower().endswith(".zip"):
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(p.getvalue()), "r") as z_in:
+                            for z_name in z_in.namelist():
+                                if z_name.lower().endswith(".pdf") and not z_name.startswith("__MACOSX"):
+                                    c_name = os.path.basename(z_name)
+                                    if c_name:
+                                        st.session_state["raw_uploaded_pdfs"][c_name] = z_in.read(z_name)
+                    except Exception as e:
+                        st.error(f"Error leyendo archivo ZIP {p.name}: {e}")
+                else:
+                    st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
+            gc.collect()
 
             st.session_state["job_actual_id"] = guardar_trabajo_en_historial(
                 empresa,
