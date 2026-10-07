@@ -20,9 +20,14 @@ except Exception:
 
 st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
 
-# Estilos visuales profesionales
+# Estilos visuales profesionales y protección contra conflictos de Google Translate
 st.markdown("""
-<style>
+<meta name="google" content="notranslate">
+<style class="notranslate">
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+        -webkit-translate: no !important;
+        translate: no !important;
+    }
     .main { background-color: #f8fafc; }
     .stButton>button { background-color: #0070ba; color: white; border-radius: 6px; font-weight: 600; }
     .card-box { background: white; padding: 22px; border-radius: 10px; border: 1px solid #e2e8f0; box-shadow: 0 2px 5px rgba(0,0,0,0.04); margin-bottom: 18px; }
@@ -3526,7 +3531,7 @@ with tab_compras:
                     except Exception as e:
                         st.error(f"Error procesando {pdf_name}: {e}")
 
-            prog_bar_pdf.empty()
+            prog_bar_pdf.progress(1.0, text="✅ ¡100% Procesado y Vinculado con Éxito!")
             buffer_zip.seek(0)
             st.session_state["zip_pdfs"] = buffer_zip.getvalue()
             st.session_state["total_zip_pdfs"] = total_generados
