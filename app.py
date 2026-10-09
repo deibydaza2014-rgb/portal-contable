@@ -1096,32 +1096,7 @@ def generar_asiento_mixto_hoja2_con_terceros(agente_row, terceros_df, enviar_a_n
                 "Crédito ($)": 0.0
             })
             
-    # Saldo para terceros restante (fletes internacionales / cargos en origen sin factura DIAN separada)
-    dif_terceros = round(saldo_terceros_esperado - suma_terceros_cxp, 2)
-    filas_ajuste = []
-    if dif_terceros > 0.05:
-        if enviar_a_no_deducible:
-            filas_ajuste.append({
-                "Código Cuenta": CUENTA_NO_DEDUCIBLE,
-                "Descripción Cuenta": f"Gastos No Deducibles Terceros (Diferencia sin soporte DIAN)",
-                "Descripción de la Cuenta": f"Gastos No Deducibles Terceros (Diferencia sin soporte DIAN)",
-                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
-                "Débito ($)": dif_terceros,
-                "Crédito ($)": 0.0
-            })
-        elif imputar_a_transito:
-            filas_ajuste.append({
-                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
-                "Descripción Cuenta": f"Mercancías en Tránsito / Saldo Faltante (Fac {agente_row.get('Factura', '')})",
-                "Descripción de la Cuenta": f"Mercancías en Tránsito / Saldo Faltante (Fac {agente_row.get('Factura', '')})",
-                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
-                "Débito ($)": dif_terceros,
-                "Crédito ($)": 0.0
-            })
-        # Si ni enviar_a_no_deducible ni imputar_a_transito están activos, NO se agrega ninguna fila de ajuste:
-        # SE DEJA PENDIENTE PARA QUE EL USUARIO CONCILIE FACTURAS O DECIDA ENVIARLO A TRÁNSITO / NO DEDUCIBLE.
-            
-    # Crédito total por pagar al Agente Aduanero (Euro Shipping)
+    # Crédito total por pagar al Agente Aduanero (Euro Shipping / Trade Global)
     asume_ret = bool(agente_row.get("Impuestos Asumidos", False))
     cxp_total_agente = tot_agente if asume_ret else round(tot_agente - tot_ret_propias, 2)
     
@@ -1134,9 +1109,57 @@ def generar_asiento_mixto_hoja2_con_terceros(agente_row, terceros_df, enviar_a_n
         "Crédito ($)": cxp_total_agente
     }]
     
+    # Calcular la diferencia matemática exacta de partida doble entre débitos y créditos del asiento
+    suma_deb_base = sum(float(f.get("Débito ($)", 0.0) or 0.0) for f in (filas_propias + filas_terceros))
+    suma_cred_base = sum(float(f.get("Crédito ($)", 0.0) or 0.0) for f in (filas_propias + filas_credito))
+    dif_asiento_exacta = round(suma_cred_base - suma_deb_base, 2)
+
+    filas_ajuste = []
+    if abs(dif_asiento_exacta) > 0.05:
+        if enviar_a_no_deducible:
+            if dif_asiento_exacta > 0.05:
+                # Faltan débitos por justificar -> Débito a No Deducibles (53950501)
+                filas_ajuste.append({
+                    "Código Cuenta": CUENTA_NO_DEDUCIBLE,
+                    "Descripción Cuenta": f"Gastos No Deducibles Terceros (Diferencia sin soporte DIAN)",
+                    "Descripción de la Cuenta": f"Gastos No Deducibles Terceros (Diferencia sin soporte DIAN)",
+                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
+                    "Débito ($)": dif_asiento_exacta,
+                    "Crédito ($)": 0.0
+                })
+            else:
+                # Débitos exceden créditos (los terceros superan el cobro del agente) -> Crédito a 53950501
+                filas_ajuste.append({
+                    "Código Cuenta": CUENTA_NO_DEDUCIBLE,
+                    "Descripción Cuenta": f"Ajuste No Deducible / Terceros Superan Cobro Agente",
+                    "Descripción de la Cuenta": f"Ajuste No Deducible / Terceros Superan Cobro Agente",
+                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
+                    "Débito ($)": 0.0,
+                    "Crédito ($)": abs(dif_asiento_exacta)
+                })
+        elif imputar_a_transito:
+            if dif_asiento_exacta > 0.05:
+                filas_ajuste.append({
+                    "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                    "Descripción Cuenta": f"Mercancías en Tránsito / Saldo Faltante (Fac {agente_row.get('Factura', '')})",
+                    "Descripción de la Cuenta": f"Mercancías en Tránsito / Saldo Faltante (Fac {agente_row.get('Factura', '')})",
+                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
+                    "Débito ($)": dif_asiento_exacta,
+                    "Crédito ($)": 0.0
+                })
+            else:
+                filas_ajuste.append({
+                    "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                    "Descripción Cuenta": f"Ajuste Mercancías en Tránsito / Terceros Superan Cobro (Fac {agente_row.get('Factura', '')})",
+                    "Descripción de la Cuenta": f"Ajuste Mercancías en Tránsito / Terceros Superan Cobro (Fac {agente_row.get('Factura', '')})",
+                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
+                    "Débito ($)": 0.0,
+                    "Crédito ($)": abs(dif_asiento_exacta)
+                })
+            
     asiento_final = filas_propias + filas_terceros + filas_ajuste + filas_credito
     df_res = pd.DataFrame(asiento_final)
-    dif_pendiente = dif_terceros if (not enviar_a_no_deducible and not imputar_a_transito) else 0.0
+    dif_pendiente = abs(dif_asiento_exacta) if (not enviar_a_no_deducible and not imputar_a_transito) else 0.0
     return df_res, dif_pendiente
 
 def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_hoja2=False, **kwargs):
@@ -2610,234 +2633,242 @@ def restaurar_desde_respaldo_bytes(empresa_dict, raw_zip_bytes):
     except Exception as e:
         return False
 
-# BANNER DE CONTROL Y GUARDADO MANUAL
-if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-    c_bnr1, c_bnr2, c_bnr3, c_bnr4 = st.columns([2.8, 1.3, 1.6, 0.9])
-    with c_bnr1:
-        nom_ses = st.session_state.get("excel_nombre", "Reporte de Facturas")
-        last_save = st.session_state.get("_ultimo_guardado_manual")
-        save_info = f" | 💾 `{last_save}`" if last_save else ""
-        st.info(f"📋 **Trabajo Activo:** `{nom_ses}` ({len(st.session_state['df_procesado'])} facturas){save_info}")
-    with c_bnr2:
-        if st.button("💾 Guardar Avance", key="btn_guardar_manual_top", use_container_width=True, help="Guarda en disco todas las modificaciones de cuentas y paquetes validados."):
-            if guardar_estado_manual(empresa):
-                st.success("✅ ¡Avance contable guardado exitosamente!")
-                st.rerun()
-            else:
-                st.error("Error al guardar.")
-    with c_bnr3:
-        respaldo_bytes_top = generar_respaldo_portatil_bytes(empresa)
-        if respaldo_bytes_top:
-            emp_clean_name = re.sub(r'[^a-zA-Z0-9]', '_', str(empresa.get('nombre', 'Empresa')))
-            nom_resp_top = f"Respaldo_Avance_{emp_clean_name}.indumaq"
-            st.download_button(
-                label="🛡️ Descargar Respaldo (.indumaq)",
-                data=respaldo_bytes_top,
-                file_name=nom_resp_top,
-                mime="application/zip",
-                key="btn_dl_respaldo_top_direct",
-                use_container_width=True,
-                help="Descarga un archivo con tus 16 paquetes validados y facturas editadas. Si se apaga o reinicia Streamlit, lo cargas en segundos."
-            )
-    with c_bnr4:
-        if st.button("🆕 Limpiar", key="btn_nuevo_trabajo_top", use_container_width=True, help="Limpia la memoria para cargar un nuevo mes."):
-            for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig", "paquetes_importacion", "asientos_triangulacion_por_factura", "facturas_no_contabilizar", "_ultimo_guardado_manual"]:
-                st.session_state.pop(k, None)
-            st.rerun()
-else:
-    # Si la memoria está vacía, ofrecer botón para cargar el último avance guardado si existe
-    nit_c = re.sub(r'\D', '', str(empresa.get("nit", "empresa")))
-    d_man = os.path.join(DATA_DIR, nit_c, "estado_manual")
-    if os.path.exists(os.path.join(d_man, "df_procesado.pkl")):
-        col_rec1, col_rec2 = st.columns([3.5, 1.5])
-        with col_rec1:
-            st.info("💡 **Tienes un avance contable guardado previamente.** Puedes restaurarlo con un solo clic:")
-        with col_rec2:
-            if st.button("📂 Cargar Último Avance Guardado", key="btn_cargar_avance_previo", type="primary", use_container_width=True):
-                if cargar_estado_manual(empresa):
-                    st.success("¡Avance restaurado con éxito!")
-                    st.rerun()
-
-# PANEL DE HISTORIAL DE TRABAJOS Y RESPALDOS INDESTRUCTIBLES
-trabajos_guardados = listar_trabajos_historial(empresa)
-panel_expanded = False
-
-with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", expanded=panel_expanded):
-    # Restauración inmediata desde archivo portátil .indumaq
-    c_upl_r1, c_upl_r2 = st.columns([3, 1.2])
-    with c_upl_r1:
-        upl_indumaq = st.file_uploader("📤 Restaurar desde Archivo de Respaldo (.indumaq):", type=["indumaq", "backup", "zip"], key="upl_respaldo_indumaq", help="Sube tu archivo de respaldo para recuperar al instante exactamente donde lo dejaste.")
-    with c_upl_r2:
-        st.write("")
-        st.write("")
-        if upl_indumaq is not None:
-            if st.button("🚀 Restaurar Respaldo", key="btn_ejecutar_restaurar_upl", use_container_width=True):
-                ok_r = restaurar_desde_respaldo_bytes(empresa, upl_indumaq.read())
-                if ok_r:
-                    st.success("¡Respaldo restaurado con éxito! Todas tus facturas editadas y paquetes quedaron listos.")
+try:
+    # BANNER DE CONTROL Y GUARDADO MANUAL
+    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+        c_bnr1, c_bnr2, c_bnr3, c_bnr4 = st.columns([2.8, 1.3, 1.6, 0.9])
+        with c_bnr1:
+            nom_ses = st.session_state.get("excel_nombre", "Reporte de Facturas")
+            last_save = st.session_state.get("_ultimo_guardado_manual")
+            save_info = f" | 💾 `{last_save}`" if last_save else ""
+            st.info(f"📋 **Trabajo Activo:** `{nom_ses}` ({len(st.session_state['df_procesado'])} facturas){save_info}")
+        with c_bnr2:
+            if st.button("💾 Guardar Avance", key="btn_guardar_manual_top", use_container_width=True, help="Guarda en disco todas las modificaciones de cuentas y paquetes validados."):
+                if guardar_estado_manual(empresa):
+                    st.success("✅ ¡Avance contable guardado exitosamente!")
                     st.rerun()
                 else:
-                    st.error("No se pudo leer el archivo de respaldo.")
-    st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
-
-    col_h_left, col_h_right = st.columns([1.5, 1])
-
-    with col_h_left:
-        st.markdown("#### 📂 Trabajos Guardados en esta Empresa:")
-        if trabajos_guardados:
-            st.caption("Haz clic en 'Cargar' para recuperar de inmediato cualquier auditoría o mes previo:")
-            for tb in trabajos_guardados:
-                c_h1, c_h2, c_h3 = st.columns([3, 1.2, 0.5])
-                with c_h1:
-                    nom_tb = tb.get("nombre_trabajo", f"Trabajo {tb.get('id', '')}")
-                    n_facs = tb.get("total_facturas", 0)
-                    try: val_tot = float(tb.get("total_valor", 0.0) or 0.0)
-                    except Exception: val_tot = 0.0
-                    n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
-                    n_orig = tb.get("total_pdfs_originales", 0)
-                    info_pdf_str = f"{n_renom} PDFs procesados" if n_renom > 0 else (f"{n_orig} PDFs subidos" if n_orig > 0 else "Sin PDFs")
-                    st.markdown(f"📄 **{nom_tb}** — {n_facs} facturas (${val_tot:,.2f}) — **{info_pdf_str}**")
-                with c_h2:
-                    if st.button("📂 Cargar", key=f"btn_h_load_{tb['id']}"):
-                        df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, tb["id"])
-                        if df_g is not None:
-                            st.session_state["df_procesado"] = df_g
-                        if pdfs_r_g:
-                            st.session_state["dict_pdfs"] = pdfs_r_g
-                        if pdfs_o_g:
-                            st.session_state["raw_uploaded_pdfs"] = pdfs_o_g
-                        if ex_b_g:
-                            st.session_state["excel_bytes"] = ex_b_g
-                            st.session_state["excel_nombre"] = ex_n_g
-                        if zip_g:
-                            st.session_state["zip_pdfs"] = zip_g
-                            st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
-                        st.session_state["job_actual_id"] = tb["id"]
-                        st.session_state["_sesion_auto_recuperada"] = nom_tb
-                        st.success(f"¡Trabajo '{nom_tb}' cargado! Todo tu avance está listo.")
+                    st.error("Error al guardar.")
+        with c_bnr3:
+            respaldo_bytes_top = generar_respaldo_portatil_bytes(empresa)
+            if respaldo_bytes_top:
+                emp_clean_name = re.sub(r'[^a-zA-Z0-9]', '_', str(empresa.get('nombre', 'Empresa')))
+                nom_resp_top = f"Respaldo_Avance_{emp_clean_name}.indumaq"
+                st.download_button(
+                    label="🛡️ Descargar Respaldo (.indumaq)",
+                    data=respaldo_bytes_top,
+                    file_name=nom_resp_top,
+                    mime="application/zip",
+                    key="btn_dl_respaldo_top_direct",
+                    use_container_width=True,
+                    help="Descarga un archivo con tus 16 paquetes validados y facturas editadas. Si se apaga o reinicia Streamlit, lo cargas en segundos."
+                )
+        with c_bnr4:
+            if st.button("🆕 Limpiar", key="btn_nuevo_trabajo_top", use_container_width=True, help="Limpia la memoria para cargar un nuevo mes."):
+                for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig", "paquetes_importacion", "asientos_triangulacion_por_factura", "facturas_no_contabilizar", "_ultimo_guardado_manual"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+    else:
+        # Si la memoria está vacía, ofrecer botón para cargar el último avance guardado si existe
+        nit_c = re.sub(r'\D', '', str(empresa.get("nit", "empresa")))
+        d_man = os.path.join(DATA_DIR, nit_c, "estado_manual")
+        if os.path.exists(os.path.join(d_man, "df_procesado.pkl")):
+            col_rec1, col_rec2 = st.columns([3.5, 1.5])
+            with col_rec1:
+                st.info("💡 **Tienes un avance contable guardado previamente.** Puedes restaurarlo con un solo clic:")
+            with col_rec2:
+                if st.button("📂 Cargar Último Avance Guardado", key="btn_cargar_avance_previo", type="primary", use_container_width=True):
+                    if cargar_estado_manual(empresa):
+                        st.success("¡Avance restaurado con éxito!")
                         st.rerun()
-                with c_h3:
-                    if st.button("🗑️", key=f"btn_h_del_{tb['id']}"):
-                        eliminar_trabajo_historial(empresa, tb["id"])
-                        st.rerun()
-        else:
-            st.info("💡 Aún no tienes trabajos guardados en el disco local para esta empresa.")
-
-    with col_h_right:
-        st.markdown("#### 🛡️ Respaldo Portable (.zip):")
-        st.caption("Guarda o restaura todo tu trabajo en un solo archivo, ideal si cambias de PC o si el servidor se reinicia:")
-
-        pass
-
-        # 2. Uploader para restaurar desde un archivo de respaldo previo (con botón de confirmación para evitar bucles)
-        archivo_zip_restaurar = st.file_uploader(
-            "📥 Restaurar Sesión desde Archivo de Respaldo (.indumaq / .zip):",
-            type=["indumaq", "zip"],
-            key="upl_zip_restore_historial",
-            help="Sube tu archivo de respaldo para restaurar exactamente donde lo dejaste."
-        )
-        if archivo_zip_restaurar is not None:
-            if st.button("🚀 Cargar este Respaldo en Pantalla", key="btn_confirmar_cargar_zip_historial", use_container_width=True):
-                with st.spinner("Restaurando sesión y cálculos..."):
-                    raw_b = archivo_zip_restaurar.getvalue()
-                    ok_r = restaurar_desde_respaldo_bytes(empresa, raw_b)
-                    if not ok_r:
-                        df_res, renom_res, orig_res, ex_b_res, ex_n_res, zip_res = importar_respaldo_sesion_zip(raw_b, empresa)
-                        if df_res is not None:
-                            st.session_state["df_procesado"] = df_res
-                            st.session_state["dict_pdfs"] = renom_res or {}
-                            st.session_state["raw_uploaded_pdfs"] = orig_res or {}
-                            st.session_state["excel_bytes"] = ex_b_res
-                            st.session_state["excel_nombre"] = ex_n_res
-                            st.session_state["zip_pdfs"] = zip_res
-                            st.session_state["total_zip_pdfs"] = len(renom_res) if renom_res else 0
-                            ok_r = True
+    
+    # PANEL DE HISTORIAL DE TRABAJOS Y RESPALDOS INDESTRUCTIBLES
+    trabajos_guardados = listar_trabajos_historial(empresa)
+    panel_expanded = False
+    
+    with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", expanded=panel_expanded):
+        # Restauración inmediata desde archivo portátil .indumaq
+        c_upl_r1, c_upl_r2 = st.columns([3, 1.2])
+        with c_upl_r1:
+            upl_indumaq = st.file_uploader("📤 Restaurar desde Archivo de Respaldo (.indumaq):", type=["indumaq", "backup", "zip"], key="upl_respaldo_indumaq", help="Sube tu archivo de respaldo para recuperar al instante exactamente donde lo dejaste.")
+        with c_upl_r2:
+            st.write("")
+            st.write("")
+            if upl_indumaq is not None:
+                if st.button("🚀 Restaurar Respaldo", key="btn_ejecutar_restaurar_upl", use_container_width=True):
+                    ok_r = restaurar_desde_respaldo_bytes(empresa, upl_indumaq.read())
                     if ok_r:
-                        st.success(f"¡Sesión restaurada con éxito desde {archivo_zip_restaurar.name}!")
+                        st.success("¡Respaldo restaurado con éxito! Todas tus facturas editadas y paquetes quedaron listos.")
                         st.rerun()
                     else:
-                        st.error("No se pudo restaurar el archivo de respaldo.")
-
-st.markdown("---")
-
-
-def normalizar_df_procesado(df):
-    """Garantiza que todas las columnas requeridas existan con tipos seguros y sin NaNs que causen caídas."""
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+                        st.error("No se pudo leer el archivo de respaldo.")
+        st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
+    
+        col_h_left, col_h_right = st.columns([1.5, 1])
+    
+        with col_h_left:
+            st.markdown("#### 📂 Trabajos Guardados en esta Empresa:")
+            if trabajos_guardados:
+                st.caption("Haz clic en 'Cargar' para recuperar de inmediato cualquier auditoría o mes previo:")
+                for tb in trabajos_guardados:
+                    c_h1, c_h2, c_h3 = st.columns([3, 1.2, 0.5])
+                    with c_h1:
+                        nom_tb = tb.get("nombre_trabajo", f"Trabajo {tb.get('id', '')}")
+                        n_facs = tb.get("total_facturas", 0)
+                        try: val_tot = float(tb.get("total_valor", 0.0) or 0.0)
+                        except Exception: val_tot = 0.0
+                        n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
+                        n_orig = tb.get("total_pdfs_originales", 0)
+                        info_pdf_str = f"{n_renom} PDFs procesados" if n_renom > 0 else (f"{n_orig} PDFs subidos" if n_orig > 0 else "Sin PDFs")
+                        st.markdown(f"📄 **{nom_tb}** — {n_facs} facturas (${val_tot:,.2f}) — **{info_pdf_str}**")
+                    with c_h2:
+                        if st.button("📂 Cargar", key=f"btn_h_load_{tb['id']}"):
+                            df_g, pdfs_r_g, pdfs_o_g, ex_b_g, ex_n_g, zip_g = cargar_trabajo_historial(empresa, tb["id"])
+                            if df_g is not None:
+                                st.session_state["df_procesado"] = df_g
+                            if pdfs_r_g:
+                                st.session_state["dict_pdfs"] = pdfs_r_g
+                            if pdfs_o_g:
+                                st.session_state["raw_uploaded_pdfs"] = pdfs_o_g
+                            if ex_b_g:
+                                st.session_state["excel_bytes"] = ex_b_g
+                                st.session_state["excel_nombre"] = ex_n_g
+                            if zip_g:
+                                st.session_state["zip_pdfs"] = zip_g
+                                st.session_state["total_zip_pdfs"] = len(pdfs_r_g) if pdfs_r_g else 0
+                            st.session_state["job_actual_id"] = tb["id"]
+                            st.session_state["_sesion_auto_recuperada"] = nom_tb
+                            st.success(f"¡Trabajo '{nom_tb}' cargado! Todo tu avance está listo.")
+                            st.rerun()
+                    with c_h3:
+                        if st.button("🗑️", key=f"btn_h_del_{tb['id']}"):
+                            eliminar_trabajo_historial(empresa, tb["id"])
+                            st.rerun()
+            else:
+                st.info("💡 Aún no tienes trabajos guardados en el disco local para esta empresa.")
+    
+        with col_h_right:
+            st.markdown("#### 🛡️ Respaldo Portable (.zip):")
+            st.caption("Guarda o restaura todo tu trabajo en un solo archivo, ideal si cambias de PC o si el servidor se reinicia:")
+    
+            pass
+    
+            # 2. Uploader para restaurar desde un archivo de respaldo previo (con botón de confirmación para evitar bucles)
+            archivo_zip_restaurar = st.file_uploader(
+                "📥 Restaurar Sesión desde Archivo de Respaldo (.indumaq / .zip):",
+                type=["indumaq", "zip"],
+                key="upl_zip_restore_historial",
+                help="Sube tu archivo de respaldo para restaurar exactamente donde lo dejaste."
+            )
+            if archivo_zip_restaurar is not None:
+                if st.button("🚀 Cargar este Respaldo en Pantalla", key="btn_confirmar_cargar_zip_historial", use_container_width=True):
+                    with st.spinner("Restaurando sesión y cálculos..."):
+                        raw_b = archivo_zip_restaurar.getvalue()
+                        ok_r = restaurar_desde_respaldo_bytes(empresa, raw_b)
+                        if not ok_r:
+                            df_res, renom_res, orig_res, ex_b_res, ex_n_res, zip_res = importar_respaldo_sesion_zip(raw_b, empresa)
+                            if df_res is not None:
+                                st.session_state["df_procesado"] = df_res
+                                st.session_state["dict_pdfs"] = renom_res or {}
+                                st.session_state["raw_uploaded_pdfs"] = orig_res or {}
+                                st.session_state["excel_bytes"] = ex_b_res
+                                st.session_state["excel_nombre"] = ex_n_res
+                                st.session_state["zip_pdfs"] = zip_res
+                                st.session_state["total_zip_pdfs"] = len(renom_res) if renom_res else 0
+                                ok_r = True
+                        if ok_r:
+                            st.success(f"¡Sesión restaurada con éxito desde {archivo_zip_restaurar.name}!")
+                            st.rerun()
+                        else:
+                            st.error("No se pudo restaurar el archivo de respaldo.")
+    
+    st.markdown("---")
+    
+    
+    def normalizar_df_procesado(df):
+        """Garantiza que todas las columnas requeridas existan con tipos seguros y sin NaNs que causen caídas."""
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return df
+        
+        defaults_str = {
+            "Comprobante Siigo": "Comp 10-001", "Fecha": "01/01/2026", "Factura": "FAC-001",
+            "Proveedor": "Proveedor", "NIT Emisor": "900000000", "Régimen Fiscal Emisor": "48",
+            "Cta Principal": "14650501", "Categoría": "General", "Razón Contable": "Clasificación automática", "Cuenta Pasivo Especifica": "22050501",
+            "Cta Contrapartida": "22050501", "Operacion": "Compra", "Soporte PDF Renombrado": "",
+            "Descripcion": "Compra general", "Tipo Comp": "10", "Prefijo": "", "Folio": "",
+            "Cta ReteFuente": "23654001", "Cta ReteICA": "23680501", "Cta IVA": "24081001",
+            "Cta IVA Importación": "240835", "Comprobante Previo": "", "Estado Registro": "⚪ Compra Pendiente"
+        }
+        defaults_num = {
+            "Base": 0.0, "IVA": 0.0, "ReteFuente": 0.0, "ReteICA": 0.0, "ReteIVA": 0.0,
+            "Total": 0.0, "Neto a Pagar": 0.0, "Total Neto": 0.0, "Consecutivo": 680,
+            "IVA Importación": 0.0
+        }
+        defaults_bool = {
+            "Impuestos Asumidos": False, "No Contabilizar": False, "Ya Registrada": False, "Es Aduanera": False
+        }
+    
+        for col, def_val in defaults_str.items():
+            if col not in df.columns:
+                df[col] = def_val
+            else:
+                df[col] = df[col].fillna(def_val).astype(str).replace(["nan", "None"], def_val)
+    
+        for col, def_val in defaults_num.items():
+            if col not in df.columns:
+                df[col] = def_val
+            else:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(def_val)
+    
+        for col, def_val in defaults_bool.items():
+            if col not in df.columns:
+                df[col] = def_val
+            else:
+                df[col] = df[col].fillna(def_val).astype(bool)
+    
+        if "Audit Info" not in df.columns:
+            df["Audit Info"] = [{} for _ in range(len(df))]
+    
+        # Auto-identificar y clasificar facturas de transporte terrestre / fletes / inland rate
+        REGEX_TRANSP = r'\b(TRANSPORTE|TRANSPORT|INLAND\s*RATE|INLAND|FLETE|FLETES|ACARREO|ACARREOS|CARGA\s*TERRESTRE|TERRESTRE|DRAYAGE|PORTES)\b'
+        for idx_row, r_row in df.iterrows():
+            f_num = str(r_row.get("Factura", "")).strip()
+            p_nom = str(r_row.get("Proveedor", "")).strip().upper()
+            d_val = str(r_row.get("Descripcion", "")).strip().upper()
+            c_val = str(r_row.get("Categoría", "")).strip().upper()
+    
+            es_transp_row = ("70787" in f_num or
+                             re.search(REGEX_TRANSP, d_val, re.IGNORECASE) is not None or
+                             re.search(REGEX_TRANSP, c_val, re.IGNORECASE) is not None or
+                             ("EURO" in p_nom and any(k in d_val for k in ["INLAND", "TRANSPORT", "FLETE", "TERRESTRE"])))
+            if es_transp_row:
+                b_val = float(r_row.get("Base", 0.0) or 0.0)
+                if b_val > 0:
+                    rfte_correcta = round(b_val * 0.01, 2)
+                    rica_correcta = round(b_val * 0.00414, 2)
+                    if (df.at[idx_row, "Cta ReteFuente"] == "23652503" or
+                        df.at[idx_row, "ReteFuente"] == round(b_val * 0.04, 2) or
+                        df.at[idx_row, "ReteFuente"] == 0.0 or
+                        "70787" in f_num):
+                        df.at[idx_row, "ReteFuente"] = rfte_correcta
+                        df.at[idx_row, "ReteICA"] = rica_correcta
+                        df.at[idx_row, "Cta ReteFuente"] = "23652505"
+                        df.at[idx_row, "Cta ReteICA"] = "23680513"
+                        df.at[idx_row, "Categoría"] = "Transporte Carga (1%)"
+                        df.at[idx_row, "Razón Contable"] = "Transporte Terrestre de Carga / Fletes (1% ReteFuente [23652505] - 4.14‰ ReteICA [23680513])"
+                        df.at[idx_row, "Cta Principal"] = "14650501"
+                        df.at[idx_row, "Impuestos Asumidos"] = True
+                        df.at[idx_row, "Descripcion"] = "INLAND RATE TRANSPORTE TERRESTRE"
+    
         return df
     
-    defaults_str = {
-        "Comprobante Siigo": "Comp 10-001", "Fecha": "01/01/2026", "Factura": "FAC-001",
-        "Proveedor": "Proveedor", "NIT Emisor": "900000000", "Régimen Fiscal Emisor": "48",
-        "Cta Principal": "14650501", "Categoría": "General", "Razón Contable": "Clasificación automática", "Cuenta Pasivo Especifica": "22050501",
-        "Cta Contrapartida": "22050501", "Operacion": "Compra", "Soporte PDF Renombrado": "",
-        "Descripcion": "Compra general", "Tipo Comp": "10", "Prefijo": "", "Folio": "",
-        "Cta ReteFuente": "23654001", "Cta ReteICA": "23680501", "Cta IVA": "24081001",
-        "Cta IVA Importación": "240835", "Comprobante Previo": "", "Estado Registro": "⚪ Compra Pendiente"
-    }
-    defaults_num = {
-        "Base": 0.0, "IVA": 0.0, "ReteFuente": 0.0, "ReteICA": 0.0, "ReteIVA": 0.0,
-        "Total": 0.0, "Neto a Pagar": 0.0, "Total Neto": 0.0, "Consecutivo": 680,
-        "IVA Importación": 0.0
-    }
-    defaults_bool = {
-        "Impuestos Asumidos": False, "No Contabilizar": False, "Ya Registrada": False, "Es Aduanera": False
-    }
-
-    for col, def_val in defaults_str.items():
-        if col not in df.columns:
-            df[col] = def_val
-        else:
-            df[col] = df[col].fillna(def_val).astype(str).replace(["nan", "None"], def_val)
-
-    for col, def_val in defaults_num.items():
-        if col not in df.columns:
-            df[col] = def_val
-        else:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(def_val)
-
-    for col, def_val in defaults_bool.items():
-        if col not in df.columns:
-            df[col] = def_val
-        else:
-            df[col] = df[col].fillna(def_val).astype(bool)
-
-    if "Audit Info" not in df.columns:
-        df["Audit Info"] = [{} for _ in range(len(df))]
-
-    # Auto-identificar y clasificar facturas de transporte terrestre / fletes / inland rate
-    REGEX_TRANSP = r'\b(TRANSPORTE|TRANSPORT|INLAND\s*RATE|INLAND|FLETE|FLETES|ACARREO|ACARREOS|CARGA\s*TERRESTRE|TERRESTRE|DRAYAGE|PORTES)\b'
-    for idx_row, r_row in df.iterrows():
-        f_num = str(r_row.get("Factura", "")).strip()
-        p_nom = str(r_row.get("Proveedor", "")).strip().upper()
-        d_val = str(r_row.get("Descripcion", "")).strip().upper()
-        c_val = str(r_row.get("Categoría", "")).strip().upper()
-
-        es_transp_row = ("70787" in f_num or
-                         re.search(REGEX_TRANSP, d_val, re.IGNORECASE) is not None or
-                         re.search(REGEX_TRANSP, c_val, re.IGNORECASE) is not None or
-                         ("EURO" in p_nom and any(k in d_val for k in ["INLAND", "TRANSPORT", "FLETE", "TERRESTRE"])))
-        if es_transp_row:
-            b_val = float(r_row.get("Base", 0.0) or 0.0)
-            if b_val > 0:
-                rfte_correcta = round(b_val * 0.01, 2)
-                rica_correcta = round(b_val * 0.00414, 2)
-                if (df.at[idx_row, "Cta ReteFuente"] == "23652503" or
-                    df.at[idx_row, "ReteFuente"] == round(b_val * 0.04, 2) or
-                    df.at[idx_row, "ReteFuente"] == 0.0 or
-                    "70787" in f_num):
-                    df.at[idx_row, "ReteFuente"] = rfte_correcta
-                    df.at[idx_row, "ReteICA"] = rica_correcta
-                    df.at[idx_row, "Cta ReteFuente"] = "23652505"
-                    df.at[idx_row, "Cta ReteICA"] = "23680513"
-                    df.at[idx_row, "Categoría"] = "Transporte Carga (1%)"
-                    df.at[idx_row, "Razón Contable"] = "Transporte Terrestre de Carga / Fletes (1% ReteFuente [23652505] - 4.14‰ ReteICA [23680513])"
-                    df.at[idx_row, "Cta Principal"] = "14650501"
-                    df.at[idx_row, "Impuestos Asumidos"] = True
-                    df.at[idx_row, "Descripcion"] = "INLAND RATE TRANSPORTE TERRESTRE"
-
-    return df
-
+    
+except Exception as _e_top:
+    if type(_e_top).__name__ in ['RerunException', 'StopException', 'ScriptControlException']:
+        raise _e_top
+    st.error(f"⚠️ Ocurrió un error en el panel superior: {_e_top}")
+    with st.expander("🔍 Ver detalles técnicos:"):
+        st.code(traceback.format_exc())
 
 tab_compras, tab_auditoria, tab_triangulacion, tab_siigo = st.tabs([
     "1. Cargar Documentos y Desbloquear PDFs",
@@ -4703,12 +4734,19 @@ with tab_triangulacion:
     
                     suma_terceros_cxp_act = sum([obtener_saldo_cruce_factura(r) for _, r in terceros_actual.iterrows()]) if (terceros_actual is not None and not terceros_actual.empty) else 0.0
     
-                    if saldo_terceros_esperado_act > 0.05:
-                        dif_faltante_prev = max(0.0, round(saldo_terceros_esperado_act - suma_terceros_cxp_act, 2))
-                        df_prev, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=False)
+                    # Calcular el asiento previo y la diferencia real de partida doble que necesita cuadrarse
+                    if saldo_terceros_esperado_act > 0.05 or enviar_h2_activo:
+                        df_prev, dif_faltante_prev = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=False)
                         ret_prev = 0.0
                     else:
                         df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False)
+                    
+                    # Garantizar que dif_faltante_prev refleje la diferencia real entre débitos y créditos del asiento actual
+                    sum_d_pr = df_prev["Débito ($)"].sum() if not df_prev.empty else 0.0
+                    sum_c_pr = df_prev["Crédito ($)"].sum() if not df_prev.empty else 0.0
+                    dif_real_cuadre = round(abs(sum_d_pr - sum_c_pr), 2)
+                    if dif_real_cuadre > 0.05:
+                        dif_faltante_prev = dif_real_cuadre
     
                     if st.session_state.get(f"paquete_listo_{pq_id_sel}", False) and (f"asiento_fijo_pq_{pq_id_sel}" in st.session_state or "asiento_fijo" in paquete_activo):
                         df_asiento_paquete = st.session_state.get(f"asiento_fijo_pq_{pq_id_sel}", paquete_activo.get("asiento_fijo")).copy()
@@ -5318,13 +5356,14 @@ with tab_triangulacion:
                     btn_mt_type = "primary" if enviar_gp_activo else "secondary"
                     if st.button(lbl_btn_mt, key=f"btn_mt_act_{pq_id_sel}", type=btn_mt_type, use_container_width=True):
                         st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = True
-                        st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
                         st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
                         st.session_state["paquete_seleccionado_id"] = pq_id_sel
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
                         if saldo_terceros_esperado_act > 0.05 or enviar_h2_activo:
+                            st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = True
                             df_as_act, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=True)
                         else:
+                            st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
                             df_as_act, _, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False)
                             asiento_gp_filas = []
                             for _, r_as in df_as_act.iterrows():
@@ -5345,7 +5384,7 @@ with tab_triangulacion:
                             ag_fac_str = str(agente_actual["Factura"]).strip()
                             st.session_state.setdefault("asientos_triangulacion_por_factura", {})[ag_fac_str] = df_as_act.copy()
                             guardar_estado_manual(empresa)
-                        st.success("¡Faltante asignado a Mercancías en Tránsito (14650501)!")
+                        st.success(f"¡Diferencia de ${dif_faltante_prev:,.2f} asignada a Mercancías en Tránsito (14650501)!")
                         st.rerun()
     
                 with c_btn_nd:
@@ -5355,12 +5394,13 @@ with tab_triangulacion:
                     if st.button(lbl_btn_nd, key=f"btn_nd_act_{pq_id_sel}", type=btn_nd_type, use_container_width=True):
                         st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
                         st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
-                        st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
                         st.session_state["paquete_seleccionado_id"] = pq_id_sel
                         st.session_state["sel_paquete_activo_key"] = pq_id_sel
                         if saldo_terceros_esperado_act > 0.05 or enviar_h2_activo:
+                            st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = True
                             df_as_act, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=True, imputar_a_transito=False)
                         else:
+                            st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
                             df_as_act, _, _ = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=True)
                         if st.session_state.get(f"paquete_listo_{pq_id_sel}", False):
                             st.session_state[f"asiento_fijo_pq_{pq_id_sel}"] = df_as_act.copy()
@@ -5368,7 +5408,7 @@ with tab_triangulacion:
                             ag_fac_str = str(agente_actual["Factura"]).strip()
                             st.session_state.setdefault("asientos_triangulacion_por_factura", {})[ag_fac_str] = df_as_act.copy()
                             guardar_estado_manual(empresa)
-                        st.success("¡Faltante enviado a Gastos No Deducibles (53950501)!")
+                        st.success(f"¡Diferencia de ${dif_faltante_prev:,.2f} enviada a Gastos No Deducibles (53950501)!")
                         st.rerun()
     
                 # RECALCULAR ASIENTO CONTABLE PARA ESTE PAQUETE
@@ -5438,14 +5478,49 @@ with tab_triangulacion:
                         st.markdown(
                             f"""
                             <div style="background:#fffbeb; border:2px solid #f59e0b; border-radius:8px; padding:12px 16px; margin:10px 0;">
-                                <span style="font-size:15px; font-weight:bold; color:#b45309;">⏳ Faltante Pendiente de Conciliar por Ingresos para Terceros: ${dif_cuad_pq:,.2f}</span><br>
-                                <span style="font-size:13px; color:#78350f;">
-                                    El valor cobrado por cuenta de terceros permanece <b>pendiente de conciliación</b>. Puedes conciliarlo seleccionando las facturas sugeridas arriba, o si decides enviar el saldo faltante a <b>Mercancías en Tránsito (Opción 2)</b> o a <b>No Deducibles (Opción 3)</b>, presiona el botón respectivo en las opciones superiores.
+                                <span style="font-size:16px; font-weight:bold; color:#b45309;">⏳ Faltante Pendiente de Conciliar: ${dif_cuad_pq:,.2f}</span><br>
+                                <span style="font-size:13.5px; color:#78350f;">
+                                    El comprobante presenta una diferencia de <b>${dif_cuad_pq:,.2f}</b> para cuadrar sumas iguales. Puedes aplicar este valor directamente a No Deducibles o a Tránsito con un solo clic:
                                 </span>
                             </div>
                             """,
                             unsafe_allow_html=True
                         )
+                        c_qnd1, c_qnd2, c_qnd3 = st.columns([1.6, 1.6, 1.8])
+                        with c_qnd1:
+                            if st.button(f"🔴 Mandar ${dif_cuad_pq:,.2f} a No Deducibles", key=f"btn_box_nd_{pq_id_sel}", type="primary", use_container_width=True):
+                                st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
+                                st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
+                                st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = True
+                                st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                                st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                                if st.session_state.get(f"paquete_listo_{pq_id_sel}", False):
+                                    df_as_act, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=True, imputar_a_transito=False)
+                                    st.session_state[f"asiento_fijo_pq_{pq_id_sel}"] = df_as_act.copy()
+                                    paquete_activo["asiento_fijo"] = df_as_act.copy()
+                                    ag_fac_str = str(agente_actual["Factura"]).strip()
+                                    st.session_state.setdefault("asientos_triangulacion_por_factura", {})[ag_fac_str] = df_as_act.copy()
+                                    guardar_estado_manual(empresa)
+                                st.success(f"¡Diferencia de ${dif_cuad_pq:,.2f} enviada a No Deducibles (53950501)!")
+                                st.rerun()
+                        with c_qnd2:
+                            if st.button(f"📦 Mandar ${dif_cuad_pq:,.2f} a Tránsito", key=f"btn_box_mt_{pq_id_sel}", use_container_width=True):
+                                st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = True
+                                st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
+                                st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = True
+                                st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                                st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                                if st.session_state.get(f"paquete_listo_{pq_id_sel}", False):
+                                    df_as_act, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=True)
+                                    st.session_state[f"asiento_fijo_pq_{pq_id_sel}"] = df_as_act.copy()
+                                    paquete_activo["asiento_fijo"] = df_as_act.copy()
+                                    ag_fac_str = str(agente_actual["Factura"]).strip()
+                                    st.session_state.setdefault("asientos_triangulacion_por_factura", {})[ag_fac_str] = df_as_act.copy()
+                                    guardar_estado_manual(empresa)
+                                st.success(f"¡Diferencia de ${dif_cuad_pq:,.2f} enviada a Tránsito (14650501)!")
+                                st.rerun()
+                        with c_qnd3:
+                            st.caption("💡 O retira facturas de terceros que no correspondan en la sección '⚙️ Modificar este Paquete' arriba.")
     
                     c_val_opt1, c_val_opt2 = st.columns(2)
                     with c_val_opt1:
