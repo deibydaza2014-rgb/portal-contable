@@ -12,7 +12,13 @@ import zipfile
 import re
 import datetime
 import os
-from pypdf import PdfReader, PdfWriter
+try:
+    from pypdf import PdfReader, PdfWriter
+except ImportError:
+    try:
+        from PyPDF2 import PdfReader, PdfWriter
+    except ImportError:
+        PdfReader, PdfWriter = None, None
 try:
     import pypdfium2 as pdfium
     HAS_PDFIUM = True
@@ -244,7 +250,8 @@ def guardar_estado_manual(empresa_dict):
         }
         with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
-        st.session_state["_ultimo_guardado_manual"] = now_str
+        st.session_state["_ultimo_guardado_manual"] = now_s
+        st.session_state["_cached_respaldo_bytes"] = Nonetr
         import gc
         gc.collect()
         return True
@@ -1453,13 +1460,13 @@ def extraer_valores_fiscales_texto_pdf(texto):
     if not texto: return datos
 
     # 1. Notas Finales (formato clave: valor)
-    m_nf_rfte = re.search(r' retefuente\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_rfte = re.search(r'retefuente\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_rfte: datos['retefuente'] = parse_num_co(m_nf_rfte.group(1))
 
-    m_nf_rica = re.search(r' reteica\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_rica = re.search(r'reteica\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_rica: datos['reteica'] = parse_num_co(m_nf_rica.group(1))
 
-    m_nf_riva = re.search(r' reteiva\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_riva = re.search(r'reteiva\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_riva: datos['reteiva'] = parse_num_co(m_nf_riva.group(1))
 
     # 2. Descuentos globales por retención sugerida si no vino en notas
@@ -1494,7 +1501,7 @@ def extraer_valores_fiscales_texto_pdf(texto):
     if m_nit_fact_a: datos['nit_facturado_a'] = m_nit_fact_a.group(1).strip()
 
     # 4. Extracción de conceptos y descripción de ítems / productos (ej. Transporte Terrestre)
-    REGEX_TRANSPORTE = r' (TRANSPORTE|TRANSPORT|INLAND\s*RATE|FLETE|FLETES|ACARREO|ACARREOS|CARGA\s*TERRESTRE|TERRESTRE|DRAYAGE|PORTES|FLETAMENTO) '
+    REGEX_TRANSPORTE = r'(TRANSPORTE|TRANSPORT|INLAND\s*RATE|FLETE|FLETES|ACARREO|ACARREOS|CARGA\s*TERRESTRE|TERRESTRE|DRAYAGE|PORTES|FLETAMENTO)'
     m_transp = re.search(REGEX_TRANSPORTE, texto, re.IGNORECASE)
     if m_transp:
         datos['es_transporte'] = True
@@ -1666,7 +1673,7 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_do
     desc_u = str(descripcion or "").upper()
 
     # Detección explícita de concepto TRANSPORTE DE CARGA / FLETES / INLAND
-    REGEX_TRANSPORTE = r' (TRANSPORTE|TRANSPORT|INLAND|FLETE|FLETES|ACARREO|ACARREOS|CARGA\s*TERRESTRE|TERRESTRE|DRAYAGE|PORTES) '
+    REGEX_TRANSPORTE = r'(TRANSPORTE|TRANSPORT|INLAND|FLETE|FLETES|ACARREO|ACARREOS|CARGA\s*TERRESTRE|TERRESTRE|DRAYAGE|PORTES)'
     es_transporte = bool(re.search(REGEX_TRANSPORTE, desc_u) or (any(k in nombre for k in ["TRANSPORTE", "TRANSPORT", "CARGA", "FLETE"]) and not any(k in nombre for k in ["AGENCIA", "ADUANA"])))
 
     # 0. MEMORIA DE APRENDIZAJE: Si el usuario ya auditó y guardó reglas para este proveedor previamente
@@ -2542,20 +2549,14 @@ def generar_respaldo_portatil_bytes(empresa_dict):
             if mem_actual:
                 zf.writestr("memoria_aprendizaje.json", json.dumps(mem_actual, ensure_ascii=False, indent=2))
 
-            # 7. PDFs si existen en la sesión (ZIP_STORED para que sea instantáneo sin bloquear CPU)
+            # 7. PDFs si existen en la sesión (sin duplicaciones para proteger la memoria RAM)
             dict_renom_s = st.session_state.get("dict_pdfs", {})
             if dict_renom_s:
                 for fn, bdata in dict_renom_s.items():
                     zinfo = zipfile.ZipInfo(f"pdfs_renombrados/{fn}")
                     zinfo.compress_type = zipfile.ZIP_STORED
                     zf.writestr(zinfo, bdata)
-            dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
-            if dict_orig_s:
-                for fn, bdata in dict_orig_s.items():
-                    zinfo = zipfile.ZipInfo(f"pdfs_originales/{fn}")
-                    zinfo.compress_type = zipfile.ZIP_STORED
-                    zf.writestr(zinfo, bdata)
-            if st.session_state.get("zip_pdfs"):
+            elif st.session_state.get("zip_pdfs"):
                 zinfo = zipfile.ZipInfo("paquete_facturas.zip")
                 zinfo.compress_type = zipfile.ZIP_STORED
                 zf.writestr(zinfo, st.session_state["zip_pdfs"])
@@ -2633,6 +2634,83 @@ def restaurar_desde_respaldo_bytes(empresa_dict, raw_zip_bytes):
     except Exception as e:
         return False
 
+def normalizar_df_procesado(df):
+    """Garantiza que todas las columnas requeridas existan con tipos seguros y sin NaNs que causen caídas."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    
+    defaults_str = {
+        "Comprobante Siigo": "Comp 10-001", "Fecha": "01/01/2026", "Factura": "FAC-001",
+        "Proveedor": "Proveedor", "NIT Emisor": "900000000", "Régimen Fiscal Emisor": "48",
+        "Cta Principal": "14650501", "Categoría": "General", "Razón Contable": "Clasificación automática", "Cuenta Pasivo Especifica": "22050501",
+        "Cta Contrapartida": "22050501", "Operacion": "Compra", "Soporte PDF Renombrado": "",
+        "Descripcion": "Compra general", "Tipo Comp": "10", "Prefijo": "", "Folio": "",
+        "Cta ReteFuente": "23654001", "Cta ReteICA": "23680501", "Cta IVA": "24081001",
+        "Cta IVA Importación": "240835", "Comprobante Previo": "", "Estado Registro": "⚪ Compra Pendiente"
+    }
+    defaults_num = {
+        "Base": 0.0, "IVA": 0.0, "ReteFuente": 0.0, "ReteICA": 0.0, "ReteIVA": 0.0,
+        "Total": 0.0, "Neto a Pagar": 0.0, "Total Neto": 0.0, "Consecutivo": 680,
+        "IVA Importación": 0.0
+    }
+    defaults_bool = {
+        "Impuestos Asumidos": False, "No Contabilizar": False, "Ya Registrada": False, "Es Aduanera": False
+    }
+
+    for col, def_val in defaults_str.items():
+        if col not in df.columns:
+            df[col] = def_val
+        else:
+            df[col] = df[col].fillna(def_val).astype(str).replace(["nan", "None"], def_val)
+
+    for col, def_val in defaults_num.items():
+        if col not in df.columns:
+            df[col] = def_val
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(def_val)
+
+    for col, def_val in defaults_bool.items():
+        if col not in df.columns:
+            df[col] = def_val
+        else:
+            df[col] = df[col].fillna(def_val).astype(bool)
+
+    if "Audit Info" not in df.columns:
+        df["Audit Info"] = [{} for _ in range(len(df))]
+
+    # Auto-identificar y clasificar facturas de transporte terrestre / fletes / inland rate
+    REGEX_TRANSP = r'\b(TRANSPORTE|TRANSPORT|INLAND\s*RATE|INLAND|FLETE|FLETES|ACARREO|ACARREOS|CARGA\s*TERRESTRE|TERRESTRE|DRAYAGE|PORTES)\b'
+    for idx_row, r_row in df.iterrows():
+        f_num = str(r_row.get("Factura", "")).strip()
+        p_nom = str(r_row.get("Proveedor", "")).strip().upper()
+        d_val = str(r_row.get("Descripcion", "")).strip().upper()
+        c_val = str(r_row.get("Categoría", "")).strip().upper()
+
+        es_transp_row = ("70787" in f_num or
+                         re.search(REGEX_TRANSP, d_val, re.IGNORECASE) is not None or
+                         re.search(REGEX_TRANSP, c_val, re.IGNORECASE) is not None or
+                         ("EURO" in p_nom and any(k in d_val for k in ["INLAND", "TRANSPORT", "FLETE", "TERRESTRE"])))
+        if es_transp_row:
+            b_val = float(r_row.get("Base", 0.0) or 0.0)
+            if b_val > 0:
+                rfte_correcta = round(b_val * 0.01, 2)
+                rica_correcta = round(b_val * 0.00414, 2)
+                if (df.at[idx_row, "Cta ReteFuente"] == "23652503" or
+                    df.at[idx_row, "ReteFuente"] == round(b_val * 0.04, 2) or
+                    df.at[idx_row, "ReteFuente"] == 0.0 or
+                    "70787" in f_num):
+                    df.at[idx_row, "ReteFuente"] = rfte_correcta
+                    df.at[idx_row, "ReteICA"] = rica_correcta
+                    df.at[idx_row, "Cta ReteFuente"] = "23652505"
+                    df.at[idx_row, "Cta ReteICA"] = "23680513"
+                    df.at[idx_row, "Categoría"] = "Transporte Carga (1%)"
+                    df.at[idx_row, "Razón Contable"] = "Transporte Terrestre de Carga / Fletes (1% ReteFuente [23652505] - 4.14‰ ReteICA [23680513])"
+                    df.at[idx_row, "Cta Principal"] = "14650501"
+                    df.at[idx_row, "Impuestos Asumidos"] = True
+                    df.at[idx_row, "Descripcion"] = "INLAND RATE TRANSPORTE TERRESTRE"
+
+    return df
+
 try:
     # BANNER DE CONTROL Y GUARDADO MANUAL
     if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
@@ -2650,19 +2728,29 @@ try:
                 else:
                     st.error("Error al guardar.")
         with c_bnr3:
-            respaldo_bytes_top = generar_respaldo_portatil_bytes(empresa)
-            if respaldo_bytes_top:
-                emp_clean_name = re.sub(r'[^a-zA-Z0-9]', '_', str(empresa.get('nombre', 'Empresa')))
-                nom_resp_top = f"Respaldo_Avance_{emp_clean_name}.indumaq"
-                st.download_button(
-                    label="🛡️ Descargar Respaldo (.indumaq)",
-                    data=respaldo_bytes_top,
-                    file_name=nom_resp_top,
-                    mime="application/zip",
-                    key="btn_dl_respaldo_top_direct",
-                    use_container_width=True,
-                    help="Descarga un archivo con tus 16 paquetes validados y facturas editadas. Si se apaga o reinicia Streamlit, lo cargas en segundos."
-                )
+            emp_clean_name = re.sub(r'[^a-zA-Z0-9]', '_', str(empresa.get('nombre', 'Empresa')))
+            nom_resp_top = f"Respaldo_Avance_{emp_clean_name}.indumaq"
+            if st.session_state.get("_cached_respaldo_bytes") is None:
+                if st.button("🛡️ Preparar Respaldo (.indumaq)", key="btn_prep_respaldo_top", use_container_width=True, help="Genera un archivo portátil con tus facturas, paquetes y avances para descargar."):
+                    with st.spinner("Preparando archivo de respaldo liviano..."):
+                        st.session_state["_cached_respaldo_bytes"] = generar_respaldo_portatil_bytes(empresa)
+                    st.rerun()
+            else:
+                c_d1, c_d2 = st.columns([0.8, 0.2])
+                with c_d1:
+                    st.download_button(
+                        label="⬇️ Descargar (.indumaq)",
+                        data=st.session_state["_cached_respaldo_bytes"],
+                        file_name=nom_resp_top,
+                        mime="application/zip",
+                        key="btn_dl_respaldo_top_direct",
+                        use_container_width=True,
+                        help="Haz clic para descargar el archivo en tu equipo."
+                    )
+                with c_d2:
+                    if st.button("🔄", key="btn_refresh_respaldo_cache", help="Actualizar respaldo con últimos cambios"):
+                        st.session_state["_cached_respaldo_bytes"] = None
+                        st.rerun()
         with c_bnr4:
             if st.button("🆕 Limpiar", key="btn_nuevo_trabajo_top", use_container_width=True, help="Limpia la memoria para cargar un nuevo mes."):
                 for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig", "paquetes_importacion", "asientos_triangulacion_por_factura", "facturas_no_contabilizar", "_ultimo_guardado_manual"]:
@@ -2785,82 +2873,7 @@ try:
     st.markdown("---")
     
     
-    def normalizar_df_procesado(df):
-        """Garantiza que todas las columnas requeridas existan con tipos seguros y sin NaNs que causen caídas."""
-        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-            return df
-        
-        defaults_str = {
-            "Comprobante Siigo": "Comp 10-001", "Fecha": "01/01/2026", "Factura": "FAC-001",
-            "Proveedor": "Proveedor", "NIT Emisor": "900000000", "Régimen Fiscal Emisor": "48",
-            "Cta Principal": "14650501", "Categoría": "General", "Razón Contable": "Clasificación automática", "Cuenta Pasivo Especifica": "22050501",
-            "Cta Contrapartida": "22050501", "Operacion": "Compra", "Soporte PDF Renombrado": "",
-            "Descripcion": "Compra general", "Tipo Comp": "10", "Prefijo": "", "Folio": "",
-            "Cta ReteFuente": "23654001", "Cta ReteICA": "23680501", "Cta IVA": "24081001",
-            "Cta IVA Importación": "240835", "Comprobante Previo": "", "Estado Registro": "⚪ Compra Pendiente"
-        }
-        defaults_num = {
-            "Base": 0.0, "IVA": 0.0, "ReteFuente": 0.0, "ReteICA": 0.0, "ReteIVA": 0.0,
-            "Total": 0.0, "Neto a Pagar": 0.0, "Total Neto": 0.0, "Consecutivo": 680,
-            "IVA Importación": 0.0
-        }
-        defaults_bool = {
-            "Impuestos Asumidos": False, "No Contabilizar": False, "Ya Registrada": False, "Es Aduanera": False
-        }
-    
-        for col, def_val in defaults_str.items():
-            if col not in df.columns:
-                df[col] = def_val
-            else:
-                df[col] = df[col].fillna(def_val).astype(str).replace(["nan", "None"], def_val)
-    
-        for col, def_val in defaults_num.items():
-            if col not in df.columns:
-                df[col] = def_val
-            else:
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(def_val)
-    
-        for col, def_val in defaults_bool.items():
-            if col not in df.columns:
-                df[col] = def_val
-            else:
-                df[col] = df[col].fillna(def_val).astype(bool)
-    
-        if "Audit Info" not in df.columns:
-            df["Audit Info"] = [{} for _ in range(len(df))]
-    
-        # Auto-identificar y clasificar facturas de transporte terrestre / fletes / inland rate
-        REGEX_TRANSP = r'\b(TRANSPORTE|TRANSPORT|INLAND\s*RATE|INLAND|FLETE|FLETES|ACARREO|ACARREOS|CARGA\s*TERRESTRE|TERRESTRE|DRAYAGE|PORTES)\b'
-        for idx_row, r_row in df.iterrows():
-            f_num = str(r_row.get("Factura", "")).strip()
-            p_nom = str(r_row.get("Proveedor", "")).strip().upper()
-            d_val = str(r_row.get("Descripcion", "")).strip().upper()
-            c_val = str(r_row.get("Categoría", "")).strip().upper()
-    
-            es_transp_row = ("70787" in f_num or
-                             re.search(REGEX_TRANSP, d_val, re.IGNORECASE) is not None or
-                             re.search(REGEX_TRANSP, c_val, re.IGNORECASE) is not None or
-                             ("EURO" in p_nom and any(k in d_val for k in ["INLAND", "TRANSPORT", "FLETE", "TERRESTRE"])))
-            if es_transp_row:
-                b_val = float(r_row.get("Base", 0.0) or 0.0)
-                if b_val > 0:
-                    rfte_correcta = round(b_val * 0.01, 2)
-                    rica_correcta = round(b_val * 0.00414, 2)
-                    if (df.at[idx_row, "Cta ReteFuente"] == "23652503" or
-                        df.at[idx_row, "ReteFuente"] == round(b_val * 0.04, 2) or
-                        df.at[idx_row, "ReteFuente"] == 0.0 or
-                        "70787" in f_num):
-                        df.at[idx_row, "ReteFuente"] = rfte_correcta
-                        df.at[idx_row, "ReteICA"] = rica_correcta
-                        df.at[idx_row, "Cta ReteFuente"] = "23652505"
-                        df.at[idx_row, "Cta ReteICA"] = "23680513"
-                        df.at[idx_row, "Categoría"] = "Transporte Carga (1%)"
-                        df.at[idx_row, "Razón Contable"] = "Transporte Terrestre de Carga / Fletes (1% ReteFuente [23652505] - 4.14‰ ReteICA [23680513])"
-                        df.at[idx_row, "Cta Principal"] = "14650501"
-                        df.at[idx_row, "Impuestos Asumidos"] = True
-                        df.at[idx_row, "Descripcion"] = "INLAND RATE TRANSPORTE TERRESTRE"
-    
-        return df
+
     
     
 except Exception as _e_top:
@@ -6134,4 +6147,3 @@ with tab_siigo:
             st.code(traceback.format_exc())
 import gc
 gc.collect()
-
