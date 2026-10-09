@@ -804,6 +804,8 @@ def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
     asume_ret = bool(fac_sel.get("Impuestos Asumidos", False))
     cta_cxp_usar = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
     cta_p = str(fac_sel.get("Cta Principal") or "14650501").strip()
+    if cta_p in ["146505", "1465"]:
+        cta_p = "14650501"
     es_importacion_factura = es_aduanero or "1465" in cta_p or "IMPORTACI" in str(fac_sel.get("Categoría", "")).upper()
     cta_iva = str(fac_sel.get("Cta IVA") or ("24081501" if es_importacion_factura else "24081001")).strip()
 
@@ -865,20 +867,27 @@ def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
                     "INLAND" in str(fac_sel.get("Descripcion", "")).upper() or
                     "FLETE" in str(fac_sel.get("Descripcion", "")).upper() or
                     "70787" in str(fac_sel.get("Factura", "")) or
-                    str(fac_sel.get("Cta ReteFuente", "")).strip() == "23652505")
+                    str(fac_sel.get("Cta ReteFuente", "")).strip() == "23652505" or
+                    (rfte_val > 0 and base_val > 0 and abs(rfte_val - round(base_val * 0.01, 2)) < 2.0))
 
-    if es_transp_as:
-        # Garantizar que ReteFuente sea 1% y ReteICA 4.14 por mil para transporte
-        if rfte_val == round(base_val * 0.04, 2) or rfte_val == 0.0 or str(fac_sel.get("Cta ReteFuente")).strip() == "23652503":
+    cta_rf_raw = str(fac_sel.get("Cta ReteFuente", "")).strip()
+    cta_ri_raw = str(fac_sel.get("Cta ReteICA", "")).strip()
+
+    # Si es transporte o la retención es del 1%, la cuenta legal ES 23652505
+    if es_transp_as or (rfte_val > 0 and base_val > 0 and abs(rfte_val - round(base_val * 0.01, 2)) < 2.0):
+        if rfte_val == round(base_val * 0.04, 2) or rfte_val == 0.0:
             rfte_val = round(base_val * 0.01, 2)
-        if rica_val == round(base_val * 0.00966, 2) or rica_val == 0.0 or str(fac_sel.get("Cta ReteICA")).strip() == "23680505":
+        if rica_val == round(base_val * 0.00966, 2) or rica_val == 0.0:
             rica_val = round(base_val * 0.00414, 2)
         cta_rf_usar = "23652505"
         cta_ri_usar = "23680513"
         cta_p = "14650501"
     else:
-        cta_rf_usar = str(fac_sel.get("Cta ReteFuente") or ("23652503" if es_aduanero else "23654001")).strip()
-        cta_ri_usar = str(fac_sel.get("Cta ReteICA") or ("23680505" if es_aduanero else "23680501")).strip()
+        cta_rf_usar = cta_rf_raw if (cta_rf_raw and cta_rf_raw not in ["nan", "None", ""]) else ("23652503" if es_aduanero else "23654001")
+        cta_ri_usar = cta_ri_raw if (cta_ri_raw and cta_ri_raw not in ["nan", "None", ""]) else ("23680505" if es_aduanero else "23680501")
+
+    if cta_p == "146505":
+        cta_p = "14650501"
 
     tot_ret = round(rfte_val + rica_val, 2)
 
@@ -919,17 +928,19 @@ def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
     else:
         # RETENCIONES ORDINARIAS PRACTICADAS AL PROVEEDOR
         if rfte_val > 0:
+            nom_rf_dsp = "Transporte Carga 1%" if cta_rf_usar == "23652505" else ("Servicios 4%" if cta_rf_usar == "23652503" else fac_sel.get('Categoría', 'Compras/Servicios'))
             asiento_filas.append({
                 "Código Cuenta": cta_rf_usar,
-                "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel.get('Categoría', 'Compras/Servicios')})",
+                "Descripción de la Cuenta": f"ReteFuente Practicada ({nom_rf_dsp}) Fac {fac_sel.get('Factura', '')}",
                 "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
                 "Débito ($)": rfte_val if es_nc else 0.0,
                 "Crédito ($)": 0.0 if es_nc else rfte_val
             })
         if rica_val > 0:
+            nom_ri_dsp = "Transporte 4.14‰" if cta_ri_usar == "23680513" else ("Servicios 9.66‰" if cta_ri_usar == "23680505" else "Retención ICA Practicada")
             asiento_filas.append({
                 "Código Cuenta": cta_ri_usar,
-                "Descripción de la Cuenta": "Retención ICA Practicada",
+                "Descripción de la Cuenta": f"Retención ICA Practicada ({nom_ri_dsp})",
                 "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
                 "Débito ($)": rica_val if es_nc else 0.0,
                 "Crédito ($)": 0.0 if es_nc else rica_val
@@ -3931,10 +3942,14 @@ with tab_auditoria:
                         with c_v1:
                             nueva_base = st.number_input("Base Gravable / Subtotal ($):", value=base_cur_f, step=1000.0, key=f"nb_{fac_sel['Comprobante Siigo']}")
                             nueva_rfte = st.number_input("ReteFuente ($):", value=val_rf_input, step=100.0, key=f"nrf_{fac_sel['Comprobante Siigo']}")
+                            cta_rf_sug_box = "23652505" if (es_concep_transp or (val_rf_input > 0 and abs(val_rf_input - round(base_cur_f * 0.01, 2)) < 2.0)) else str(fac_sel.get("Cta ReteFuente") or cta_rf_sug_def)
+                            nueva_cta_rf = st.text_input("Cuenta ReteFuente:", value=cta_rf_sug_box, key=f"inp_cta_rf_{fac_sel['Comprobante Siigo']}", help="Cuenta contable de ReteFuente (23652505 Transporte 1%, 23652503 Servicios 4%, 23654001 Compras 2.5%).")
                         with c_v2:
                             lbl_iva_desc = "IVA Servicios ($) (24081501):" if es_importacion_factura else "IVA Descontable ($):"
                             nuevo_iva = st.number_input(lbl_iva_desc, value=float(fac_sel["IVA"]), step=100.0, key=f"niva_{fac_sel['Comprobante Siigo']}")
                             nuevo_rica = st.number_input("ReteICA ($):", value=val_ri_input, step=100.0, key=f"nri_{fac_sel['Comprobante Siigo']}")
+                            cta_ri_sug_box = "23680513" if (es_concep_transp or (val_ri_input > 0 and abs(val_ri_input - round(base_cur_f * 0.00414, 2)) < 2.0)) else str(fac_sel.get("Cta ReteICA") or cta_ri_sug_def)
+                            nueva_cta_ri = st.text_input("Cuenta ReteICA:", value=cta_ri_sug_box, key=f"inp_cta_ri_{fac_sel['Comprobante Siigo']}", help="Cuenta contable de ReteICA (23680513 Transporte 4.14‰, 23680505 Servicios 9.66‰, 23680501 Compras 11.04‰).")
     
                         # CAMPO DEDICADO: IVA DE IMPORTACIÓN (CUENTA 240835) - SOLO PARA FACTURAS DE IMPORTACIÓN
                         if es_importacion_factura:
@@ -3989,18 +4004,16 @@ with tab_auditoria:
                         df_p.at[r_idx, "IVA"] = nuevo_iva
                         df_p.at[r_idx, "ReteFuente"] = nueva_rfte
                         df_p.at[r_idx, "ReteICA"] = nuevo_rica
-                        if es_concep_transp:
+                        cta_rf_clean = nueva_cta_rf.split()[0].strip()
+                        cta_ri_clean = nueva_cta_ri.split()[0].strip()
+                        df_p.at[r_idx, "Cta ReteFuente"] = cta_rf_clean
+                        df_p.at[r_idx, "Cta ReteICA"] = cta_ri_clean
+
+                        if es_concep_transp or cta_rf_clean == "23652505":
                             df_p.at[r_idx, "Categoría"] = "Transporte Carga (1%)"
                             df_p.at[r_idx, "Razón Contable"] = "Transporte Terrestre de Carga / Fletes (1% ReteFuente [23652505] - 4.14‰ ReteICA [23680513])"
-                            df_p.at[r_idx, "Cta ReteFuente"] = "23652505"
-                            df_p.at[r_idx, "Cta ReteICA"] = "23680513"
                             if not str(df_p.at[r_idx, "Descripcion"]).strip() or "Importacion" in str(df_p.at[r_idx, "Descripcion"]):
                                 df_p.at[r_idx, "Descripcion"] = "INLAND RATE TRANSPORTE TERRESTRE"
-                        else:
-                            if nueva_rfte > 0 and (not str(df_p.at[r_idx, "Cta ReteFuente"]).strip() or df_p.at[r_idx, "Cta ReteFuente"] == "23652505"):
-                                df_p.at[r_idx, "Cta ReteFuente"] = cta_rf_sug_def
-                            if nuevo_rica > 0 and (not str(df_p.at[r_idx, "Cta ReteICA"]).strip() or df_p.at[r_idx, "Cta ReteICA"] == "23680513"):
-                                df_p.at[r_idx, "Cta ReteICA"] = cta_ri_sug_def
                         cta_clean = nueva_cta_cxp.split()[0].strip()
                         df_p.at[r_idx, "Cuenta Pasivo Especifica"] = cta_clean
                         df_p.at[r_idx, "Cta Contrapartida"] = cta_clean
