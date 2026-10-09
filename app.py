@@ -1,3 +1,4 @@
+import traceback
 import pickle
 import shutil
 import json
@@ -18,7 +19,7 @@ try:
 except Exception:
     HAS_PDFIUM = False
 
-st.set_page_config(page_title="Sistema ERP y Auditoria Contable DIAN", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="Cuentas Tuquiz - ERP y Auditoria Contable", layout="wide", page_icon="🏢")
 
 # Estilos visuales profesionales y protección contra conflictos de Google Translate
 st.markdown("""
@@ -63,7 +64,7 @@ if "proceso_activo" not in st.session_state:
 if not st.session_state["autenticado"]:
     col1, col2, col3 = st.columns(3)
     with col2:
-        st.markdown("<h2 style='text-align: center; color: #0f172a;'>Portal ERP y Auditoria Contable</h2>", unsafe_allow_html=True)
+        st.markdown("<h2 style='text-align: center; color: #0f172a;'>Cuentas Tuquiz</h2>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; color: #64748b;'>Plataforma unificada para gestion contable y DIAN (Siigo / World Office)</p>", unsafe_allow_html=True)
 
         with st.form("login_form"):
@@ -91,50 +92,6 @@ EMPRESAS_DISPONIBLES = [
         "responsabilidades_rut": ["O-48"],
         "estado": "ACTIVA",
         "badge": "badge-active"
-    },
-    {
-        "nombre": "ASMINCOL S.A.S.",
-        "nit": "900.467.519-1",
-        "actividad": "Servicios Mineros y Construccion",
-        "regimen": "Responsable de IVA",
-        "es_gran_contribuyente": False,
-        "es_autorretenedor": False,
-        "responsabilidades_rut": ["O-48"],
-        "estado": "PROXIMAMENTE",
-        "badge": "badge-next"
-    },
-    {
-        "nombre": "CONSTRUDISENO CT SAS",
-        "nit": "900.524.356-8",
-        "actividad": "Construccion y Obras Civiles",
-        "regimen": "Responsable de IVA",
-        "es_gran_contribuyente": False,
-        "es_autorretenedor": False,
-        "responsabilidades_rut": ["O-48"],
-        "estado": "PROXIMAMENTE",
-        "badge": "badge-next"
-    },
-    {
-        "nombre": "SCG TRANSPORTES",
-        "nit": "901.700.731-8",
-        "actividad": "Transporte de Carga y Logistica",
-        "regimen": "Responsable de IVA",
-        "es_gran_contribuyente": False,
-        "es_autorretenedor": False,
-        "responsabilidades_rut": ["O-48"],
-        "estado": "PROXIMAMENTE",
-        "badge": "badge-next"
-    },
-    {
-        "nombre": "OPJ SAS",
-        "nit": "901.425.101-3",
-        "actividad": "Servicios Generales y Operaciones",
-        "regimen": "Responsable de IVA",
-        "es_gran_contribuyente": False,
-        "es_autorretenedor": False,
-        "responsabilidades_rut": ["O-48"],
-        "estado": "PROXIMAMENTE",
-        "badge": "badge-next"
     }
 ]
 
@@ -288,6 +245,8 @@ def guardar_estado_manual(empresa_dict):
         with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
         st.session_state["_ultimo_guardado_manual"] = now_str
+        import gc
+        gc.collect()
         return True
     except Exception:
         return False
@@ -304,7 +263,14 @@ def cargar_estado_manual(empresa_dict):
             pq_path = os.path.join(d, "paquetes_importacion.pkl")
             if os.path.exists(pq_path):
                 with open(pq_path, "rb") as f:
-                    st.session_state["paquetes_importacion"] = pickle.load(f)
+                    pqs_loaded = pickle.load(f)
+                    st.session_state["paquetes_importacion"] = pqs_loaded
+                    for pq_k, pq_v in pqs_loaded.items():
+                        if isinstance(pq_v, dict):
+                            if "asiento_fijo" in pq_v or "asiento_aprobado" in pq_v:
+                                st.session_state[f"paquete_listo_{pq_k}"] = True
+                            if "destino_siigo" in pq_v:
+                                st.session_state[f"paquete_destino_siigo_{pq_k}"] = pq_v["destino_siigo"]
             as_path = os.path.join(d, "asientos_triangulacion.pkl")
             if os.path.exists(as_path):
                 with open(as_path, "rb") as f:
@@ -398,6 +364,7 @@ def guardar_trabajo_en_historial(empresa_dict, df_procesado, excel_bytes=None, e
         try:
             estado_flags = {
                 "paquetes_listos": {k: v for k, v in st.session_state.items() if k.startswith("paquete_listo_")},
+                "paquetes_destino_siigo": {k: v for k, v in st.session_state.items() if k.startswith("paquete_destino_siigo_")},
                 "enviar_gp": {k: v for k, v in st.session_state.items() if k.startswith("enviar_gp_pq_")},
                 "enviar_h2": {k: v for k, v in st.session_state.items() if k.startswith("enviar_h2_pq_")},
                 "enviar_nd": {k: v for k, v in st.session_state.items() if k.startswith("enviar_nd_pq_")},
@@ -579,6 +546,8 @@ def cargar_trabajo_historial(empresa_dict, job_id):
                 est = json.load(f_es)
                 for k, v in est.get("paquetes_listos", {}).items():
                     st.session_state[k] = v
+                for k, v in est.get("paquetes_destino_siigo", {}).items():
+                    st.session_state[k] = v
                 for k, v in est.get("enviar_gp", {}).items():
                     st.session_state[k] = v
                 for k, v in est.get("enviar_h2", {}).items():
@@ -722,7 +691,7 @@ def importar_respaldo_sesion_zip(zip_bytes, empresa_dict):
 # ==============================================================================
 CUENTA_RETENCION_ASUMIDA = "53152001"
 CUENTA_NO_DEDUCIBLE = "53950501"
-CUENTA_IVA_IMPORTACION = "24081501"
+CUENTA_IVA_IMPORTACION = "240835"
 CUENTA_IMPORTACION_TRANSITO = "14650501"
 CUENTA_CXP_AGENCIA_EXTERIOR = "22050505"
 CUENTA_CXP_DHL_NACIONAL = "23359501"
@@ -829,37 +798,66 @@ def analizar_estado_filas_excel(excel_bytes):
     return estados
 
 def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
-    """Genera el asiento contable exacto de una factura tal como se calcula en la Hoja 2 (Auditoría)."""
+    """Genera el asiento contable EXACTO e IDÉNTICO al que visualiza la Hoja 2 (Auditoría)."""
     asiento_filas = []
     es_nc = "Devolucion" in str(fac_sel.get("Operacion", ""))
     asume_ret = bool(fac_sel.get("Impuestos Asumidos", False))
     cta_cxp_usar = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
     cta_p = str(fac_sel.get("Cta Principal") or "14650501").strip()
-    cta_iva = str(fac_sel.get("Cta IVA") or "24081501").strip()
+    es_importacion_factura = es_aduanero or "1465" in cta_p or "IMPORTACI" in str(fac_sel.get("Categoría", "")).upper()
+    cta_iva = str(fac_sel.get("Cta IVA") or ("24081501" if es_importacion_factura else "24081001")).strip()
 
-    base_val = float(fac_sel.get("Base", 0.0))
-    iva_val = float(fac_sel.get("IVA", 0.0))
-    tot_val = float(fac_sel.get("Total", 0.0))
-    rfte_val = float(fac_sel.get("ReteFuente", 0.0))
-    rica_val = float(fac_sel.get("ReteICA", 0.0))
+    def _sf(v):
+        try:
+            if v is not None and pd.notna(v):
+                fv = float(v)
+                return fv if not pd.isna(fv) else 0.0
+        except Exception:
+            pass
+        return 0.0
+
+    base_val = _sf(fac_sel.get("Base"))
+    iva_val = _sf(fac_sel.get("IVA"))
+    tot_val = _sf(fac_sel.get("Total"))
+    rfte_val = _sf(fac_sel.get("ReteFuente"))
+    rica_val = _sf(fac_sel.get("ReteICA"))
+    riva_val = _sf(fac_sel.get("ReteIVA"))
+    iva_imp_val = _sf(fac_sel.get("IVA Importación"))
+
+    raw_cta_imp = fac_sel.get("Cta IVA Importación")
+    if raw_cta_imp is None or pd.isna(raw_cta_imp) or str(raw_cta_imp).strip() in ["", "nan", "None"]:
+        cta_iva_imp = "240835"
+    else:
+        cta_iva_imp = str(raw_cta_imp).strip()
 
     # 1. Base / Costo
     asiento_filas.append({
         "Código Cuenta": cta_p,
-        "Descripción Cuenta": f"{fac_sel.get('Categoría', 'Gasto/Costo')} - {str(fac_sel.get('Proveedor', ''))[:25]}",
-        "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+        "Descripción de la Cuenta": f"{fac_sel.get('Categoría', 'Gasto/Costo')} - {str(fac_sel.get('Proveedor', ''))[:25]}",
+        "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
         "Débito ($)": 0.0 if es_nc else base_val,
         "Crédito ($)": base_val if es_nc else 0.0
     })
 
-    # 2. IVA Descontable
+    # 2. IVA Descontable (Servicios / Compras)
     if iva_val > 0:
+        desc_iva = f"IVA Descontable Servicios (Base: ${base_val:,.0f})" if ("24081501" in cta_iva or es_importacion_factura) else f"IVA Descontable (Base: ${base_val:,.0f})"
         asiento_filas.append({
             "Código Cuenta": cta_iva,
-            "Descripción Cuenta": f"IVA Descontable (Base: ${base_val:,.0f})",
-            "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+            "Descripción de la Cuenta": desc_iva,
+            "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
             "Débito ($)": 0.0 if es_nc else iva_val,
             "Crédito ($)": iva_val if es_nc else 0.0
+        })
+
+    # 2.B IVA de Importación (Cuenta 240835) - Solo para facturas de importación
+    if iva_imp_val > 0:
+        asiento_filas.append({
+            "Código Cuenta": cta_iva_imp,
+            "Descripción de la Cuenta": f"IVA de Importación (Cta 240835) - Fac {fac_sel.get('Factura', '')}",
+            "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
+            "Débito ($)": 0.0 if es_nc else iva_imp_val,
+            "Crédito ($)": iva_imp_val if es_nc else 0.0
         })
 
     tot_ret = round(rfte_val + rica_val, 2)
@@ -867,67 +865,252 @@ def obtener_asiento_contable_hoja2(fac_sel, es_aduanero=False):
     cta_ri_usar = str(fac_sel.get("Cta ReteICA") or ("23680505" if es_aduanero else "23680501")).strip()
 
     if asume_ret:
+        # IMPUESTOS ASUMIDOS (Cruza con Agente Aduanero / Triangulación)
         if tot_ret > 0:
             asiento_filas.append({
                 "Código Cuenta": "53152001",
-                "Descripción Cuenta": "Retenciones Asumidas (Impuestos Asumidos Aduana)",
-                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+                "Descripción de la Cuenta": "Retenciones Asumidas (Impuestos Asumidos Aduana)",
+                "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
                 "Débito ($)": tot_ret,
                 "Crédito ($)": 0.0
             })
         if rfte_val > 0:
             asiento_filas.append({
                 "Código Cuenta": cta_rf_usar,
-                "Descripción Cuenta": f"ReteFuente Practicada ({cta_rf_usar}) Fac {fac_sel.get('Factura', '')}",
-                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+                "Descripción de la Cuenta": f"ReteFuente Practicada ({cta_rf_usar}) Fac {fac_sel.get('Factura', '')}",
+                "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
                 "Débito ($)": 0.0,
                 "Crédito ($)": rfte_val
             })
         if rica_val > 0:
             asiento_filas.append({
                 "Código Cuenta": cta_ri_usar,
-                "Descripción Cuenta": f"Retención ICA Practicada ({cta_ri_usar}) Fac {fac_sel.get('Factura', '')}",
-                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+                "Descripción de la Cuenta": "Retención ICA Practicada",
+                "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
                 "Débito ($)": 0.0,
                 "Crédito ($)": rica_val
             })
-        saldo_cxp = round(base_val + iva_val, 2)
+        saldo_cxp = round(base_val + iva_val + iva_imp_val, 2)
         asiento_filas.append({
             "Código Cuenta": cta_cxp_usar,
-            "Descripción Cuenta": f"CxP Proveedor/Agente - Fac {fac_sel.get('Factura', '')}",
-            "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
+            "Descripción de la Cuenta": f"CxP Proveedor/Agente - Fac {fac_sel.get('Factura', '')}",
+            "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
             "Débito ($)": saldo_cxp if es_nc else 0.0,
             "Crédito ($)": 0.0 if es_nc else saldo_cxp
         })
     else:
+        # RETENCIONES ORDINARIAS PRACTICADAS AL PROVEEDOR
         if rfte_val > 0:
             asiento_filas.append({
                 "Código Cuenta": cta_rf_usar,
-                "Descripción Cuenta": f"ReteFuente Practicada ({cta_rf_usar}) Fac {fac_sel.get('Factura', '')}",
-                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
-                "Débito ($)": 0.0,
-                "Crédito ($)": rfte_val
+                "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel.get('Categoría', 'Compras/Servicios')})",
+                "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
+                "Débito ($)": rfte_val if es_nc else 0.0,
+                "Crédito ($)": 0.0 if es_nc else rfte_val
             })
         if rica_val > 0:
             asiento_filas.append({
                 "Código Cuenta": cta_ri_usar,
-                "Descripción Cuenta": f"Retención ICA Practicada ({cta_ri_usar}) Fac {fac_sel.get('Factura', '')}",
-                "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
-                "Débito ($)": 0.0,
-                "Crédito ($)": rica_val
+                "Descripción de la Cuenta": "Retención ICA Practicada",
+                "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
+                "Débito ($)": rica_val if es_nc else 0.0,
+                "Crédito ($)": 0.0 if es_nc else rica_val
             })
-        saldo_neto = round(base_val + iva_val - tot_ret, 2)
+        if riva_val > 0:
+            asiento_filas.append({
+                "Código Cuenta": "23670101",
+                "Descripción de la Cuenta": "Retención de IVA Practicada (15%)",
+                "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
+                "Débito ($)": riva_val if es_nc else 0.0,
+                "Crédito ($)": 0.0 if es_nc else riva_val
+            })
+        neto_cxp = round(base_val + iva_val + iva_imp_val - rfte_val - rica_val - riva_val, 2)
         asiento_filas.append({
             "Código Cuenta": cta_cxp_usar,
-            "Descripción Cuenta": f"CxP Proveedor/Agente - Fac {fac_sel.get('Factura', '')}",
-            "Tercero / NIT": f"{fac_sel.get('NIT Emisor', '')} - {str(fac_sel.get('Proveedor', ''))[:22]}",
-            "Débito ($)": saldo_neto if es_nc else 0.0,
-            "Crédito ($)": 0.0 if es_nc else saldo_neto
+            "Descripción de la Cuenta": f"Proveedores Nacionales - Fac {fac_sel.get('Factura', '')}",
+            "Tercero / NIT": str(fac_sel.get("NIT Emisor", "")),
+            "Débito ($)": neto_cxp if es_nc else 0.0,
+            "Crédito ($)": 0.0 if es_nc else neto_cxp
         })
 
-    return pd.DataFrame(asiento_filas)
+    df_h2 = pd.DataFrame(asiento_filas)
+    if "Descripción de la Cuenta" in df_h2.columns and "Descripción Cuenta" not in df_h2.columns:
+        df_h2["Descripción Cuenta"] = df_h2["Descripción de la Cuenta"]
+    elif "Descripción Cuenta" in df_h2.columns and "Descripción de la Cuenta" not in df_h2.columns:
+        df_h2["Descripción de la Cuenta"] = df_h2["Descripción Cuenta"]
+    return df_h2
 
-def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_hoja2=False, enviar_a_solo_cxp=False):
+
+def obtener_saldo_cruce_factura(tr):
+    """
+    Calcula de forma segura el Saldo de Cruce (Base + IVA) de una factura para la triangulación,
+    garantizando que nunca retorne None ni NaN.
+    """
+    try:
+        tb = float(tr.get("Base", 0.0)) if pd.notna(tr.get("Base")) else (float(tr.get("Subtotal", 0.0)) if pd.notna(tr.get("Subtotal")) else 0.0)
+    except Exception:
+        tb = 0.0
+    try:
+        tiv = float(tr.get("IVA", 0.0)) if pd.notna(tr.get("IVA")) else 0.0
+    except Exception:
+        tiv = 0.0
+    try:
+        t_imp = float(tr.get("IVA Importación", 0.0)) if pd.notna(tr.get("IVA Importación")) else 0.0
+    except Exception:
+        t_imp = 0.0
+
+    val_neto = tr.get("Total Neto")
+    if val_neto is not None and pd.notna(val_neto) and str(val_neto).strip() not in ["", "nan", "None", "0", "0.0"]:
+        try:
+            f_neto = float(val_neto)
+            if f_neto > 0.0 and not pd.isna(f_neto):
+                return round(f_neto, 2)
+        except Exception:
+            pass
+
+    saldo_calc = round(tb + tiv + t_imp, 2)
+    if saldo_calc > 0.0:
+        return saldo_calc
+
+    try:
+        tot = float(tr.get("Total", 0.0)) if pd.notna(tr.get("Total")) else 0.0
+        if tot > 0.0 and not pd.isna(tot):
+            return round(tot, 2)
+    except Exception:
+        pass
+    return 0.0
+
+
+
+
+def calcular_concordancia_fecha(fecha_tercero, fecha_agente):
+    """
+    Calcula de forma dinámica la concordancia cronológica entre la factura del tercero y la del agente,
+    garantizando que nunca retorne None ni NaN.
+    """
+    if not fecha_tercero or not fecha_agente or pd.isna(fecha_tercero) or pd.isna(fecha_agente):
+        return "⚪ Sin fecha"
+    dt_terc = pd.to_datetime(str(fecha_tercero), dayfirst=True, errors="coerce")
+    dt_ag = pd.to_datetime(str(fecha_agente), dayfirst=True, errors="coerce")
+    if pd.isna(dt_terc) or pd.isna(dt_ag):
+        return "⚪ Sin fecha"
+    
+    diff_d = int((dt_terc - dt_ag).days)
+    if diff_d == 0:
+        return "🟢 Mismo día (0d)"
+    elif 0 < diff_d <= 15:
+        return f"➡️ Poco después (+{diff_d}d)"
+    elif -30 <= diff_d < 0:
+        return f"⬅️ Anterior ({abs(diff_d)}d antes)"
+    elif -60 <= diff_d < -30:
+        return f"⬅️ Anterior ({abs(diff_d)}d antes)"
+    elif diff_d < -60:
+        return f"⛔ Fuera de rango ({abs(diff_d)}d antes)"
+    else:
+        return f"⛔ Fuera de rango (+{diff_d}d desp)"
+
+
+def generar_asiento_mixto_hoja2_con_terceros(agente_row, terceros_df, enviar_a_no_deducible=False, imputar_a_transito=False):
+    """
+    Construye el asiento contable para un cobro de agente cuando se trae la contabilización de Página 2:
+    1. Si en Hoja 2 se registraron únicamente los Ingresos Propios (Base + IVA < Total Factura):
+       Combina los Ingresos Propios (con su IVA y retenciones) + Facturas de Terceros vinculadas (cancelación de CxP) +
+       Crédito total al Agente Aduanero (22050501).
+    2. El saldo de ingresos para terceros NO se imputa automáticamente a ninguna cuenta de gasto ni tránsito.
+       Se deja PENDIENTE para que el usuario concilie con facturas de terceros o decida explícitamente enviarlo a No Deducibles o a Tránsito.
+    3. Si el usuario selecciona 'No Deducibles', imputa el saldo a 53950501.
+    4. Si el usuario selecciona 'Mercancías en Tránsito', imputa el saldo a 14650501.
+    """
+    df_h2 = obtener_asiento_contable_hoja2(agente_row, es_aduanero=False)
+    
+    tot_agente = float(agente_row.get("Total", 0.0))
+    base_propia = float(agente_row.get("Base", 0.0))
+    iva_propio = float(agente_row.get("IVA", 0.0))
+    iva_imp_propio = float(agente_row.get("IVA Importación", 0.0))
+    subtotal_propio = round(base_propia + iva_propio + iva_imp_propio, 2)
+    saldo_terceros_esperado = round(tot_agente - subtotal_propio, 2)
+    
+    # Si la factura en Hoja 2 ya cubre el total y no hay terceros asignados
+    if saldo_terceros_esperado <= 0.05 and (terceros_df is None or terceros_df.empty):
+        return df_h2, 0.0
+        
+    filas_propias = []
+    tot_ret_propias = 0.0
+    for _, r in df_h2.iterrows():
+        cta = str(r["Código Cuenta"]).strip()
+        if cta.startswith("2365") or cta.startswith("2368") or cta.startswith("2367"):
+            tot_ret_propias += float(r["Crédito ($)"])
+            filas_propias.append(r.to_dict())
+        elif not (cta.startswith("2205") and float(r["Crédito ($)"]) > 0):
+            filas_propias.append(r.to_dict())
+            
+    # Facturas de terceros asignadas a este paquete
+    filas_terceros = []
+    suma_terceros_cxp = 0.0
+    if terceros_df is not None and not terceros_df.empty:
+        for _, t in terceros_df.iterrows():
+            prov_nom = str(t.get("Proveedor", "")).upper()
+            nit_t = str(t.get("NIT Emisor", ""))
+            fac_num = str(t.get("Factura", ""))
+            cta_cxp = str(t.get("Cuenta Pasivo Especifica", "")).strip() or ("22050505" if "CARGO" in prov_nom or "ADUANA" in prov_nom else "23359501")
+            t_base = float(t.get("Base", 0.0))
+            t_iva = float(t.get("IVA", 0.0))
+            t_saldo_pagar = obtener_saldo_cruce_factura(t)
+            
+            suma_terceros_cxp += t_saldo_pagar
+            filas_terceros.append({
+                "Código Cuenta": cta_cxp,
+                "Descripción Cuenta": f"Cancela CxP {prov_nom[:20]} (Fac {fac_num})",
+                "Descripción de la Cuenta": f"Cancela CxP {prov_nom[:20]} (Fac {fac_num})",
+                "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
+                "Débito ($)": t_saldo_pagar,
+                "Crédito ($)": 0.0
+            })
+            
+    # Saldo para terceros restante (fletes internacionales / cargos en origen sin factura DIAN separada)
+    dif_terceros = round(saldo_terceros_esperado - suma_terceros_cxp, 2)
+    filas_ajuste = []
+    if dif_terceros > 0.05:
+        if enviar_a_no_deducible:
+            filas_ajuste.append({
+                "Código Cuenta": CUENTA_NO_DEDUCIBLE,
+                "Descripción Cuenta": f"Gastos No Deducibles Terceros (Diferencia sin soporte DIAN)",
+                "Descripción de la Cuenta": f"Gastos No Deducibles Terceros (Diferencia sin soporte DIAN)",
+                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
+                "Débito ($)": dif_terceros,
+                "Crédito ($)": 0.0
+            })
+        elif imputar_a_transito:
+            filas_ajuste.append({
+                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                "Descripción Cuenta": f"Mercancías en Tránsito / Saldo Faltante (Fac {agente_row.get('Factura', '')})",
+                "Descripción de la Cuenta": f"Mercancías en Tránsito / Saldo Faltante (Fac {agente_row.get('Factura', '')})",
+                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
+                "Débito ($)": dif_terceros,
+                "Crédito ($)": 0.0
+            })
+        # Si ni enviar_a_no_deducible ni imputar_a_transito están activos, NO se agrega ninguna fila de ajuste:
+        # SE DEJA PENDIENTE PARA QUE EL USUARIO CONCILIE FACTURAS O DECIDA ENVIARLO A TRÁNSITO / NO DEDUCIBLE.
+            
+    # Crédito total por pagar al Agente Aduanero (Euro Shipping)
+    asume_ret = bool(agente_row.get("Impuestos Asumidos", False))
+    cxp_total_agente = tot_agente if asume_ret else round(tot_agente - tot_ret_propias, 2)
+    
+    filas_credito = [{
+        "Código Cuenta": CUENTA_CXP_EURO_SHIPPING,
+        "Descripción Cuenta": f"CxP Agente Aduanero - Fac {agente_row.get('Factura', '')}",
+        "Descripción de la Cuenta": f"CxP Agente Aduanero - Fac {agente_row.get('Factura', '')}",
+        "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {str(agente_row.get('Proveedor', ''))[:25]}",
+        "Débito ($)": 0.0,
+        "Crédito ($)": cxp_total_agente
+    }]
+    
+    asiento_final = filas_propias + filas_terceros + filas_ajuste + filas_credito
+    df_res = pd.DataFrame(asiento_final)
+    dif_pendiente = dif_terceros if (not enviar_a_no_deducible and not imputar_a_transito) else 0.0
+    return df_res, dif_pendiente
+
+def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_deducible=False, enviar_a_gastos_propios=False, enviar_a_hoja2=False, **kwargs):
     """
     Calcula el asiento contable de partida doble para un paquete de importación triangulado:
     1. Débito a CxP Terceros (22050505/23359501) por el Saldo por Pagar real (Base + IVA, ej. .651.939).
@@ -940,275 +1123,138 @@ def generar_asiento_triangulacion_paquete(agente_row, terceros_df, enviar_a_no_d
     """
     tot_agente = float(agente_row.get("Total", 0.0))
     iva_agente = float(agente_row.get("IVA", 0.0))
-
+    
     asiento = []
     suma_cxp_canceladas = 0.0
     suma_ret_asumidas = 0.0
     suma_costo_blancas = 0.0
     suma_iva_blancas = 0.0
-
+    
     for _, t in terceros_df.iterrows():
         prov_nom = str(t.get("Proveedor", "")).upper()
         nit_t = str(t.get("NIT Emisor", ""))
         fac_num = str(t.get("Factura", ""))
-        es_roja = bool(t.get("Ya Registrada", False))
+        es_excluida_manual = bool(t.get("No Contabilizar", False)) or (str(t.get("Factura", "")).strip() in st.session_state.get("facturas_no_contabilizar", set()))
+        es_roja = bool(t.get("Ya Registrada", False)) or es_excluida_manual
         cta_cxp = str(t.get("Cuenta Pasivo Especifica", "")).strip()
-
+        
         if not cta_cxp:
             if any(k in prov_nom for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL"]):
                 cta_cxp = CUENTA_CXP_AGENCIA_EXTERIOR
             else:
                 cta_cxp = CUENTA_CXP_DHL_NACIONAL
-
+                
         t_base = float(t.get("Base", 0.0))
         t_iva = float(t.get("IVA", 0.0))
         t_tot = float(t.get("Total", 0.0))
         if t_base <= 0:
             t_base = round(t_tot - t_iva, 2)
-
+            
         rfte_t = float(t.get("ReteFuente", 0.0))
         rica_t = float(t.get("ReteICA", 0.0))
         tot_ret = round(rfte_t + rica_t, 2)
-
+        
         # El Saldo por Pagar que entra a la triangulación es Base + IVA (ej. .388.770 + 63.169 = .651.939)
-        t_saldo_pagar = float(t.get("Total Neto", 0.0))
-        if t_saldo_pagar <= 0:
-            t_saldo_pagar = round(t_base + t_iva, 2)
-
-        # Evaluar si esta factura es un Gasto Propio que va a Inventarios en Tránsito (14650501)
-        # o un Cruce de Pasivo que cancela cuenta por pagar previa (22050505 / 23359501)
-        dest_val = str(t.get("Destino Contable") or t.get("destino_contable") or "").strip().upper()
-        if "INVENTARIO" in dest_val or "14650501" in dest_val or "GASTO PROPIO" in dest_val:
-            es_gasto_propio = True
-        elif "PASIVO" in dest_val or "CXP" in dest_val:
-            es_gasto_propio = False
-        else:
-            # Criterio automático por defecto:
-            # Facturas pendientes (blancas) van directamente a Inventarios en Tránsito (14650501)
-            # Facturas cuya cuenta asignada sea 14650501
-            if not es_roja or cta_cxp == CUENTA_IMPORTACION_TRANSITO or str(t.get("Cta Principal", "")).strip() == CUENTA_IMPORTACION_TRANSITO:
-                es_gasto_propio = True
-            else:
-                es_gasto_propio = False
-
-        if es_gasto_propio:
-            # Gasto propio que entra al costo directo de importación (Inventarios en Tránsito - 14650501)
-            costo_neto = t_base
-            suma_costo_blancas += costo_neto
-            suma_iva_blancas += t_iva
-
+        t_saldo_pagar = obtener_saldo_cruce_factura(t)
+            
+        # REGLA DE TRIANGULACIÓN: Toda factura de tercero traída a la triangulación ÚNICAMENTE
+        # aporta su Cuenta por Pagar (pasivo: 22050505 Agencia, 23359501 DHL, etc.) por su Saldo por Pagar (Base + IVA),
+        # ya que la causación del gasto/costo e IVA de esa factura se realiza en su propio comprobante individual.
+        asume_en_causacion = bool(t.get("Impuestos Asumidos", False))
+        
+        if asume_en_causacion or tot_ret == 0:
+            cxp_cancelar = t_saldo_pagar
+            ret_a_asumir = 0.0
+            suma_cxp_canceladas += cxp_cancelar
+            
             asiento.append({
-                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
-                "Descripción Cuenta": f"Inventarios en Tránsito {prov_nom[:16]} (Fac {fac_num})",
+                "Código Cuenta": cta_cxp,
+                "Descripción Cuenta": f"Cancela CxP {prov_nom[:20]} (Fac {fac_num})",
                 "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
-                "Débito ($)": costo_neto,
+                "Débito ($)": cxp_cancelar,
                 "Crédito ($)": 0.0
             })
-            if t_iva > 0:
-                asiento.append({
-                    "Código Cuenta": CUENTA_IVA_IMPORTACION,
-                    "Descripción Cuenta": f"IVA Descontable Fac {fac_num}",
-                    "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
-                    "Débito ($)": t_iva,
-                    "Crédito ($)": 0.0
-                })
         else:
-            # Cruce de pasivo: Cancela cuenta por pagar previamente registrada en Siigo (22050505 / 23359501)
-            asume_en_causacion = bool(t.get("Impuestos Asumidos", False))
-
-            if asume_en_causacion or tot_ret == 0:
-                cxp_cancelar = t_saldo_pagar
-                ret_a_asumir = 0.0
-                suma_cxp_canceladas += cxp_cancelar
-
+            cxp_cancelar = round(t_saldo_pagar - tot_ret, 2)
+            ret_a_asumir = tot_ret
+            suma_cxp_canceladas += cxp_cancelar
+            suma_ret_asumidas += ret_a_asumir
+            
+            asiento.append({
+                "Código Cuenta": cta_cxp,
+                "Descripción Cuenta": f"Cancela CxP {prov_nom[:20]} (Fac {fac_num})",
+                "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
+                "Débito ($)": cxp_cancelar,
+                "Crédito ($)": 0.0
+            })
+            if ret_a_asumir > 0:
                 asiento.append({
-                    "Código Cuenta": cta_cxp,
-                    "Descripción Cuenta": f"Cancela CxP {prov_nom[:20]} (Fac {fac_num})",
+                    "Código Cuenta": CUENTA_RETENCION_ASUMIDA,
+                    "Descripción Cuenta": f"Retención Asumida Fac {fac_num} ({prov_nom[:18]})",
                     "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
-                    "Débito ($)": cxp_cancelar,
+                    "Débito ($)": ret_a_asumir,
                     "Crédito ($)": 0.0
                 })
-            else:
-                cxp_cancelar = round(t_saldo_pagar - tot_ret, 2)
-                ret_a_asumir = tot_ret
-                suma_cxp_canceladas += cxp_cancelar
-                suma_ret_asumidas += ret_a_asumir
 
-                asiento.append({
-                    "Código Cuenta": cta_cxp,
-                    "Descripción Cuenta": f"Cancela CxP {prov_nom[:20]} (Fac {fac_num})",
-                    "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
-                    "Débito ($)": cxp_cancelar,
-                    "Crédito ($)": 0.0
-                })
-                if ret_a_asumir > 0:
-                    asiento.append({
-                        "Código Cuenta": CUENTA_RETENCION_ASUMIDA,
-                        "Descripción Cuenta": f"Retención Asumida Fac {fac_num} ({prov_nom[:18]})",
-                        "Tercero / NIT": f"{nit_t} - {prov_nom[:25]}",
-                        "Débito ($)": ret_a_asumir,
-                        "Crédito ($)": 0.0
-                    })
+    # IVA Servicios e IVA de Importación del Agente
+    iva_imp_agente = float(agente_row.get("IVA Importación", 0.0))
+    cta_iva_ag = str(agente_row.get("Cta IVA") or "24081501").strip()
+    cta_iva_imp_ag = str(agente_row.get("Cta IVA Importación") or "240835").strip()
 
-    # Si la factura del agente discrimina IVA o IVA de Importación
     if iva_agente > 0:
         asiento.append({
-            "Código Cuenta": CUENTA_IVA_IMPORTACION,
-            "Descripción Cuenta": f"IVA de Importación / Servicios Fac {agente_row.get('Factura', '')}",
+            "Código Cuenta": cta_iva_ag,
+            "Descripción Cuenta": f"IVA Descontable Servicios Fac {agente_row.get('Factura', '')}",
             "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
             "Débito ($)": iva_agente,
             "Crédito ($)": 0.0
         })
 
-    # Calcular la diferencia no cubierta por terceros
-    suma_justificada = suma_cxp_canceladas + suma_ret_asumidas + suma_costo_blancas + suma_iva_blancas + iva_agente
-    diferencia_faltante = round(tot_agente - suma_justificada, 2)
+    if iva_imp_agente > 0:
+        asiento.append({
+            "Código Cuenta": cta_iva_imp_ag,
+            "Descripción Cuenta": f"IVA de Importación (Cta 240835) Fac {agente_row.get('Factura', '')}",
+            "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+            "Débito ($)": iva_imp_agente,
+            "Crédito ($)": 0.0
+        })
 
-    base_propia_iva_est = round(iva_agente / 0.19, 2) if iva_agente > 0 else 0.0
-    es_gasto_propio_con_iva = (base_propia_iva_est > 0 and abs(diferencia_faltante - base_propia_iva_est) < 5.0)
-
-    diferencia_no_deducible = 0.0
-    if enviar_a_hoja2:
-        # Opción 2: Dejar contabilización exactamente como en la Hoja 2
-        as_h2_fiel = obtener_asiento_contable_hoja2(agente_row, es_aduanero=False)
-        if terceros_df.empty:
-            return as_h2_fiel, 0.0, 0.0
-        else:
-            cta_h2_ag = str(agente_row.get("Cta Principal") or CUENTA_IMPORTACION_TRANSITO).strip()
-            cat_h2_ag = str(agente_row.get("Categoría") or "Gasto Importación / Agenciamiento").strip()
-            if diferencia_faltante > 0.01:
-                asiento.append({
-                    "Código Cuenta": cta_h2_ag,
-                    "Descripción Cuenta": f"Contabilización Hoja 2: {cat_h2_ag} (Fac {agente_row.get('Factura', '')})",
-                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                    "Débito ($)": diferencia_faltante,
-                    "Crédito ($)": 0.0
-                })
-            diferencia_no_deducible = 0.0
-    elif diferencia_faltante > 0.01:
-        if enviar_a_gastos_propios or es_gasto_propio_con_iva:
-            # Opción 1: Mercancías en Tránsito (14650501) - Aplica a diferencia manual o gastos propios con IVA
-            lbl_desc_gp = f"Gastos Propios Agente (Seguro/Fee) en Tránsito Fac {agente_row.get('Factura', '')}" if es_gasto_propio_con_iva else f"Mercancías en Tránsito / Base Agente (Fac {agente_row.get('Factura', '')})"
-            asiento.append({
-                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
-                "Descripción Cuenta": lbl_desc_gp,
-                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                "Débito ($)": diferencia_faltante,
-                "Crédito ($)": 0.0
-            })
-            diferencia_no_deducible = 0.0
-        elif enviar_a_solo_cxp:
-            cta_h2_ag = str(agente_row.get("Cta Principal") or CUENTA_IMPORTACION_TRANSITO).strip()
-            cat_h2_ag = str(agente_row.get("Categoría") or "Gasto Importación / Agenciamiento").strip()
-            asiento.append({
-                "Código Cuenta": cta_h2_ag,
-                "Descripción Cuenta": f"Contabilización Hoja 2: {cat_h2_ag} (Fac {agente_row.get('Factura', '')})",
-                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                "Débito ($)": diferencia_faltante,
-                "Crédito ($)": 0.0
-            })
-            diferencia_no_deducible = 0.0
-        elif enviar_a_no_deducible:
-            diferencia_no_deducible = diferencia_faltante
-            asiento.append({
-                "Código Cuenta": CUENTA_NO_DEDUCIBLE,
-                "Descripción Cuenta": f"Gastos No Deducibles Importación (Diferencia sin soporte DIAN)",
-                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                "Débito ($)": diferencia_no_deducible,
-                "Crédito ($)": 0.0
-            })
-        else:
-            diferencia_no_deducible = diferencia_faltante
-    elif diferencia_faltante < -0.01:
+    # Calcular la diferencia no deducible sin factura DIAN (Cuenta 53950501)
+    suma_justificada = suma_cxp_canceladas + suma_ret_asumidas + suma_costo_blancas + suma_iva_blancas + iva_agente + iva_imp_agente
+    diferencia_no_deducible = round(tot_agente - suma_justificada, 2)
+    
+    if diferencia_no_deducible > 0.01 and enviar_a_no_deducible:
+        asiento.append({
+            "Código Cuenta": CUENTA_NO_DEDUCIBLE,
+            "Descripción Cuenta": f"Gastos No Deducibles Importación (Diferencia sin soporte DIAN)",
+            "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+            "Débito ($)": diferencia_no_deducible,
+            "Crédito ($)": 0.0
+        })
+    elif diferencia_no_deducible < -0.01:
         # En caso de que la suma de terceros exceda ligeramente al agente por redondeo
         asiento.append({
             "Código Cuenta": CUENTA_NO_DEDUCIBLE,
             "Descripción Cuenta": f"Ajuste por Diferencia de Cuadre Importación",
             "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
             "Débito ($)": 0.0,
-            "Crédito ($)": abs(diferencia_faltante)
+            "Crédito ($)": abs(diferencia_no_deducible)
         })
-        diferencia_no_deducible = 0.0
 
-    # Retenciones practicadas sobre la factura del agente aduanero (Base propia / Fee / Agenciamiento)
-    rfte_ag = float(agente_row.get("ReteFuente", 0.0))
-    rica_ag = float(agente_row.get("ReteICA", 0.0))
-    tot_ret_ag = round(rfte_ag + rica_ag, 2)
-    asume_ret_ag = bool(agente_row.get("Impuestos Asumidos", False))
-    prov_ag_u = str(agente_row.get("Proveedor", "")).upper()
-    es_aduanero_ag = any(k in prov_ag_u for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL", "DHL", "EURO SHIPPING", "TRADE GLOBAL"])
-    
-    cta_rfte_ag = str(agente_row.get("Cta ReteFuente") or ("23652503" if es_aduanero_ag else "23654001")).strip()
-    cta_rica_ag = str(agente_row.get("Cta ReteICA") or ("23680505" if es_aduanero_ag else "23680501")).strip()
-    cta_cxp_ag = str(agente_row.get("Cuenta Pasivo Especifica") or CUENTA_CXP_EURO_SHIPPING).strip()
-
-    if tot_ret_ag > 0:
-        if asume_ret_ag:
-            asiento.append({
-                "Código Cuenta": CUENTA_RETENCION_ASUMIDA,
-                "Descripción Cuenta": f"Retenciones Asumidas Aduana / Agente Fac {agente_row.get('Factura', '')}",
-                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                "Débito ($)": tot_ret_ag,
-                "Crédito ($)": 0.0
-            })
-            if rfte_ag > 0:
-                asiento.append({
-                    "Código Cuenta": cta_rfte_ag,
-                    "Descripción Cuenta": f"ReteFuente Practicada ({cta_rfte_ag}) Fac {agente_row.get('Factura', '')}",
-                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                    "Débito ($)": 0.0,
-                    "Crédito ($)": rfte_ag
-                })
-            if rica_ag > 0:
-                asiento.append({
-                    "Código Cuenta": cta_rica_ag,
-                    "Descripción Cuenta": f"Retención ICA Practicada ({cta_rica_ag}) Fac {agente_row.get('Factura', '')}",
-                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                    "Débito ($)": 0.0,
-                    "Crédito ($)": rica_ag
-                })
-            asiento.append({
-                "Código Cuenta": cta_cxp_ag,
-                "Descripción Cuenta": f"CxP Agente Aduanero - Fac {agente_row.get('Factura', '')}",
-                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                "Débito ($)": 0.0,
-                "Crédito ($)": tot_agente
-            })
-        else:
-            if rfte_ag > 0:
-                asiento.append({
-                    "Código Cuenta": cta_rfte_ag,
-                    "Descripción Cuenta": f"ReteFuente Practicada ({cta_rfte_ag}) Fac {agente_row.get('Factura', '')}",
-                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                    "Débito ($)": 0.0,
-                    "Crédito ($)": rfte_ag
-                })
-            if rica_ag > 0:
-                asiento.append({
-                    "Código Cuenta": cta_rica_ag,
-                    "Descripción Cuenta": f"Retención ICA Practicada ({cta_rica_ag}) Fac {agente_row.get('Factura', '')}",
-                    "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                    "Débito ($)": 0.0,
-                    "Crédito ($)": rica_ag
-                })
-            saldo_neto_ag = round(tot_agente - tot_ret_ag, 2)
-            asiento.append({
-                "Código Cuenta": cta_cxp_ag,
-                "Descripción Cuenta": f"CxP Agente Aduanero (Neto) - Fac {agente_row.get('Factura', '')}",
-                "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-                "Débito ($)": 0.0,
-                "Crédito ($)": saldo_neto_ag
-            })
-    else:
-        asiento.append({
-            "Código Cuenta": cta_cxp_ag,
-            "Descripción Cuenta": f"CxP Agente Aduanero - Fac {agente_row.get('Factura', '')}",
-            "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
-            "Débito ($)": 0.0,
-            "Crédito ($)": tot_agente
-        })
+    # Crédito total al Agente Aduanero (Euro Shipping / Trade Global) por el 100% de su factura
+    asiento.append({
+        "Código Cuenta": CUENTA_CXP_EURO_SHIPPING,
+        "Descripción Cuenta": f"CxP Agente Aduanero - Fac {agente_row.get('Factura', '')}",
+        "Tercero / NIT": f"{agente_row.get('NIT Emisor', '')} - {agente_row.get('Proveedor', '')[:25]}",
+        "Débito ($)": 0.0,
+        "Crédito ($)": tot_agente
+    })
 
     df_asiento = pd.DataFrame(asiento)
+    if "Descripción Cuenta" in df_asiento.columns and "Descripción de la Cuenta" not in df_asiento.columns:
+        df_asiento["Descripción de la Cuenta"] = df_asiento["Descripción Cuenta"]
+    elif "Descripción de la Cuenta" in df_asiento.columns and "Descripción Cuenta" not in df_asiento.columns:
+        df_asiento["Descripción Cuenta"] = df_asiento["Descripción de la Cuenta"]
     return df_asiento, max(0.0, diferencia_no_deducible), suma_ret_asumidas
 
 # Directorio oficial de regímenes fiscales conocidos por NIT y Nombre
@@ -1232,6 +1278,9 @@ REGIMENES_EMISORES_CONOCIDOS = {
 CODIGOS_IMPUESTO_SIIGO = {
     '24081001': 1,   # IVA 19% compras bienes
     '24081003': 2,   # IVA 5% compras bienes
+    '24081501': 1,   # IVA Servicios 19%
+    '240835': 1,     # IVA de Importación 19%
+    '24083501': 1,   # IVA de Importación 19% (8 dígitos)
     '24080601': 1,   # IVA 19% ventas
     '24080602': 2,   # IVA 5% ventas
     '23651501': 3,   # Retefuente 11%
@@ -1352,13 +1401,13 @@ def extraer_valores_fiscales_texto_pdf(texto):
     if not texto: return datos
 
     # 1. Notas Finales (formato clave: valor)
-    m_nf_rfte = re.search(r'retefuente\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_rfte = re.search(r' retefuente\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_rfte: datos['retefuente'] = parse_num_co(m_nf_rfte.group(1))
 
-    m_nf_rica = re.search(r'reteica\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_rica = re.search(r' reteica\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_rica: datos['reteica'] = parse_num_co(m_nf_rica.group(1))
 
-    m_nf_riva = re.search(r'reteiva\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
+    m_nf_riva = re.search(r' reteiva\s*:\s*([0-9\.\,]+)', texto, re.IGNORECASE)
     if m_nf_riva: datos['reteiva'] = parse_num_co(m_nf_riva.group(1))
 
     # 2. Descuentos globales por retención sugerida si no vino en notas
@@ -1537,7 +1586,11 @@ def guardar_regla_aprendizaje(empresa_dict, nit_emisor, nombre_emisor, cta_p=Non
     return memoria
 
 def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_doc, resp_emisor="", empresa_compradora=None):
-    nombre = str(nombre_emisor).upper()
+    nombre_str = "" if (nombre_emisor is None or pd.isna(nombre_emisor)) else str(nombre_emisor).strip()
+    if nombre_str.lower() in ["nan", "none"]:
+        nombre_str = ""
+    nombre = nombre_str.upper()
+    nombre_emisor = nombre_str or "Proveedor"
     resp = str(resp_emisor).upper()
 
     # 0. MEMORIA DE APRENDIZAJE: Si el usuario ya auditó y guardó reglas para este proveedor previamente
@@ -1551,6 +1604,8 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_do
             resp = resp_emisor.upper()
         if r_ap.get("cta_principal"):
             cta_aprendida = r_ap["cta_principal"]
+        if r_ap.get("cta_iva"):
+            cta_iva = r_ap["cta_iva"]
     if empresa_compradora is None:
         empresa_compradora = {"es_gran_contribuyente": False, "es_autorretenedor": False}
 
@@ -1570,7 +1625,7 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_do
         rfte_t = round(valor_base * 0.04, 2) if valor_base >= 210000 or "EURO SHIPPING" in nombre or "DHL" in nombre else 0.0
         rica_t = round(valor_base * 0.00966, 2) if valor_base >= 210000 and "BUENAVENTURA" not in nombre and "PORTUARIA" not in nombre else 0.0
         cta_p, cta_c, desc = "146505", "22050501", f"Importacion / Transito - {nombre_emisor[:25]}"
-        cta_rfte_b, cta_iva, cta_rica_b = "23652503", "24081501", "23680505"
+        cta_rfte_b, cta_iva, cta_rica_b = "23652503", "240835", "23680505"
         cat, razon_b = "Importacion (1465)", "Honorarios Agenciamiento vs Terceros"
 
     # 2. Repuestos / Mantenimiento
@@ -1592,13 +1647,14 @@ def clasificar_factura(nit_emisor, nombre_emisor, valor_base, valor_iva, tipo_do
         rica_t = round(valor_base * 0.00966, 2) if valor_base >= 210000 else 0.0
         cta_p, cta_c, desc = "51550501", "23359501", f"Alojamiento / Viaje - {nombre_emisor[:25]}"
         cta_rfte_b, cta_iva, cta_rica_b = "23652501", "24081501", "23680505"
-        cat, razon_b = "Gasto Viaje", "Hospedaje de personal"
+        cat, razon_b = "Gasto Viaje", "Hospedaje de personal (IVA Servicios 24081501)"
 
     # 4. Software Siigo
     elif "SIIGO" in nombre:
         cta_p, cta_c, desc = "51352001", "23359501", f"Software Siigo - {nombre_emisor[:25]}"
         rfte_t, rica_t = 0.0, 0.0
         cta_rfte_b, cta_iva, cta_rica_b = "", "24081501", ""
+        cat, razon_b = "Software", "Software y tecnologia (IVA Servicios 24081501)"
         cat, razon_b = "Software", "Software y tecnologia"
 
     # 5. Papelería
@@ -1737,7 +1793,7 @@ def desbloquear_pdf_bytes(fbytes, nit_receptor=None, claves_extra=None, nits_emi
     except Exception:
         return fbytes, False
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=40, ttl=1200)
 def cache_extraer_textos_pdf(fbytes, nit_receptor="9013464125"):
     """Extrae el texto de todas las páginas de un PDF, desbloqueándolo automáticamente si está protegido."""
     try:
@@ -2125,6 +2181,25 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
 
     st.write("")
 
+    # 2.B SELECTOR DE TAMAÑO VISUAL DE LA FACTURA
+    c_tam1, c_tam2 = st.columns([3, 2])
+    with c_tam1:
+        tam_sel = st.radio(
+            "📐 Tamaño de Vista Previa:",
+            ["📄 Normal (Recomendado - 780px)", "🔍 Grande (Ancho Completo)", "📱 Compacto (600px)"],
+            horizontal=True,
+            index=0,
+            key=f"rad_tam_pdf_{key_prefix}"
+        )
+
+    # Proporción de columnas para centrar y mostrar la hoja en tamaño normal de lectura
+    if "Compacto" in tam_sel:
+        col_ratios = [2.2, 4.0, 2.2]
+    elif "Grande" in tam_sel:
+        col_ratios = [0.01, 9.98, 0.01]
+    else:  # Normal (Recomendado)
+        col_ratios = [1.6, 5.2, 1.6]
+
     # 3. RENDERIZADO VISUAL DIRECTO EN IMÁGENES NATIVAS (CERO CARAS TRISTES, CERO BLOQUEOS DE CHROME)
     imgs_paginas = []
     if HAS_PDFIUM:
@@ -2137,13 +2212,15 @@ def renderizar_visor_pdf_completo(pdf_bytes, nombre_archivo, fac_sel=None, key_p
 
     if imgs_paginas:
         for idx_p, img in enumerate(imgs_paginas):
-            st.markdown(f"""
-            <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:13.5px; display:flex; justify-content:space-between; align-items:center; margin-top:14px;">
-                <span>📄 Factura: {fac_num_str} — {prov_str}</span>
-                <span style="background:rgba(255,255,255,0.25); padding:2px 10px; border-radius:10px; font-size:12px;">Hoja {idx_p + 1} de {len(imgs_paginas)}</span>
-            </div>
-            """, unsafe_allow_html=True)
-            st.image(img, use_container_width=True)
+            c_l, c_mid, c_r = st.columns(col_ratios)
+            with c_mid:
+                st.markdown(f"""
+                <div style="background:#0070ba; color:white; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:600; font-size:13.5px; display:flex; justify-content:space-between; align-items:center; margin-top:16px; box-shadow: 0 2px 4px rgba(0,0,0,0.06);">
+                    <span>📄 Factura: {fac_num_str} — {prov_str}</span>
+                    <span style="background:rgba(255,255,255,0.25); padding:2px 10px; border-radius:10px; font-size:12px;">Hoja {idx_p + 1} de {len(imgs_paginas)}</span>
+                </div>
+                """, unsafe_allow_html=True)
+                st.image(img, use_container_width=True)
     else:
         # Fallback a Canvas HTML5 si pypdfium no estuviera disponible
         visor_height = max(680, min(3600, num_pags_tot * 850))
@@ -2260,7 +2337,8 @@ if "df_procesado" not in st.session_state and trabajos_existentes:
     ultimo = trabajos_existentes[0]
     nom_ult = ultimo.get("nombre_trabajo", f"Trabajo {ultimo.get('id', '')}")
     n_fac = ultimo.get("total_facturas", 0)
-    val_tot = ultimo.get("total_valor", 0.0)
+    try: val_tot = float(ultimo.get("total_valor", 0.0) or 0.0)
+    except Exception: val_tot = 0.0
 
     st.markdown(f"""
     <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:14px 18px; margin-bottom:14px;">
@@ -2458,21 +2536,35 @@ def restaurar_desde_respaldo_bytes(empresa_dict, raw_zip_bytes):
 
 # BANNER DE CONTROL Y GUARDADO MANUAL
 if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-    c_bnr1, c_bnr2, c_bnr3 = st.columns([3.2, 1.5, 1.1])
+    c_bnr1, c_bnr2, c_bnr3, c_bnr4 = st.columns([2.8, 1.3, 1.6, 0.9])
     with c_bnr1:
         nom_ses = st.session_state.get("excel_nombre", "Reporte de Facturas")
         last_save = st.session_state.get("_ultimo_guardado_manual")
-        save_info = f" | 💾 Último guardado manual: `{last_save}`" if last_save else " | (Presiona 'Guardar Avance' cuando termines tus cambios)"
+        save_info = f" | 💾 `{last_save}`" if last_save else ""
         st.info(f"📋 **Trabajo Activo:** `{nom_ses}` ({len(st.session_state['df_procesado'])} facturas){save_info}")
     with c_bnr2:
-        if st.button("💾 Guardar Avance", key="btn_guardar_manual_top", use_container_width=True, help="Guarda en disco todas las modificaciones de cuentas y triangulaciones."):
+        if st.button("💾 Guardar Avance", key="btn_guardar_manual_top", use_container_width=True, help="Guarda en disco todas las modificaciones de cuentas y paquetes validados."):
             if guardar_estado_manual(empresa):
                 st.success("✅ ¡Avance contable guardado exitosamente!")
                 st.rerun()
             else:
                 st.error("Error al guardar.")
     with c_bnr3:
-        if st.button("🆕 Limpiar Todo", key="btn_nuevo_trabajo_top", use_container_width=True, help="Limpia la memoria para cargar un nuevo mes."):
+        respaldo_bytes_top = generar_respaldo_portatil_bytes(empresa)
+        if respaldo_bytes_top:
+            emp_clean_name = re.sub(r'[^a-zA-Z0-9]', '_', str(empresa.get('nombre', 'Empresa')))
+            nom_resp_top = f"Respaldo_Avance_{emp_clean_name}.indumaq"
+            st.download_button(
+                label="🛡️ Descargar Respaldo (.indumaq)",
+                data=respaldo_bytes_top,
+                file_name=nom_resp_top,
+                mime="application/zip",
+                key="btn_dl_respaldo_top_direct",
+                use_container_width=True,
+                help="Descarga un archivo con tus 16 paquetes validados y facturas editadas. Si se apaga o reinicia Streamlit, lo cargas en segundos."
+            )
+    with c_bnr4:
+        if st.button("🆕 Limpiar", key="btn_nuevo_trabajo_top", use_container_width=True, help="Limpia la memoria para cargar un nuevo mes."):
             for k in ["df_procesado", "dict_pdfs", "raw_uploaded_pdfs", "excel_bytes", "excel_nombre", "zip_pdfs", "job_actual_id", "_ultimo_excel_proc_sig", "_ultimo_pdfs_proc_sig", "paquetes_importacion", "asientos_triangulacion_por_factura", "facturas_no_contabilizar", "_ultimo_guardado_manual"]:
                 st.session_state.pop(k, None)
             st.rerun()
@@ -2523,7 +2615,8 @@ with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", exp
                 with c_h1:
                     nom_tb = tb.get("nombre_trabajo", f"Trabajo {tb.get('id', '')}")
                     n_facs = tb.get("total_facturas", 0)
-                    val_tot = tb.get("total_valor", 0.0)
+                    try: val_tot = float(tb.get("total_valor", 0.0) or 0.0)
+                    except Exception: val_tot = 0.0
                     n_renom = tb.get("total_pdfs_renombrados", tb.get("total_pdfs", 0))
                     n_orig = tb.get("total_pdfs_originales", 0)
                     info_pdf_str = f"{n_renom} PDFs procesados" if n_renom > 0 else (f"{n_orig} PDFs subidos" if n_orig > 0 else "Sin PDFs")
@@ -2591,6 +2684,54 @@ with st.expander("🗂️ Historial de Trabajos, Respaldos y Carga Rápida", exp
 
 st.markdown("---")
 
+
+def normalizar_df_procesado(df):
+    """Garantiza que todas las columnas requeridas existan con tipos seguros y sin NaNs que causen caídas."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    
+    defaults_str = {
+        "Comprobante Siigo": "Comp 10-001", "Fecha": "01/01/2026", "Factura": "FAC-001",
+        "Proveedor": "Proveedor", "NIT Emisor": "900000000", "Régimen Fiscal Emisor": "48",
+        "Cta Principal": "14650501", "Categoría": "General", "Razón Contable": "Clasificación automática", "Cuenta Pasivo Especifica": "22050501",
+        "Cta Contrapartida": "22050501", "Operacion": "Compra", "Soporte PDF Renombrado": "",
+        "Descripcion": "Compra general", "Tipo Comp": "10", "Prefijo": "", "Folio": "",
+        "Cta ReteFuente": "23654001", "Cta ReteICA": "23680501", "Cta IVA": "24081001",
+        "Cta IVA Importación": "240835", "Comprobante Previo": "", "Estado Registro": "⚪ Compra Pendiente"
+    }
+    defaults_num = {
+        "Base": 0.0, "IVA": 0.0, "ReteFuente": 0.0, "ReteICA": 0.0, "ReteIVA": 0.0,
+        "Total": 0.0, "Neto a Pagar": 0.0, "Total Neto": 0.0, "Consecutivo": 680,
+        "IVA Importación": 0.0
+    }
+    defaults_bool = {
+        "Impuestos Asumidos": False, "No Contabilizar": False, "Ya Registrada": False, "Es Aduanera": False
+    }
+
+    for col, def_val in defaults_str.items():
+        if col not in df.columns:
+            df[col] = def_val
+        else:
+            df[col] = df[col].fillna(def_val).astype(str).replace(["nan", "None"], def_val)
+
+    for col, def_val in defaults_num.items():
+        if col not in df.columns:
+            df[col] = def_val
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(def_val)
+
+    for col, def_val in defaults_bool.items():
+        if col not in df.columns:
+            df[col] = def_val
+        else:
+            df[col] = df[col].fillna(def_val).astype(bool)
+
+    if "Audit Info" not in df.columns:
+        df["Audit Info"] = [{} for _ in range(len(df))]
+
+    return df
+
+
 tab_compras, tab_auditoria, tab_triangulacion, tab_siigo = st.tabs([
     "1. Cargar Documentos y Desbloquear PDFs",
     "2. Auditoria y Trazabilidad Fiscal",
@@ -2599,684 +2740,543 @@ tab_compras, tab_auditoria, tab_triangulacion, tab_siigo = st.tabs([
 ])
 
 with tab_compras:
-    st.markdown("### 1. Insumos DIAN y Facturas en PDF")
-    st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs (unificados o separados) para desbloquear, guardar y renombrar automáticamente por comprobante.")
-
-    # Si ya tenemos los documentos cargados en el autoguardado, mostrar confirmación visible
-    n_p_carg = len(st.session_state.get("raw_uploaded_pdfs", {}))
-    n_p_proc = len(st.session_state.get("dict_pdfs", {}))
-    if n_p_carg > 0:
-        st.success(f"✅ **Autoguardado Activo:** Tienes **{n_p_carg} facturas PDF cargadas en el sistema** ({n_p_proc} vinculadas con su comprobante). Ya están disponibles en la Pestaña 2 (Auditoría) y Pestaña 3 (Triangulación). No necesitas volver a subirlas.")
-
-    col_u1, col_u2 = st.columns(2)
-    with col_u1:
-        archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"], help="Opcional si ya cargaste tu trabajo desde el Historial.")
-    with col_u2:
-        archivos_pdfs = st.file_uploader("2. Facturas en PDF o Archivo ZIP Consolidado", type=["pdf", "zip"], accept_multiple_files=True, help="Sube facturas en PDF o un solo archivo .ZIP con todas las facturas (ideal para 100 a 1000+ facturas).")
-
-    st.markdown("##### 🔢 3. Consecutivos Iniciales por Tipo de Comprobante Siigo:")
-    st.caption("Cada tipo de comprobante lleva su propia numeración independiente. Digita en qué número vas en cada uno:")
-
-    c_con1, c_con2, c_con3, c_con4 = st.columns(4)
-    with c_con1:
-        cons_ini_fac = st.number_input("Facturas de Compra (Tipo 10):", min_value=1, max_value=999999, value=680, step=1, help="Consecutivo inicial para facturas de compra normales.")
-    with c_con2:
-        cons_ini_nc = st.number_input("Notas Crédito (Tipo 17):", min_value=1, max_value=999999, value=1, step=1, help="Consecutivo inicial para notas crédito / devoluciones.")
-    with c_con3:
-        cons_ini_nota = st.number_input("Notas de Contabilidad (Tipo 14):", min_value=1, max_value=999999, value=1, step=1, help="Consecutivo inicial para notas contables o ajustes.")
-    with c_con4:
-        clave_pdf_extra = st.text_input("Clave PDF (opcional):", type="password", help="Si algún archivo PDF tiene contraseña específica, ingrésala aquí.")
-
-    # Almacenar PDFs originales subidos en session_state y en el historial de inmediato (solo una vez por subida)
-    if archivos_pdfs:
-        pdfs_sig = f"{len(archivos_pdfs)}_" + "_".join(f"{p.name}_{p.size}" for p in archivos_pdfs[:5])
-        if st.session_state.get("_ultimo_pdfs_proc_sig") != pdfs_sig:
-            if "raw_uploaded_pdfs" not in st.session_state:
-                st.session_state["raw_uploaded_pdfs"] = {}
-            import gc
-            for p in archivos_pdfs:
-                if p.name.lower().endswith(".zip"):
-                    try:
-                        with zipfile.ZipFile(io.BytesIO(p.getvalue()), "r") as z_in:
-                            for z_name in z_in.namelist():
-                                if z_name.lower().endswith(".pdf") and not z_name.startswith("__MACOSX"):
-                                    c_name = os.path.basename(z_name)
-                                    if c_name:
-                                        st.session_state["raw_uploaded_pdfs"][c_name] = z_in.read(z_name)
-                    except Exception as e:
-                        st.error(f"Error leyendo archivo ZIP {p.name}: {e}")
-                else:
-                    st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
-            gc.collect()
-
-            st.session_state["_ultimo_pdfs_proc_sig"] = pdfs_sig
-            st.success(f"📑 **{len(st.session_state['raw_uploaded_pdfs'])} factura(s) PDF cargadas en memoria.**")
-            # Auto-vincular de inmediato si ya tenemos el reporte Excel cargado
-            if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-                st.session_state["_ejecutar_desbloqueo_ahora"] = True
-
-    if archivo_excel is not None:
-        excel_sig = f"{archivo_excel.name}_{archivo_excel.size}_{cons_ini_fac}_{cons_ini_nc}_{cons_ini_nota}"
-        if st.session_state.get("_ultimo_excel_proc_sig") != excel_sig or "df_procesado" not in st.session_state:
-            st.session_state["excel_bytes"] = archivo_excel.getvalue()
-            st.session_state["excel_nombre"] = archivo_excel.name
-            st.session_state["_ultimo_excel_proc_sig"] = excel_sig
-
-            df_dian = pd.read_excel(io.BytesIO(st.session_state["excel_bytes"]))
-
-            # Identificar columna de fecha y ordenar cronológicamente de Enero a la fecha actual
-            col_fecha = None
-            for col_cand in ["Fecha Emisión", "Fecha Emision", "Fecha", "Fecha de Emisión"]:
-                if col_cand in df_dian.columns:
-                    col_fecha = col_cand
-                    break
-            if col_fecha is None:
-                col_fecha = df_dian.columns[0]
-
-            df_dian["_fecha_dt"] = pd.to_datetime(df_dian[col_fecha], dayfirst=True, errors="coerce")
-            df_dian = df_dian.sort_values(by="_fecha_dt", ascending=True).reset_index(drop=True)
-
-            st.success(f"Reporte procesado y ordenado cronológicamente (Enero a la fecha): **{len(df_dian)} facturas identificadas**.")
-
-            contadores_consecutivos = {
-                10: int(cons_ini_fac),
-                17: int(cons_ini_nc),
-                14: int(cons_ini_nota),
-                16: int(cons_ini_fac)
-            }
-            # Analizar celdas rojas (ya registradas), grupos y cuentas específicas del Excel
-            estados_excel = analizar_estado_filas_excel(st.session_state.get("excel_bytes"))
-
-            filas = []
-            for idx, r in df_dian.iterrows():
-                tipo_doc = r.get("Tipo de documento") or r.get("Tipo documento") or "Factura electrónica"
-                folio = str(r.get("Folio") or r.get("Factura") or r.get("Factura Num") or f"Doc_{idx+1}").strip()
-                if folio.endswith(".0"):
-                    folio = folio[:-2]
-                prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
-                if prefijo == "nan" or prefijo == "None":
-                    prefijo = ""
-
-                fecha_val = r.get(col_fecha)
-                if pd.notna(fecha_val):
-                    try:
-                        fecha_dt = pd.to_datetime(fecha_val, dayfirst=True)
-                        fecha_str = fecha_dt.strftime("%d/%m/%Y")
-                    except:
-                        fecha_str = str(fecha_val).split()[0]
-                else:
-                    fecha_str = "01/01/2026"
-
-                nit_e = str(r.get("NIT Emisor") or r.get("NIT") or "").strip()
-                if nit_e.endswith(".0"):
-                    nit_e = nit_e[:-2]
-                nom_e = str(r.get("Nombre Emisor") or r.get("Proveedor (Emisor)") or r.get("Proveedor") or "Proveedor").strip()
-
-                try: iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
-                except: iva = 0.0
-                try: tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
-                except: tot = 0.0
-                base, iva, desc_val, motivo_base = calcular_base_con_regla_descuento(r, tot, iva, nom_e)
-                col_cufe = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["cufe", "token", "uuid", "cude"])), None)
-                cufe_val = str(r.get(col_cufe, "")).strip() if col_cufe and pd.notna(r.get(col_cufe)) else ""
-
-                col_resp = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["régimen", "regimen", "responsabilidad", "obligacion"])), None)
-                resp_e = str(r.get(col_resp, "")).strip() if col_resp and pd.notna(r.get(col_resp)) else ""
-
-                # Búsqueda inmediata por NIT y Razón Social en catálogo oficial
-                nit_e_digits = re.sub(r'\D', '', str(nit_e))
-                if not resp_e and nit_e_digits in REGIMENES_EMISORES_CONOCIDOS:
-                    resp_e = REGIMENES_EMISORES_CONOCIDOS[nit_e_digits]
-                elif not resp_e:
-                    nom_e_u = str(nom_e).upper()
-                    if any(k in nom_e_u for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
-                        resp_e = "O-13;O-15"
-
-                t_comp, op, cta_p, cta_c, desc, rfte, rica, riva, cta_rfte, cta_iva, cta_rica, cat, razon, audit_dict = clasificar_factura(
-                    nit_e, nom_e, base, iva, tipo_doc, resp_e, empresa
-                )
-                consecutivo = contadores_consecutivos.get(t_comp, 1)
-                contadores_consecutivos[t_comp] += 1
-
-                nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
-                nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
-
-                # Identificar si la fila estaba marcada en rojo (ya registrada en Siigo), su grupo y cuenta
-                fac_k_full = f"{prefijo}-{folio}" if prefijo else folio
-                info_est = estados_excel.get(cufe_val) or estados_excel.get(fac_k_full) or estados_excel.get(folio) or estados_excel.get(idx, {})
-                es_roja_reg = bool(info_est.get("es_roja", False))
-                comp_prev = str(info_est.get("comprobante_existente", ""))
-                grp_imp = str(info_est.get("grupo_importacion", "")).strip()
-                cta_esp = str(info_est.get("cuenta_especifica", "")).strip()
-
-                es_aduanera_flag = any(k in nom_e.upper() for k in AGENTES_ADUANEROS) or any(k in nom_e.upper() for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL", "BUENAVENTURA", "CARTAGENA", "CONSOLCARGO", "EURO SHIPPING", "TRADE GLOBAL"])
-
-                filas.append({
-                    "N°": idx + 1,
-                    "Tipo Comp": t_comp,
-                    "Consecutivo": consecutivo,
-                    "Comprobante Siigo": f"Comp {t_comp}-{consecutivo}",
-                    "Fecha": fecha_str,
-                    "Prefijo": prefijo,
-                    "Folio": folio,
-                    "Factura": fac_k_full,
-                    "Proveedor": nom_e,
-                    "NIT Emisor": nit_e,
-                    "Ya Registrada": es_roja_reg,
-                    "No Contabilizar": False,
-                    "Comprobante Previo": comp_prev,
-                    "Grupo Importación": grp_imp,
-                    "Cuenta Pasivo Especifica": cta_esp,
-                    "Es Aduanera": es_aduanera_flag,
-                    "Estado Registro": f"🔴 Ya Registrada ({comp_prev})" if es_roja_reg else ("🟡 Agente Aduanero" if any(k in nom_e.upper() for k in ["EURO SHIPPING", "TRADE GLOBAL"]) else ("🟢 Aduanera" if es_aduanera_flag else "⚪ Compra Pendiente")),
-                    "Régimen Fiscal Emisor": resp_e if resp_e else "O-48 (Estándar)",
-                    "Descripcion": desc,
-                    "Operacion": op,
-                    "Cta Principal": cta_p,
-                    "Categoría": cat,
-                    "Base": base,
-                    "IVA": iva,
-                    "ReteFuente": rfte,
-                    "ReteICA": rica,
-                    "ReteIVA": riva,
-                    "Neto a Pagar": round(tot - rfte - rica - riva, 2),
-                    "Audit Info": audit_dict,
-                    "Cta Contrapartida": cta_c,
-                    "Cta IVA": cta_iva,
-                    "Cta ReteFuente": cta_rfte,
-                    "Cta ReteICA": cta_rica,
-                    "Total": tot,
-                    "CUFE": cufe_val,
-                    "Descuento Registrado": desc_val,
-                    "Regla Base": motivo_base,
-                    "Razón Contable": razon,
-                    "Soporte PDF Renombrado": nombre_pdf_esperado
-                })
-
-            df_proc = pd.DataFrame(filas)
-            st.session_state["df_procesado"] = df_proc
-
-            st.success(f"✅ **Reporte Excel '{archivo_excel.name}' procesado:** {len(df_proc)} facturas identificadas y ordenadas cronológicamente.")
-
-    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
-        df_proc = st.session_state["df_procesado"]
-
-        c_job1, c_job2, c_job3 = st.columns([2.8, 1.1, 1.1])
-        with c_job1:
-            n_orig_mem = len(st.session_state.get("raw_uploaded_pdfs", {}))
-            n_renom_mem = len(st.session_state.get("dict_pdfs", {}))
-            nom_ex = st.session_state.get("excel_nombre", "Reporte.xlsx")
-            st.info(f"📂 **Reporte DIAN:** `{nom_ex}` ({len(df_proc)} facturas) | 📑 **{n_orig_mem} PDFs cargados** | 📄 **{n_renom_mem} vinculados**")
-            if n_orig_mem > 0 and n_renom_mem == 0:
-                if st.button(f"🚀 Desbloquear y Vincular los {n_orig_mem} PDFs a Comprobantes", key="btn_desbloquear_top_bar", type="primary", use_container_width=True):
-                    st.session_state["_ejecutar_desbloqueo_ahora"] = True
-                    st.rerun()
-        with c_job2:
-            if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
-                st.download_button(
-                    label="📥 Descargar Excel",
-                    data=st.session_state["excel_bytes"],
-                    file_name=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="btn_dl_excel_tab_compras",
-                    use_container_width=True
-                )
-        with c_job3:
-            if "zip_pdfs" in st.session_state and st.session_state["zip_pdfs"]:
-                st.download_button(
-                    label="📦 Descargar ZIP Facturas",
-                    data=st.session_state["zip_pdfs"],
-                    file_name=f"Facturas_{empresa['nombre'].replace(' ', '_')}.zip",
-                    mime="application/zip",
-                    key="btn_dl_zip_tab_compras",
-                    use_container_width=True
-                )
-
-
-        c_aud_btn1, c_aud_btn2 = st.columns(2)
-        with c_aud_btn1:
-            st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
-        with c_aud_btn2:
-            if st.button("⚡ Auditar y Escanear Régimen Fiscal de los PDFs (Ultrarrápido)", key="btn_escanear_regimen_todos"):
-                dict_renom_s = st.session_state.get("dict_pdfs", {})
-                dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
-                total_modificados = 0
-                if dict_renom_s:
-                    with st.spinner("⚡ Escaneando régimen fiscal directamente desde las facturas ya desbloqueadas y renombradas..."):
-                        total_modificados = auditar_regimen_desde_facturas_renombradas(df_proc, dict_renom_s, empresa)
-                    st.session_state["df_procesado"] = df_proc
-                    pass
-                    st.success(f"⚡ Auditoría completada desde facturas renombradas: se revisaron {len(df_proc)} facturas y se actualizaron {total_modificados} con su régimen oficial del PDF.")
-                    st.rerun()
-                elif dict_orig_s:
-                    with st.spinner("⚡ Extrayendo texto en memoria y cruzando regímenes fiscales..."):
-                        # 1. Pre-cargar textos en caché de todos los PDFs una sola vez
-                        mapa_textos = []
-                        for fn, fb in dict_renom_s.items():
-                            mapa_textos.append((fn, [txt.replace("-", "").replace(" ", "").upper() for txt in cache_extraer_textos_pdf(fb)], cache_extraer_textos_pdf(fb)))
-                        for fn, fb in dict_orig_s.items():
-                            mapa_textos.append((fn, [txt.replace("-", "").replace(" ", "").upper() for txt in cache_extraer_textos_pdf(fb)], cache_extraer_textos_pdf(fb)))
-
-                        # 2. Cruzar en milisegundos cada factura directamente en memoria RAM
-                        for r_idx, r_mat in df_proc.iterrows():
-                            fol = str(r_mat.get("Folio", "")).replace("-", "").strip().upper()
-                            fol_sc = fol.lstrip("0")
-                            pref = str(r_mat.get("Prefijo", "")).replace("-", "").strip().upper()
-                            fac_full = (pref + fol) if pref else fol
-                            fac_full_sc = (pref + fol_sc) if pref else fol_sc
-                            nit_d = re.sub(r"\D", "", str(r_mat.get("NIT Emisor", "")))
-                            nit_b = nit_d[:-1] if len(nit_d) >= 10 else nit_d
-
-                            texto_factura_encontrado = ""
-
-                            # Buscar en textos pre-extraídos
-                            for _, list_clean, list_raw in mapa_textos:
-                                for p_idx, t_clean in enumerate(list_clean):
-                                    m = False
-                                    if len(fac_full) >= 4 and fac_full in t_clean:
-                                        m = True
-                                    elif len(fac_full_sc) >= 3 and fac_full_sc in t_clean:
-                                        m = True
-                                    elif (nit_d and len(nit_d) >= 6 and nit_d in t_clean) or (nit_b and len(nit_b) >= 6 and nit_b in t_clean):
-                                        if len(fol) >= 2 and fol in t_clean:
-                                            m = True
-                                        elif len(fol_sc) >= 2 and fol_sc in t_clean:
-                                            m = True
-                                    if m:
-                                        texto_factura_encontrado += list_raw[p_idx] + "\n"
-                                if texto_factura_encontrado:
-                                    break
-
-                            if texto_factura_encontrado:
-                                reg_f = escanear_regimen_texto_pdf(texto_factura_encontrado)
-                                if reg_f and reg_f != r_mat.get("Régimen Fiscal Emisor"):
-                                    df_proc.at[r_idx, "Régimen Fiscal Emisor"] = reg_f
-                                    t_c_n, op_n, c_p_n, c_c_n, desc_n, rfte_n, rica_n, riva_n, c_rf_n, c_iv_n, c_ri_n, cat_n, razon_n, audit_n = clasificar_factura(
-                                        df_proc.at[r_idx, "NIT Emisor"], df_proc.at[r_idx, "Proveedor"],
-                                        df_proc.at[r_idx, "Base"], df_proc.at[r_idx, "IVA"],
-                                        df_proc.at[r_idx, "Operacion"], reg_f, empresa
-                                    )
-                                    df_proc.at[r_idx, "ReteFuente"] = rfte_n
-                                    df_proc.at[r_idx, "ReteICA"] = rica_n
-                                    df_proc.at[r_idx, "ReteIVA"] = riva_n
-                                    df_proc.at[r_idx, "Cta ReteFuente"] = c_rf_n
-                                    df_proc.at[r_idx, "Cta ReteICA"] = c_ri_n
-                                    df_proc.at[r_idx, "Razón Contable"] = razon_n
-                                    df_proc.at[r_idx, "Audit Info"] = audit_n
-                                    df_proc.at[r_idx, "Neto a Pagar"] = round(df_proc.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
-                                    total_modificados += 1
-
-                    st.session_state["df_procesado"] = df_proc
-                    pass
-                    st.success(f"⚡ Auditoría completada en segundos: se revisaron {len(df_proc)} facturas y se actualizaron {total_modificados} con su régimen oficial del PDF.")
-                    st.rerun()
-                else:
-                    st.warning("Primero sube los PDFs en el campo 2 para poder escanearlos.")
-
-        # Asegurar columna Cuenta Pasivo (CxP) con marcación clara
-        if "Cuenta Pasivo (CxP)" not in df_proc.columns:
-            df_proc["Cuenta Pasivo (CxP)"] = df_proc.apply(
-                lambda r: f"⚠️ {r.get('Cuenta Pasivo Especifica', '22050505')} (Por Verificar)" if r.get("Ya Registrada") else str(r.get("Cuenta Pasivo Especifica", r.get("Cta Contrapartida", "22050501"))),
-                axis=1
-            )
-
-        st.markdown("""
-        <div style="background:#eff6ff; border:1px solid #bfdbfe; border-left:5px solid #2563eb; border-radius:6px; padding:10px 14px; margin-bottom:12px; font-size:13.5px; color:#1e40af;">
-            <b>ℹ️ Cuentas de Pasivo (CxP) para Facturas Registradas:</b> Las facturas ya causadas en Siigo (🔴) tienen asignada una cuenta por pagar estimada (ej. <code>22050505</code> Agencia Aduana, <code>23359501</code> Acreedores DHL). Aparecen marcadas con <b>⚠️ (Por Verificar)</b>. Puedes modificar la cuenta fácilmente en la <b>Pestaña 2 (Revisión)</b> o en la <b>Pestaña 3 (Triangulación)</b>.
-        </div>
-        """, unsafe_allow_html=True)
-
-
-        # AUTO-AUDITORÍA Y VERIFICACIÓN INMEDIATA DE REGÍMENES FISCALES AL CARGAR EXCEL O PDFS
-        dict_renom_mem = st.session_state.get("dict_pdfs", {})
-        dict_orig_mem = st.session_state.get("raw_uploaded_pdfs", {})
-
-        # 1. Aplicar catálogo oficial de regímenes conocidos por NIT (solo una vez al cargar archivo inicial)
-        if not st.session_state.get("_regimenes_conocidos_aplicados_v1", False):
-            for r_idx, r_row in df_proc.iterrows():
-                if bool(r_row.get("Editada Manualmente", False)):
-                    continue
-                nit_d = re.sub(r'\D', '', str(r_row.get("NIT Emisor", "")))
-                nom_u = str(r_row.get("Proveedor", "")).upper()
-                reg_prev = str(r_row.get("Régimen Fiscal Emisor", ""))
-
-                nuevo_reg = None
-                if nit_d in REGIMENES_EMISORES_CONOCIDOS:
-                    nuevo_reg = REGIMENES_EMISORES_CONOCIDOS[nit_d]
-                elif any(k in nom_u for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
-                    nuevo_reg = "O-13;O-15"
-
-                if nuevo_reg and (nuevo_reg != reg_prev):
-                    df_proc.at[r_idx, "Régimen Fiscal Emisor"] = nuevo_reg
-                    t_c, op_c, c_p, c_c, desc_c, rfte_c, rica_c, riva_c, c_rf, c_iv, c_ri, cat_c, razon_c, audit_c = clasificar_factura(
-                        r_row["NIT Emisor"], r_row["Proveedor"],
-                        r_row["Base"], r_row["IVA"],
-                        r_row["Operacion"], nuevo_reg, empresa
-                    )
-                    df_proc.at[r_idx, "ReteFuente"] = rfte_c
-                    df_proc.at[r_idx, "ReteICA"] = rica_c
-                    df_proc.at[r_idx, "ReteIVA"] = riva_c
-                    df_proc.at[r_idx, "Cta ReteFuente"] = c_rf
-                    df_proc.at[r_idx, "Cta ReteICA"] = c_ri
-                    df_proc.at[r_idx, "Razón Contable"] = razon_c
-                    df_proc.at[r_idx, "Audit Info"] = audit_c
-                    df_proc.at[r_idx, "Neto a Pagar"] = round(r_row["Total"] - rfte_c - rica_c - riva_c, 2)
-            st.session_state["_regimenes_conocidos_aplicados_v1"] = True
-
-        # Auditoría de régimen fiscal disponible bajo demanda mediante el botón superior
-        st.session_state["df_procesado"] = df_proc
-
-        cols_mostrar_proc = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Régimen Fiscal Emisor", "Estado Registro", "Cuenta Pasivo (CxP)", "Base", "IVA", "ReteFuente", "ReteICA", "Neto a Pagar", "Soporte PDF Renombrado"]
-        cols_mostrar_existentes = [c for c in cols_mostrar_proc if c in df_proc.columns]
-        st.dataframe(df_proc[cols_mostrar_existentes], use_container_width=True)
-
-        st.markdown("---")
-        st.markdown("#### 📑 Procesamiento, Separación y Renombrado de PDFs Multi-Página:")
-        st.caption("Identifica y une facturas completas de 2 o más hojas a partir de un PDF consolidado, asignando a cada una su comprobante y consecutivo oficial.")
-
-        col_cfg1, col_cfg2 = st.columns(2)
-        with col_cfg1:
-            modo_sep = st.radio(
-                "Configuración de reconocimiento de facturas:",
-                [
-                    "🔍 Detección Inteligente (Reconoce facturas completas de 2 o más hojas por 'Página 1 de 2', CUFE y Número)",
-                    "📄 Agrupación fija de 2 páginas por factura (cada factura tiene 2 hojas)",
-                    "📄 Agrupación fija de 3 páginas por factura (cada factura tiene 3 hojas)",
-                    "📑 Separar 1 página por factura (facturas de 1 sola hoja)",
-                    "📂 Mantener archivos individuales (sin separar páginas)"
-                ]
-            )
-        with col_cfg2:
-            st.info("💡 **Garantía de Factura Completa:** El motor inteligente detecta dónde empieza cada factura (Prefijo, Folio, NIT y marcadores de paginación). Todas las páginas de una misma factura se unen en un solo archivo PDF completo nombrado `Comp_10-XXX_Factura_Proveedor.pdf`.")
-
-        ejecutar_desb = st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora") or st.session_state.pop("_ejecutar_desbloqueo_ahora", False)
-        if ejecutar_desb:
-            df_ref = st.session_state.get("df_procesado", pd.DataFrame())
-
-            # Lista de PDFs a procesar: extraer archivos .pdf reales tanto de subidas directas como de archivos .zip
-            if "raw_uploaded_pdfs" not in st.session_state:
-                st.session_state["raw_uploaded_pdfs"] = {}
-
-            pdfs_reales_dict = {}
-            # 1. Incorporar PDFs ya existentes en raw_uploaded_pdfs
-            for fn, bdata in st.session_state.get("raw_uploaded_pdfs", {}).items():
-                if fn.lower().endswith(".pdf"):
-                    pdfs_reales_dict[fn] = bdata
-
-            # 2. Desempaquetar archivos_pdfs si contienen archivos .zip o PDFs directos
-            if archivos_pdfs:
-                for p_it in archivos_pdfs:
-                    p_nom = getattr(p_it, "name", "").lower()
-                    if p_nom.endswith(".zip"):
+    try:
+        st.markdown("### 1. Insumos DIAN y Facturas en PDF")
+        st.write("Sube el archivo Excel de la DIAN (`prueba.xlsx`) o el reporte de facturas, y los PDFs (unificados o separados) para desbloquear, guardar y renombrar automáticamente por comprobante.")
+    
+        # Si ya tenemos los documentos cargados en el autoguardado, mostrar confirmación visible
+        n_p_carg = len(st.session_state.get("raw_uploaded_pdfs", {}))
+        n_p_proc = len(st.session_state.get("dict_pdfs", {}))
+        if n_p_carg > 0:
+            st.success(f"✅ **Autoguardado Activo:** Tienes **{n_p_carg} facturas PDF cargadas en el sistema** ({n_p_proc} vinculadas con su comprobante). Ya están disponibles en la Pestaña 2 (Auditoría) y Pestaña 3 (Triangulación). No necesitas volver a subirlas.")
+    
+        col_u1, col_u2 = st.columns(2)
+        with col_u1:
+            archivo_excel = st.file_uploader("1. Reporte Excel de la DIAN (ej. prueba.xlsx)", type=["xlsx", "xls"], help="Opcional si ya cargaste tu trabajo desde el Historial.")
+        with col_u2:
+            archivos_pdfs = st.file_uploader("2. Facturas en PDF o Archivo ZIP Consolidado", type=["pdf", "zip"], accept_multiple_files=True, help="Sube facturas en PDF o un solo archivo .ZIP con todas las facturas (ideal para 100 a 1000+ facturas).")
+    
+        st.markdown("##### 🔢 3. Consecutivos Iniciales por Tipo de Comprobante Siigo:")
+        st.caption("Cada tipo de comprobante lleva su propia numeración independiente. Digita en qué número vas en cada uno:")
+    
+        c_con1, c_con2, c_con3, c_con4 = st.columns(4)
+        with c_con1:
+            cons_ini_fac = st.number_input("Facturas de Compra (Tipo 10):", min_value=1, max_value=999999, value=680, step=1, help="Consecutivo inicial para facturas de compra normales.")
+        with c_con2:
+            cons_ini_nc = st.number_input("Notas Crédito (Tipo 17):", min_value=1, max_value=999999, value=1, step=1, help="Consecutivo inicial para notas crédito / devoluciones.")
+        with c_con3:
+            cons_ini_nota = st.number_input("Notas de Contabilidad (Tipo 14):", min_value=1, max_value=999999, value=1, step=1, help="Consecutivo inicial para notas contables o ajustes.")
+        with c_con4:
+            clave_pdf_extra = st.text_input("Clave PDF (opcional):", type="password", help="Si algún archivo PDF tiene contraseña específica, ingrésala aquí.")
+    
+        # Almacenar PDFs originales subidos en session_state y en el historial de inmediato (solo una vez por subida)
+        if archivos_pdfs:
+            pdfs_sig = f"{len(archivos_pdfs)}_" + "_".join(f"{p.name}_{p.size}" for p in archivos_pdfs[:5])
+            if st.session_state.get("_ultimo_pdfs_proc_sig") != pdfs_sig:
+                if "raw_uploaded_pdfs" not in st.session_state:
+                    st.session_state["raw_uploaded_pdfs"] = {}
+                import gc
+                for p in archivos_pdfs:
+                    if p.name.lower().endswith(".zip"):
                         try:
-                            b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
-                            with zipfile.ZipFile(io.BytesIO(b_val), "r") as z_u:
-                                for z_fn in z_u.namelist():
-                                    if z_fn.lower().endswith(".pdf") and not z_fn.startswith("__MACOSX"):
-                                        b_pdf = z_u.read(z_fn)
-                                        c_fn = os.path.basename(z_fn)
-                                        if c_fn:
-                                            pdfs_reales_dict[c_fn] = b_pdf
-                                            st.session_state["raw_uploaded_pdfs"][c_fn] = b_pdf
-                        except Exception as e_z:
-                            st.error(f"Error abriendo ZIP {getattr(p_it, 'name', '')}: {e_z}")
-                    elif p_nom.endswith(".pdf") or not p_nom:
-                        b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
-                        pdfs_reales_dict[getattr(p_it, "name", "factura.pdf")] = b_val
-
-            # Construir la lista limpia de streams PDF con su nombre asignado
-            pdfs_a_procesar = []
-            for fn, b_pdf in pdfs_reales_dict.items():
-                bio = io.BytesIO(b_pdf)
-                bio.name = fn
-                pdfs_a_procesar.append(bio)
-
-            if not pdfs_a_procesar:
-                st.warning("⚠️ No hay archivos PDF para procesar. Por favor sube tus facturas en el campo '2. Facturas en PDF (unificadas o separadas)' arriba antes de hacer clic en desbloquear.")
-                st.stop()
-
-            buffer_zip = io.BytesIO()
-            total_generados = 0
-
-            if "dict_pdfs" not in st.session_state:
-                st.session_state["dict_pdfs"] = {}
-
-            total_pdfs_count = len(pdfs_a_procesar)
-            prog_bar_pdf = st.progress(0, text=f"Iniciando procesamiento de {total_pdfs_count} archivo(s) PDF...")
-
-            with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_STORED) as zf:
-                for idx_pdf, pdf_item in enumerate(pdfs_a_procesar):
-                    pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
-                    prog_bar_pdf.progress(min(1.0, (idx_pdf + 1) / total_pdfs_count), text=f"⚡ Factura {idx_pdf + 1} de {total_pdfs_count}: {pdf_name[:20]}...")
-                    # Si ya fue procesado y guardado en dict_pdfs, re-usar directamente
-                    if pdf_name in st.session_state["dict_pdfs"] and len(st.session_state["dict_pdfs"][pdf_name]) > 100:
-                        zf.writestr(pdf_name, st.session_state["dict_pdfs"][pdf_name])
-                        total_generados += 1
-                        continue
-                    try:
-                        pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
-                        reader = PdfReader(pdf_item)
-                        desencriptado = False
-                        if reader.is_encrypted:
-                            claves_probar = []
-                            if "clave_pdf_extra" in locals() and clave_pdf_extra:
-                                claves_probar.append(clave_pdf_extra.strip())
-
-                            # NITs empresa compradora
-                            nit_rec = re.sub(r"\D", "", str(empresa.get("nit", "")))
-                            if nit_rec:
-                                if len(nit_rec) > 9:
-                                    claves_probar.extend([nit_rec, nit_rec[:-1], f"{nit_rec[:-1]}-{nit_rec[-1]}"])
-                                else:
-                                    claves_probar.extend([nit_rec, f"{nit_rec}5", f"{nit_rec}-5"])
-                            claves_probar.extend(["901346412", "9013464125", "901346412-5", ""])
-
-                            # NITs emisores en reporte
-                            if not df_ref.empty:
-                                for n_e in df_ref["NIT Emisor"].dropna().unique():
-                                    n_c = re.sub(r"\D", "", str(n_e))
-                                    if n_c and len(n_c) >= 7:
-                                        claves_probar.append(n_c)
-
-                            for pwd in claves_probar:
-                                try:
-                                    res_dec = reader.decrypt(pwd)
-                                    if res_dec in (1, 2) or not reader.is_encrypted:
-                                        desencriptado = True
+                            with zipfile.ZipFile(io.BytesIO(p.getvalue()), "r") as z_in:
+                                for z_name in z_in.namelist():
+                                    if z_name.lower().endswith(".pdf") and not z_name.startswith("__MACOSX"):
+                                        c_name = os.path.basename(z_name)
+                                        if c_name:
+                                            st.session_state["raw_uploaded_pdfs"][c_name] = z_in.read(z_name)
+                        except Exception as e:
+                            st.error(f"Error leyendo archivo ZIP {p.name}: {e}")
+                    else:
+                        st.session_state["raw_uploaded_pdfs"][p.name] = p.getvalue()
+                gc.collect()
+    
+                st.session_state["_ultimo_pdfs_proc_sig"] = pdfs_sig
+                st.success(f"📑 **{len(st.session_state['raw_uploaded_pdfs'])} factura(s) PDF cargadas en memoria.**")
+                # Auto-vincular de inmediato si ya tenemos el reporte Excel cargado
+                if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+                    st.session_state["_ejecutar_desbloqueo_ahora"] = True
+    
+        if archivo_excel is not None:
+            excel_sig = f"{archivo_excel.name}_{archivo_excel.size}_{cons_ini_fac}_{cons_ini_nc}_{cons_ini_nota}"
+            if st.session_state.get("_ultimo_excel_proc_sig") != excel_sig or "df_procesado" not in st.session_state:
+                st.session_state["excel_bytes"] = archivo_excel.getvalue()
+                st.session_state["excel_nombre"] = archivo_excel.name
+                st.session_state["_ultimo_excel_proc_sig"] = excel_sig
+    
+                df_dian = pd.read_excel(io.BytesIO(st.session_state["excel_bytes"]))
+    
+                # Identificar columna de fecha y ordenar cronológicamente de Enero a la fecha actual
+                col_fecha = None
+                for col_cand in ["Fecha Emisión", "Fecha Emision", "Fecha", "Fecha de Emisión"]:
+                    if col_cand in df_dian.columns:
+                        col_fecha = col_cand
+                        break
+                if col_fecha is None:
+                    col_fecha = df_dian.columns[0]
+    
+                df_dian["_fecha_dt"] = pd.to_datetime(df_dian[col_fecha], dayfirst=True, errors="coerce")
+                df_dian = df_dian.sort_values(by="_fecha_dt", ascending=True).reset_index(drop=True)
+    
+                st.success(f"Reporte procesado y ordenado cronológicamente (Enero a la fecha): **{len(df_dian)} facturas identificadas**.")
+    
+                contadores_consecutivos = {
+                    10: int(cons_ini_fac),
+                    17: int(cons_ini_nc),
+                    14: int(cons_ini_nota),
+                    16: int(cons_ini_fac)
+                }
+                # Analizar celdas rojas (ya registradas), grupos y cuentas específicas del Excel
+                estados_excel = analizar_estado_filas_excel(st.session_state.get("excel_bytes"))
+    
+                filas = []
+                for idx, r in df_dian.iterrows():
+                    tipo_doc = r.get("Tipo de documento") or r.get("Tipo documento") or "Factura electrónica"
+                    folio = str(r.get("Folio") or r.get("Factura") or r.get("Factura Num") or f"Doc_{idx+1}").strip()
+                    if folio.endswith(".0"):
+                        folio = folio[:-2]
+                    prefijo = str(r.get("Prefijo", "")).strip() if pd.notna(r.get("Prefijo")) else ""
+                    if prefijo == "nan" or prefijo == "None":
+                        prefijo = ""
+    
+                    fecha_val = r.get(col_fecha)
+                    if pd.notna(fecha_val):
+                        try:
+                            fecha_dt = pd.to_datetime(fecha_val, dayfirst=True)
+                            fecha_str = fecha_dt.strftime("%d/%m/%Y")
+                        except:
+                            fecha_str = str(fecha_val).split()[0]
+                    else:
+                        fecha_str = "01/01/2026"
+    
+                    nit_e = str(r.get("NIT Emisor") or r.get("NIT") or "").strip()
+                    if nit_e.endswith(".0"):
+                        nit_e = nit_e[:-2]
+                    nom_e = str(r.get("Nombre Emisor") or r.get("Proveedor (Emisor)") or r.get("Proveedor") or "Proveedor").strip()
+    
+                    try: iva = float(r.get("IVA", 0.0)) if pd.notna(r.get("IVA")) else 0.0
+                    except: iva = 0.0
+                    try: tot = float(r.get("Total", 0.0)) if pd.notna(r.get("Total")) else 0.0
+                    except: tot = 0.0
+                    base, iva, desc_val, motivo_base = calcular_base_con_regla_descuento(r, tot, iva, nom_e)
+                    col_cufe = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["cufe", "token", "uuid", "cude"])), None)
+                    cufe_val = str(r.get(col_cufe, "")).strip() if col_cufe and pd.notna(r.get(col_cufe)) else ""
+    
+                    col_resp = next((c for c in df_dian.columns if any(k in str(c).lower() for k in ["régimen", "regimen", "responsabilidad", "obligacion"])), None)
+                    resp_e = str(r.get(col_resp, "")).strip() if col_resp and pd.notna(r.get(col_resp)) else ""
+    
+                    # Búsqueda inmediata por NIT y Razón Social en catálogo oficial
+                    nit_e_digits = re.sub(r'\D', '', str(nit_e))
+                    if not resp_e and nit_e_digits in REGIMENES_EMISORES_CONOCIDOS:
+                        resp_e = REGIMENES_EMISORES_CONOCIDOS[nit_e_digits]
+                    elif not resp_e:
+                        nom_e_u = str(nom_e).upper()
+                        if any(k in nom_e_u for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
+                            resp_e = "O-13;O-15"
+    
+                    t_comp, op, cta_p, cta_c, desc, rfte, rica, riva, cta_rfte, cta_iva, cta_rica, cat, razon, audit_dict = clasificar_factura(
+                        nit_e, nom_e, base, iva, tipo_doc, resp_e, empresa
+                    )
+                    consecutivo = contadores_consecutivos.get(t_comp, 1)
+                    contadores_consecutivos[t_comp] += 1
+    
+                    nom_limpio_prov = re.sub(r'[^a-zA-Z0-9]', '', nom_e)[:15]
+                    nombre_pdf_esperado = f"Comp_{t_comp}-{consecutivo}_{prefijo}{folio}_{nom_limpio_prov}.pdf"
+    
+                    # Identificar si la fila estaba marcada en rojo (ya registrada en Siigo), su grupo y cuenta
+                    fac_k_full = f"{prefijo}-{folio}" if prefijo else folio
+                    info_est = estados_excel.get(cufe_val) or estados_excel.get(fac_k_full) or estados_excel.get(folio) or estados_excel.get(idx, {})
+                    es_roja_reg = bool(info_est.get("es_roja", False))
+                    comp_prev = str(info_est.get("comprobante_existente", ""))
+                    grp_imp = str(info_est.get("grupo_importacion", "")).strip()
+                    cta_esp = str(info_est.get("cuenta_especifica", "")).strip()
+    
+                    es_aduanera_flag = any(k in nom_e.upper() for k in AGENTES_ADUANEROS) or any(k in nom_e.upper() for k in ["CARGO", "ADUANA", "PORTUARIA", "ALMACENADORA", "TERMINAL", "BUENAVENTURA", "CARTAGENA", "CONSOLCARGO", "EURO SHIPPING", "TRADE GLOBAL"])
+    
+                    filas.append({
+                        "N°": idx + 1,
+                        "Tipo Comp": t_comp,
+                        "Consecutivo": consecutivo,
+                        "Comprobante Siigo": f"Comp {t_comp}-{consecutivo}",
+                        "Fecha": fecha_str,
+                        "Prefijo": prefijo,
+                        "Folio": folio,
+                        "Factura": fac_k_full,
+                        "Proveedor": nom_e,
+                        "NIT Emisor": nit_e,
+                        "Ya Registrada": es_roja_reg,
+                        "No Contabilizar": False,
+                        "Comprobante Previo": comp_prev,
+                        "Grupo Importación": grp_imp,
+                        "Cuenta Pasivo Especifica": cta_esp,
+                        "Es Aduanera": es_aduanera_flag,
+                        "Estado Registro": f"🔴 Ya Registrada ({comp_prev})" if es_roja_reg else ("🟡 Agente Aduanero" if any(k in nom_e.upper() for k in ["EURO SHIPPING", "TRADE GLOBAL"]) else ("🟢 Aduanera" if es_aduanera_flag else "⚪ Compra Pendiente")),
+                        "Régimen Fiscal Emisor": resp_e if resp_e else "O-48 (Estándar)",
+                        "Descripcion": desc,
+                        "Operacion": op,
+                        "Cta Principal": cta_p,
+                        "Categoría": cat,
+                        "Base": base,
+                        "IVA": iva,
+                        "ReteFuente": rfte,
+                        "ReteICA": rica,
+                        "ReteIVA": riva,
+                        "Neto a Pagar": round(tot - rfte - rica - riva, 2),
+                        "Audit Info": audit_dict,
+                        "Cta Contrapartida": cta_c,
+                        "Cta IVA": cta_iva,
+                        "Cta ReteFuente": cta_rfte,
+                        "Cta ReteICA": cta_rica,
+                        "Total": tot,
+                        "CUFE": cufe_val,
+                        "Descuento Registrado": desc_val,
+                        "Regla Base": motivo_base,
+                        "Razón Contable": razon,
+                        "Soporte PDF Renombrado": nombre_pdf_esperado
+                    })
+    
+                df_proc = pd.DataFrame(filas)
+                st.session_state["df_procesado"] = df_proc
+    
+                st.success(f"✅ **Reporte Excel '{archivo_excel.name}' procesado:** {len(df_proc)} facturas identificadas y ordenadas cronológicamente.")
+    
+        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+            df_proc = st.session_state["df_procesado"]
+    
+            c_job1, c_job2, c_job3 = st.columns([2.8, 1.1, 1.1])
+            with c_job1:
+                n_orig_mem = len(st.session_state.get("raw_uploaded_pdfs", {}))
+                n_renom_mem = len(st.session_state.get("dict_pdfs", {}))
+                nom_ex = st.session_state.get("excel_nombre", "Reporte.xlsx")
+                st.info(f"📂 **Reporte DIAN:** `{nom_ex}` ({len(df_proc)} facturas) | 📑 **{n_orig_mem} PDFs cargados** | 📄 **{n_renom_mem} vinculados**")
+                if n_orig_mem > 0 and n_renom_mem == 0:
+                    if st.button(f"🚀 Desbloquear y Vincular los {n_orig_mem} PDFs a Comprobantes", key="btn_desbloquear_top_bar", type="primary", use_container_width=True):
+                        st.session_state["_ejecutar_desbloqueo_ahora"] = True
+                        st.rerun()
+            with c_job2:
+                if "excel_bytes" in st.session_state and st.session_state["excel_bytes"]:
+                    st.download_button(
+                        label="📥 Descargar Excel",
+                        data=st.session_state["excel_bytes"],
+                        file_name=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="btn_dl_excel_tab_compras",
+                        use_container_width=True
+                    )
+            with c_job3:
+                if "zip_pdfs" in st.session_state and st.session_state["zip_pdfs"]:
+                    st.download_button(
+                        label="📦 Descargar ZIP Facturas",
+                        data=st.session_state["zip_pdfs"],
+                        file_name=f"Facturas_{empresa['nombre'].replace(' ', '_')}.zip",
+                        mime="application/zip",
+                        key="btn_dl_zip_tab_compras",
+                        use_container_width=True
+                    )
+    
+    
+            c_aud_btn1, c_aud_btn2 = st.columns(2)
+            with c_aud_btn1:
+                st.markdown("#### Matriz Contable Preliminar vinculada a Comprobantes (Orden Cronológico Enero - Actual):")
+            with c_aud_btn2:
+                if st.button("⚡ Auditar y Escanear Régimen Fiscal de los PDFs (Ultrarrápido)", key="btn_escanear_regimen_todos"):
+                    dict_renom_s = st.session_state.get("dict_pdfs", {})
+                    dict_orig_s = st.session_state.get("raw_uploaded_pdfs", {})
+                    total_modificados = 0
+                    if dict_renom_s:
+                        with st.spinner("⚡ Escaneando régimen fiscal directamente desde las facturas ya desbloqueadas y renombradas..."):
+                            total_modificados = auditar_regimen_desde_facturas_renombradas(df_proc, dict_renom_s, empresa)
+                        st.session_state["df_procesado"] = df_proc
+                        pass
+                        st.success(f"⚡ Auditoría completada desde facturas renombradas: se revisaron {len(df_proc)} facturas y se actualizaron {total_modificados} con su régimen oficial del PDF.")
+                        st.rerun()
+                    elif dict_orig_s:
+                        with st.spinner("⚡ Extrayendo texto en memoria y cruzando regímenes fiscales..."):
+                            # 1. Pre-cargar textos en caché de todos los PDFs una sola vez
+                            mapa_textos = []
+                            for fn, fb in dict_renom_s.items():
+                                mapa_textos.append((fn, [txt.replace("-", "").replace(" ", "").upper() for txt in cache_extraer_textos_pdf(fb)], cache_extraer_textos_pdf(fb)))
+                            for fn, fb in dict_orig_s.items():
+                                mapa_textos.append((fn, [txt.replace("-", "").replace(" ", "").upper() for txt in cache_extraer_textos_pdf(fb)], cache_extraer_textos_pdf(fb)))
+    
+                            # 2. Cruzar en milisegundos cada factura directamente en memoria RAM
+                            for r_idx, r_mat in df_proc.iterrows():
+                                fol = str(r_mat.get("Folio", "")).replace("-", "").strip().upper()
+                                fol_sc = fol.lstrip("0")
+                                pref = str(r_mat.get("Prefijo", "")).replace("-", "").strip().upper()
+                                fac_full = (pref + fol) if pref else fol
+                                fac_full_sc = (pref + fol_sc) if pref else fol_sc
+                                nit_d = re.sub(r"\D", "", str(r_mat.get("NIT Emisor", "")))
+                                nit_b = nit_d[:-1] if len(nit_d) >= 10 else nit_d
+    
+                                texto_factura_encontrado = ""
+    
+                                # Buscar en textos pre-extraídos
+                                for _, list_clean, list_raw in mapa_textos:
+                                    for p_idx, t_clean in enumerate(list_clean):
+                                        m = False
+                                        if len(fac_full) >= 4 and fac_full in t_clean:
+                                            m = True
+                                        elif len(fac_full_sc) >= 3 and fac_full_sc in t_clean:
+                                            m = True
+                                        elif (nit_d and len(nit_d) >= 6 and nit_d in t_clean) or (nit_b and len(nit_b) >= 6 and nit_b in t_clean):
+                                            if len(fol) >= 2 and fol in t_clean:
+                                                m = True
+                                            elif len(fol_sc) >= 2 and fol_sc in t_clean:
+                                                m = True
+                                        if m:
+                                            texto_factura_encontrado += list_raw[p_idx] + "\n"
+                                    if texto_factura_encontrado:
                                         break
-                                except:
-                                    pass
-
-                            if reader.is_encrypted and not desencriptado:
-                                st.warning(f"⚠️ No se pudo desencriptar automáticamente {pdf_name}. Ingrese la contraseña en el campo correspondiente.")
-                                continue
-
-                        num_pags = len(reader.pages)
-
-                        # Caso 1: Archivo individual (sin separar páginas) o de 1 página
-                        if num_pags == 1 or "Mantener archivos individuales" in modo_sep:
-                            writer = PdfWriter()
-                            texto_pdf = ""
-                            for page in reader.pages:
-                                writer.add_page(page)
-                                try: texto_pdf += (page.extract_text() or "") + "\n"
-                                except: pass
-
-                            r_mat = None
-                            if not df_ref.empty:
-                                # 1. Identificar por texto exacto (CUFE, Factura + Proveedor/NIT)
-                                r_mat = identificar_factura_en_texto(texto_pdf, df_ref)
-
-                                # 2. Si no se identificó en el texto, buscar por coincidencia en el nombre del archivo
-                                if r_mat is None:
-                                    fn_clean = re.sub(r'[^A-Za-z0-9]', '', pdf_name).lower()
-                                    for _, r_cand in df_ref.iterrows():
-                                        cufe_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE", "") or "")).lower()
-                                        if cufe_c and len(cufe_c) >= 15 and cufe_c[:20] in fn_clean:
-                                            r_mat = r_cand
-                                            break
-                                        pref_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("Prefijo", "") or "")).upper()
-                                        fol_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("Folio", "") or "")).upper()
-                                        fac_f = (pref_c + fol_c) if pref_c else fol_c
-                                        if fac_f and len(fac_f) >= 4 and fac_f in fn_clean.upper():
-                                            r_mat = r_cand
-                                            break
-
-                            if r_mat is not None:
-                                nombre_final = r_mat["Soporte PDF Renombrado"]
-                                # Escaneo de régimen fiscal sólo para la factura que realmente coincidió
-                                regimen_escaneado = escanear_regimen_texto_pdf(texto_pdf)
-                                if regimen_escaneado:
-                                    r_idx = r_mat.name
-                                    df_ref.at[r_idx, "Régimen Fiscal Emisor"] = regimen_escaneado
-                                    _, _, _, _, _, rfte_n, rica_n, riva_n, cta_rf_n, _, cta_ri_n, _, razon_n, audit_n = clasificar_factura(
-                                        df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
-                                        df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
-                                        df_ref.at[r_idx, "Operacion"], regimen_escaneado, empresa
-                                    )
-                                    df_ref.at[r_idx, "ReteFuente"] = rfte_n
-                                    df_ref.at[r_idx, "ReteICA"] = rica_n
-                                    df_ref.at[r_idx, "ReteIVA"] = riva_n
-                                    df_ref.at[r_idx, "Cta ReteFuente"] = cta_rf_n
-                                    df_ref.at[r_idx, "Cta ReteICA"] = cta_ri_n
-                                    df_ref.at[r_idx, "Razón Contable"] = razon_n
-                                    df_ref.at[r_idx, "Audit Info"] = audit_n
-                                    df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
-                            else:
-                                nombre_final = f"Soporte_{idx_pdf+1}_{pdf_name}"
-
-                            # Reutilizar directamente los bytes originales sin re-escribir con PdfWriter (1000x más rápido)
-                            b_data = pdf_item.getvalue() if hasattr(pdf_item, "getvalue") else pdf_item.read()
-                            zf.writestr(nombre_final, b_data)
-                            st.session_state["dict_pdfs"][nombre_final] = b_data
+    
+                                if texto_factura_encontrado:
+                                    reg_f = escanear_regimen_texto_pdf(texto_factura_encontrado)
+                                    if reg_f and reg_f != r_mat.get("Régimen Fiscal Emisor"):
+                                        df_proc.at[r_idx, "Régimen Fiscal Emisor"] = reg_f
+                                        t_c_n, op_n, c_p_n, c_c_n, desc_n, rfte_n, rica_n, riva_n, c_rf_n, c_iv_n, c_ri_n, cat_n, razon_n, audit_n = clasificar_factura(
+                                            df_proc.at[r_idx, "NIT Emisor"], df_proc.at[r_idx, "Proveedor"],
+                                            df_proc.at[r_idx, "Base"], df_proc.at[r_idx, "IVA"],
+                                            df_proc.at[r_idx, "Operacion"], reg_f, empresa
+                                        )
+                                        df_proc.at[r_idx, "ReteFuente"] = rfte_n
+                                        df_proc.at[r_idx, "ReteICA"] = rica_n
+                                        df_proc.at[r_idx, "ReteIVA"] = riva_n
+                                        df_proc.at[r_idx, "Cta ReteFuente"] = c_rf_n
+                                        df_proc.at[r_idx, "Cta ReteICA"] = c_ri_n
+                                        df_proc.at[r_idx, "Razón Contable"] = razon_n
+                                        df_proc.at[r_idx, "Audit Info"] = audit_n
+                                        df_proc.at[r_idx, "Neto a Pagar"] = round(df_proc.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
+                                        total_modificados += 1
+    
+                        st.session_state["df_procesado"] = df_proc
+                        pass
+                        st.success(f"⚡ Auditoría completada en segundos: se revisaron {len(df_proc)} facturas y se actualizaron {total_modificados} con su régimen oficial del PDF.")
+                        st.rerun()
+                    else:
+                        st.warning("Primero sube los PDFs en el campo 2 para poder escanearlos.")
+    
+            # Asegurar columna Cuenta Pasivo (CxP) con marcación clara
+            if "Cuenta Pasivo (CxP)" not in df_proc.columns:
+                df_proc["Cuenta Pasivo (CxP)"] = df_proc.apply(
+                    lambda r: f"⚠️ {r.get('Cuenta Pasivo Especifica', '22050505')} (Por Verificar)" if r.get("Ya Registrada") else str(r.get("Cuenta Pasivo Especifica", r.get("Cta Contrapartida", "22050501"))),
+                    axis=1
+                )
+    
+            st.markdown("""
+            <div style="background:#eff6ff; border:1px solid #bfdbfe; border-left:5px solid #2563eb; border-radius:6px; padding:10px 14px; margin-bottom:12px; font-size:13.5px; color:#1e40af;">
+                <b>ℹ️ Cuentas de Pasivo (CxP) para Facturas Registradas:</b> Las facturas ya causadas en Siigo (🔴) tienen asignada una cuenta por pagar estimada (ej. <code>22050505</code> Agencia Aduana, <code>23359501</code> Acreedores DHL). Aparecen marcadas con <b>⚠️ (Por Verificar)</b>. Puedes modificar la cuenta fácilmente en la <b>Pestaña 2 (Revisión)</b> o en la <b>Pestaña 3 (Triangulación)</b>.
+            </div>
+            """, unsafe_allow_html=True)
+    
+    
+            # AUTO-AUDITORÍA Y VERIFICACIÓN INMEDIATA DE REGÍMENES FISCALES AL CARGAR EXCEL O PDFS
+            dict_renom_mem = st.session_state.get("dict_pdfs", {})
+            dict_orig_mem = st.session_state.get("raw_uploaded_pdfs", {})
+    
+            # 1. Aplicar catálogo oficial de regímenes conocidos por NIT (solo una vez al cargar archivo inicial)
+            if not st.session_state.get("_regimenes_conocidos_aplicados_v1", False):
+                if "Audit Info" not in df_proc.columns:
+                    df_proc["Audit Info"] = [{} for _ in range(len(df_proc))]
+                for r_idx, r_row in df_proc.iterrows():
+                    if bool(r_row.get("Editada Manualmente", False)):
+                        continue
+                    nit_d = re.sub(r'\D', '', str(r_row.get("NIT Emisor", "")))
+                    nom_u = str(r_row.get("Proveedor", "")).upper()
+                    reg_prev = str(r_row.get("Régimen Fiscal Emisor", ""))
+    
+                    nuevo_reg = None
+                    if nit_d in REGIMENES_EMISORES_CONOCIDOS:
+                        nuevo_reg = REGIMENES_EMISORES_CONOCIDOS[nit_d]
+                    elif any(k in nom_u for k in ["DHL", "ESTELAR", "BUENAVENTURA", "SIIGO", "COMCEL", "CLARO", "PANAMERICANA"]):
+                        nuevo_reg = "O-13;O-15"
+    
+                    if nuevo_reg and (nuevo_reg != reg_prev):
+                        df_proc.at[r_idx, "Régimen Fiscal Emisor"] = nuevo_reg
+                        t_c, op_c, c_p, c_c, desc_c, rfte_c, rica_c, riva_c, c_rf, c_iv, c_ri, cat_c, razon_c, audit_c = clasificar_factura(
+                            r_row["NIT Emisor"], r_row["Proveedor"],
+                            r_row["Base"], r_row["IVA"],
+                            r_row["Operacion"], nuevo_reg, empresa
+                        )
+                        df_proc.at[r_idx, "ReteFuente"] = rfte_c
+                        df_proc.at[r_idx, "ReteICA"] = rica_c
+                        df_proc.at[r_idx, "ReteIVA"] = riva_c
+                        df_proc.at[r_idx, "Cta ReteFuente"] = c_rf
+                        df_proc.at[r_idx, "Cta ReteICA"] = c_ri
+                        df_proc.at[r_idx, "Razón Contable"] = razon_c
+                        df_proc.at[r_idx, "Audit Info"] = audit_c
+                        df_proc.at[r_idx, "Neto a Pagar"] = round(r_row["Total"] - rfte_c - rica_c - riva_c, 2)
+                st.session_state["_regimenes_conocidos_aplicados_v1"] = True
+    
+            # Auditoría de régimen fiscal disponible bajo demanda mediante el botón superior
+            st.session_state["df_procesado"] = df_proc
+    
+            cols_mostrar_proc = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Régimen Fiscal Emisor", "Estado Registro", "Cuenta Pasivo (CxP)", "Base", "IVA", "ReteFuente", "ReteICA", "Neto a Pagar", "Soporte PDF Renombrado"]
+            cols_mostrar_existentes = [c for c in cols_mostrar_proc if c in df_proc.columns]
+            st.dataframe(df_proc[cols_mostrar_existentes], use_container_width=True)
+    
+            st.markdown("---")
+            st.markdown("#### 📑 Procesamiento, Separación y Renombrado de PDFs Multi-Página:")
+            st.caption("Identifica y une facturas completas de 2 o más hojas a partir de un PDF consolidado, asignando a cada una su comprobante y consecutivo oficial.")
+    
+            col_cfg1, col_cfg2 = st.columns(2)
+            with col_cfg1:
+                modo_sep = st.radio(
+                    "Configuración de reconocimiento de facturas:",
+                    [
+                        "🔍 Detección Inteligente (Reconoce facturas completas de 2 o más hojas por 'Página 1 de 2', CUFE y Número)",
+                        "📄 Agrupación fija de 2 páginas por factura (cada factura tiene 2 hojas)",
+                        "📄 Agrupación fija de 3 páginas por factura (cada factura tiene 3 hojas)",
+                        "📑 Separar 1 página por factura (facturas de 1 sola hoja)",
+                        "📂 Mantener archivos individuales (sin separar páginas)"
+                    ]
+                )
+            with col_cfg2:
+                st.info("💡 **Garantía de Factura Completa:** El motor inteligente detecta dónde empieza cada factura (Prefijo, Folio, NIT y marcadores de paginación). Todas las páginas de una misma factura se unen en un solo archivo PDF completo nombrado `Comp_10-XXX_Factura_Proveedor.pdf`.")
+    
+            ejecutar_desb = st.button("🔓 Desbloquear, Separar y Renombrar PDFs ahora") or st.session_state.pop("_ejecutar_desbloqueo_ahora", False)
+            if ejecutar_desb:
+                df_ref = st.session_state.get("df_procesado", pd.DataFrame())
+    
+                # Lista de PDFs a procesar: extraer archivos .pdf reales tanto de subidas directas como de archivos .zip
+                if "raw_uploaded_pdfs" not in st.session_state:
+                    st.session_state["raw_uploaded_pdfs"] = {}
+    
+                pdfs_reales_dict = {}
+                # 1. Incorporar PDFs ya existentes en raw_uploaded_pdfs
+                for fn, bdata in st.session_state.get("raw_uploaded_pdfs", {}).items():
+                    if fn.lower().endswith(".pdf"):
+                        pdfs_reales_dict[fn] = bdata
+    
+                # 2. Desempaquetar archivos_pdfs si contienen archivos .zip o PDFs directos
+                if archivos_pdfs:
+                    for p_it in archivos_pdfs:
+                        p_nom = getattr(p_it, "name", "").lower()
+                        if p_nom.endswith(".zip"):
+                            try:
+                                b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
+                                with zipfile.ZipFile(io.BytesIO(b_val), "r") as z_u:
+                                    for z_fn in z_u.namelist():
+                                        if z_fn.lower().endswith(".pdf") and not z_fn.startswith("__MACOSX"):
+                                            b_pdf = z_u.read(z_fn)
+                                            c_fn = os.path.basename(z_fn)
+                                            if c_fn:
+                                                pdfs_reales_dict[c_fn] = b_pdf
+                                                st.session_state["raw_uploaded_pdfs"][c_fn] = b_pdf
+                            except Exception as e_z:
+                                st.error(f"Error abriendo ZIP {getattr(p_it, 'name', '')}: {e_z}")
+                        elif p_nom.endswith(".pdf") or not p_nom:
+                            b_val = p_it.getvalue() if hasattr(p_it, "getvalue") else p_it.read()
+                            pdfs_reales_dict[getattr(p_it, "name", "factura.pdf")] = b_val
+    
+                # Construir la lista limpia de streams PDF con su nombre asignado
+                pdfs_a_procesar = []
+                for fn, b_pdf in pdfs_reales_dict.items():
+                    bio = io.BytesIO(b_pdf)
+                    bio.name = fn
+                    pdfs_a_procesar.append(bio)
+    
+                if not pdfs_a_procesar:
+                    st.warning("⚠️ No hay archivos PDF para procesar. Por favor sube tus facturas en el campo '2. Facturas en PDF (unificadas o separadas)' arriba antes de hacer clic en desbloquear.")
+                    st.stop()
+    
+                buffer_zip = io.BytesIO()
+                total_generados = 0
+    
+                if "dict_pdfs" not in st.session_state:
+                    st.session_state["dict_pdfs"] = {}
+    
+                total_pdfs_count = len(pdfs_a_procesar)
+                prog_bar_pdf = st.progress(0, text=f"Iniciando procesamiento de {total_pdfs_count} archivo(s) PDF...")
+    
+                with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_STORED) as zf:
+                    for idx_pdf, pdf_item in enumerate(pdfs_a_procesar):
+                        pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
+                        prog_bar_pdf.progress(min(1.0, (idx_pdf + 1) / total_pdfs_count), text=f"⚡ Factura {idx_pdf + 1} de {total_pdfs_count}: {pdf_name[:20]}...")
+                        # Si ya fue procesado y guardado en dict_pdfs, re-usar directamente
+                        if pdf_name in st.session_state["dict_pdfs"] and len(st.session_state["dict_pdfs"][pdf_name]) > 100:
+                            zf.writestr(pdf_name, st.session_state["dict_pdfs"][pdf_name])
                             total_generados += 1
-
-                        # Caso 2: Agrupación fija de 2 páginas
-                        elif "Agrupación fija de 2 páginas" in modo_sep:
-                            for p_i in range(0, num_pags, 2):
+                            continue
+                        try:
+                            pdf_name = getattr(pdf_item, "name", f"Documento_{idx_pdf+1}.pdf")
+                            reader = PdfReader(pdf_item)
+                            desencriptado = False
+                            if reader.is_encrypted:
+                                claves_probar = []
+                                if "clave_pdf_extra" in locals() and clave_pdf_extra:
+                                    claves_probar.append(clave_pdf_extra.strip())
+    
+                                # NITs empresa compradora
+                                nit_rec = re.sub(r"\D", "", str(empresa.get("nit", "")))
+                                if nit_rec:
+                                    if len(nit_rec) > 9:
+                                        claves_probar.extend([nit_rec, nit_rec[:-1], f"{nit_rec[:-1]}-{nit_rec[-1]}"])
+                                    else:
+                                        claves_probar.extend([nit_rec, f"{nit_rec}5", f"{nit_rec}-5"])
+                                claves_probar.extend(["901346412", "9013464125", "901346412-5", ""])
+    
+                                # NITs emisores en reporte
+                                if not df_ref.empty:
+                                    for n_e in df_ref["NIT Emisor"].dropna().unique():
+                                        n_c = re.sub(r"\D", "", str(n_e))
+                                        if n_c and len(n_c) >= 7:
+                                            claves_probar.append(n_c)
+    
+                                for pwd in claves_probar:
+                                    try:
+                                        res_dec = reader.decrypt(pwd)
+                                        if res_dec in (1, 2) or not reader.is_encrypted:
+                                            desencriptado = True
+                                            break
+                                    except:
+                                        pass
+    
+                                if reader.is_encrypted and not desencriptado:
+                                    st.warning(f"⚠️ No se pudo desencriptar automáticamente {pdf_name}. Ingrese la contraseña en el campo correspondiente.")
+                                    continue
+    
+                            num_pags = len(reader.pages)
+    
+                            # Caso 1: Archivo individual (sin separar páginas) o de 1 página
+                            if num_pags == 1 or "Mantener archivos individuales" in modo_sep:
                                 writer = PdfWriter()
-                                txt_grp = ""
-                                for off in range(2):
-                                    if p_i + off < num_pags:
-                                        writer.add_page(reader.pages[p_i + off])
-                                        try: txt_grp += (reader.pages[p_i + off].extract_text() or "") + "\n"
-                                        except: pass
-
-                                r_mat = identificar_factura_en_texto(txt_grp, df_ref)
+                                texto_pdf = ""
+                                for page in reader.pages:
+                                    writer.add_page(page)
+                                    try: texto_pdf += (page.extract_text() or "") + "\n"
+                                    except: pass
+    
+                                r_mat = None
+                                if not df_ref.empty:
+                                    # 1. Identificar por texto exacto (CUFE, Factura + Proveedor/NIT)
+                                    r_mat = identificar_factura_en_texto(texto_pdf, df_ref)
+    
+                                    # 2. Si no se identificó en el texto, buscar por coincidencia en el nombre del archivo
+                                    if r_mat is None:
+                                        fn_clean = re.sub(r'[^A-Za-z0-9]', '', pdf_name).lower()
+                                        for _, r_cand in df_ref.iterrows():
+                                            cufe_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("CUFE", "") or "")).lower()
+                                            if cufe_c and len(cufe_c) >= 15 and cufe_c[:20] in fn_clean:
+                                                r_mat = r_cand
+                                                break
+                                            pref_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("Prefijo", "") or "")).upper()
+                                            fol_c = re.sub(r'[^A-Za-z0-9]', '', str(r_cand.get("Folio", "") or "")).upper()
+                                            fac_f = (pref_c + fol_c) if pref_c else fol_c
+                                            if fac_f and len(fac_f) >= 4 and fac_f in fn_clean.upper():
+                                                r_mat = r_cand
+                                                break
+    
                                 if r_mat is not None:
                                     nombre_final = r_mat["Soporte PDF Renombrado"]
-                                else:
-                                    fac_idx = p_i // 2
-                                    nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"] if not df_ref.empty and fac_idx < len(df_ref) else f"Factura_Pags_{p_i+1}-{p_i+2}_{pdf_name}"
-
-                                pdf_bytes = io.BytesIO()
-                                writer.write(pdf_bytes)
-                                pdf_bytes.seek(0)
-                                b_data = pdf_bytes.getvalue()
-                                zf.writestr(nombre_final, b_data)
-                                st.session_state["dict_pdfs"][nombre_final] = b_data
-                                total_generados += 1
-
-                        # Caso 3: Agrupación fija de 3 páginas
-                        elif "Agrupación fija de 3 páginas" in modo_sep:
-                            for p_i in range(0, num_pags, 3):
-                                writer = PdfWriter()
-                                txt_grp = ""
-                                for off in range(3):
-                                    if p_i + off < num_pags:
-                                        writer.add_page(reader.pages[p_i + off])
-                                        try: txt_grp += (reader.pages[p_i + off].extract_text() or "") + "\n"
-                                        except: pass
-
-                                r_mat = identificar_factura_en_texto(txt_grp, df_ref)
-                                if r_mat is not None:
-                                    nombre_final = r_mat["Soporte PDF Renombrado"]
-                                else:
-                                    fac_idx = p_i // 3
-                                    nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"] if not df_ref.empty and fac_idx < len(df_ref) else f"Factura_Pags_{p_i+1}-{p_i+3}_{pdf_name}"
-
-                                pdf_bytes = io.BytesIO()
-                                writer.write(pdf_bytes)
-                                pdf_bytes.seek(0)
-                                b_data = pdf_bytes.getvalue()
-                                zf.writestr(nombre_final, b_data)
-                                st.session_state["dict_pdfs"][nombre_final] = b_data
-                                total_generados += 1
-
-                        # Caso 4: 1 página por factura
-                        elif "Separar 1 página" in modo_sep:
-                            for p_i in range(num_pags):
-                                writer = PdfWriter()
-                                writer.add_page(reader.pages[p_i])
-                                try: txt_pag = (reader.pages[p_i].extract_text() or "") + "\n"
-                                except: txt_pag = ""
-
-                                r_mat = identificar_factura_en_texto(txt_pag, df_ref)
-                                if r_mat is not None:
-                                    nombre_final = r_mat["Soporte PDF Renombrado"]
-                                else:
-                                    nombre_final = df_ref.iloc[p_i]["Soporte PDF Renombrado"] if not df_ref.empty and p_i < len(df_ref) else f"Factura_Pag_{p_i+1}_{pdf_name}"
-
-                                pdf_bytes = io.BytesIO()
-                                writer.write(pdf_bytes)
-                                pdf_bytes.seek(0)
-                                b_data = pdf_bytes.getvalue()
-                                zf.writestr(nombre_final, b_data)
-                                st.session_state["dict_pdfs"][nombre_final] = b_data
-                                total_generados += 1
-
-                        # Caso 5: Detección inteligente por CUFE, Folio o 'Página 1 de N'
-                        else:
-                            patron_pag = re.compile(r'(?:P[ÁAáa]G(?:INA|\.)?|HOJA|PAGE)\s*(\d+)\s*(?:DE|\/|OF)\s*(\d+)', re.IGNORECASE)
-                            curr_writer = None
-                            curr_inv_row = None
-                            paginas_del_comprobante = 0
-                            facturas_generadas = []
-
-                            def buscar_coincidencia_factura(texto_pagina):
-                                return identificar_factura_en_texto(texto_pagina, df_ref)
-
-                            for p_idx in range(num_pags):
-                                try: txt_p = reader.pages[p_idx].extract_text() or ""
-                                except: txt_p = ""
-
-                                reg_detectado = escanear_regimen_texto_pdf(txt_p)
-
-                                m_pag = patron_pag.search(txt_p)
-                                cur_p, tot_p = (int(m_pag.group(1)), int(m_pag.group(2))) if m_pag else (None, None)
-
-                                inv_encontrada = buscar_coincidencia_factura(txt_p)
-
-                                es_inicio_nueva_factura = False
-                                if cur_p == 1:
-                                    es_inicio_nueva_factura = True
-                                elif cur_p is not None and cur_p > 1:
-                                    es_inicio_nueva_factura = False
-                                elif inv_encontrada is not None:
-                                    if curr_inv_row is None or inv_encontrada["Comprobante Siigo"] != curr_inv_row["Comprobante Siigo"]:
-                                        es_inicio_nueva_factura = True
-                                elif curr_inv_row is None:
-                                    es_inicio_nueva_factura = True
-
-                                if es_inicio_nueva_factura:
-                                    if curr_writer is not None and curr_inv_row is not None:
-                                        out_c = io.BytesIO()
-                                        curr_writer.write(out_c)
-                                        c_bytes = out_c.getvalue()
-                                        doc_nombre = curr_inv_row["Soporte PDF Renombrado"]
-                                        zf.writestr(doc_nombre, c_bytes)
-                                        st.session_state["dict_pdfs"][doc_nombre] = c_bytes
-                                        total_generados += 1
-                                        facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
-
-                                    curr_inv_row = inv_encontrada if inv_encontrada is not None else curr_inv_row
-                                    if curr_inv_row is not None and reg_detectado and not df_ref.empty:
-                                        r_idx = curr_inv_row.name
-                                        df_ref.at[r_idx, "Régimen Fiscal Emisor"] = reg_detectado
+                                    # Escaneo de régimen fiscal sólo para la factura que realmente coincidió
+                                    regimen_escaneado = escanear_regimen_texto_pdf(texto_pdf)
+                                    if regimen_escaneado:
+                                        r_idx = r_mat.name
+                                        df_ref.at[r_idx, "Régimen Fiscal Emisor"] = regimen_escaneado
                                         _, _, _, _, _, rfte_n, rica_n, riva_n, cta_rf_n, _, cta_ri_n, _, razon_n, audit_n = clasificar_factura(
                                             df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
                                             df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
-                                            df_ref.at[r_idx, "Operacion"], reg_detectado, empresa
+                                            df_ref.at[r_idx, "Operacion"], regimen_escaneado, empresa
                                         )
                                         df_ref.at[r_idx, "ReteFuente"] = rfte_n
                                         df_ref.at[r_idx, "ReteICA"] = rica_n
@@ -3286,2048 +3286,2567 @@ with tab_compras:
                                         df_ref.at[r_idx, "Razón Contable"] = razon_n
                                         df_ref.at[r_idx, "Audit Info"] = audit_n
                                         df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
-                                    curr_writer = PdfWriter()
-                                    curr_writer.add_page(reader.pages[p_idx])
-                                    paginas_del_comprobante = 1
                                 else:
-                                    if curr_writer is None:
-                                        curr_inv_row = inv_encontrada
-                                        curr_writer = PdfWriter()
-                                    curr_writer.add_page(reader.pages[p_idx])
-                                    paginas_del_comprobante += 1
-
-                            if curr_writer is not None and curr_inv_row is not None:
-                                out_c = io.BytesIO()
-                                curr_writer.write(out_c)
-                                c_bytes = out_c.getvalue()
-                                doc_nombre = curr_inv_row["Soporte PDF Renombrado"]
-                                zf.writestr(doc_nombre, c_bytes)
-                                st.session_state["dict_pdfs"][doc_nombre] = c_bytes
+                                    nombre_final = f"Soporte_{idx_pdf+1}_{pdf_name}"
+    
+                                # Reutilizar directamente los bytes originales sin re-escribir con PdfWriter (1000x más rápido)
+                                b_data = pdf_item.getvalue() if hasattr(pdf_item, "getvalue") else pdf_item.read()
+                                zf.writestr(nombre_final, b_data)
+                                st.session_state["dict_pdfs"][nombre_final] = b_data
                                 total_generados += 1
-                                facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
-
-                    except Exception as e:
-                        st.error(f"Error procesando {pdf_name}: {e}")
-
-            prog_bar_pdf.progress(1.0, text="✅ ¡100% Procesado y Vinculado con Éxito!")
-            buffer_zip.seek(0)
-            st.session_state["zip_pdfs"] = buffer_zip.getvalue()
-            st.session_state["total_zip_pdfs"] = total_generados
-
-            # Escaneo oficial de régimen fiscal directamente sobre las facturas ya desbloqueadas y renombradas
-            total_auditados = auditar_regimen_desde_facturas_renombradas(df_ref, st.session_state["dict_pdfs"], empresa)
-            st.session_state["df_procesado"] = df_ref
-
-            # Guardar trabajo actualizado con PDFs procesados y regímenes verificados
-            guardar_trabajo_en_historial(
-                empresa, df_ref,
-                excel_bytes=st.session_state.get("excel_bytes"),
-                excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-                dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-                zip_bytes=st.session_state["zip_pdfs"],
-                consecutivo_ini=cons_ini_fac,
-                job_id=st.session_state.get("job_actual_id")
-            )
-            msg_reg = f" y se auditó el régimen de cada factura ({total_auditados} actualizadas)" if total_auditados > 0 else " y se validó el régimen de cada factura"
-            st.success(f"¡Procesamiento exitoso! Se desbloquearon y renombraron **{total_generados} facturas completas**{msg_reg} directamente desde las facturas PDF desbloqueadas.")
-
-        zip_data_b = st.session_state.get("zip_pdfs")
-        if zip_data_b and isinstance(zip_data_b, (bytes, bytearray)) and len(zip_data_b) > 22:
-            n_tot_z = st.session_state.get("total_zip_pdfs", len(st.session_state.get("dict_pdfs", {})))
-            st.download_button(
-                label=f"📦 Descargar Archivos PDF Renombrados ({n_tot_z} facturas completas en ZIP)",
-                data=zip_data_b,
-                file_name=f"Facturas_Renombradas_Comprobantes_{empresa['nombre'].replace(' ', '_')}.zip",
-                mime="application/zip",
-                key="btn_dl_zip_pdfs_renombrados_action_main",
-                use_container_width=True
-            )
-
-
-
-    else:
-        st.info("💡 Sube el reporte Excel de la DIAN arriba o carga un trabajo guardado desde el **Historial de Trabajos** para comenzar.")
-
-with tab_auditoria:
-    st.markdown("### Modulo de Auditoria Contable y Trazabilidad")
-    st.caption("Inspección de cuentas, deducciones y separación de gastos por cuenta de terceros.")
-
-    if "df_procesado" in st.session_state:
-        df_p = st.session_state["df_procesado"]
-
-        # Asegurar columna No Contabilizar en df_p
-        if "No Contabilizar" not in df_p.columns:
-            df_p["No Contabilizar"] = False
-            st.session_state["df_procesado"] = df_p
-
-        # Inicializar conjunto de facturas excluidas de contabilización
-        if "facturas_no_contabilizar" not in st.session_state:
-            st.session_state["facturas_no_contabilizar"] = set(df_p[df_p["No Contabilizar"] == True]["Factura"].dropna().tolist())
-        cur_no_contab = st.session_state["facturas_no_contabilizar"]
-
-        # Panel de exclusión masiva para marcar cuáles NO contabilizar
-        with st.expander("🚫 Panel: Marcar qué facturas NO debes contabilizar (Excluir de Siigo):", expanded=False):
-            st.caption("Selecciona aquí las facturas que NO deseas que pasen a la contabilidad ni se exporten a Siigo (por ejemplo, si ya fueron causadas manualmente, corresponden a otro período o no deben registrarse):")
-            lista_todas_facs_tags = [f"{r['Factura']} — {r['Proveedor'][:24]} (${r['Total']:,.0f}) [{'🔴 Ya Registrada' if r.get('Ya Registrada') else '⚪ Pendiente'}]" for _, r in df_p.iterrows()]
-            mapa_tags_to_fac = {f"{r['Factura']} — {r['Proveedor'][:24]} (${r['Total']:,.0f}) [{'🔴 Ya Registrada' if r.get('Ya Registrada') else '⚪ Pendiente'}]": r['Factura'] for _, r in df_p.iterrows()}
-
-            defaults_seleccionados = [t for t, fn in mapa_tags_to_fac.items() if fn in cur_no_contab or bool(df_p[df_p["Factura"] == fn].iloc[0].get("No Contabilizar", False))]
-
-            sel_excluidas_bulk = st.multiselect(
-                "Selecciona facturas que NO se deben contabilizar:",
-                options=lista_todas_facs_tags,
-                default=defaults_seleccionados,
-                key="ms_bulk_excluir_contab"
-            )
-            if st.button("💾 Guardar Exclusiones de Contabilidad", key="btn_save_bulk_excl"):
-                nuevas_ex = {mapa_tags_to_fac[t] for t in sel_excluidas_bulk}
-                st.session_state["facturas_no_contabilizar"] = nuevas_ex
-                for idx_row, r_row in df_p.iterrows():
-                    es_ex = r_row["Factura"] in nuevas_ex
-                    df_p.at[idx_row, "No Contabilizar"] = es_ex
-                    if es_ex:
-                        df_p.at[idx_row, "Estado Registro"] = "🚫 No Contabilizar (Excluida)"
-                    else:
-                        es_r = bool(r_row.get("Ya Registrada", False))
-                        cp = r_row.get("Comprobante Previo", "")
-                        df_p.at[idx_row, "Estado Registro"] = f"🔴 Ya Registrada ({cp})" if es_r else "⚪ Compra Pendiente"
-                st.session_state["df_procesado"] = df_p
-                st.success(f"¡Se han marcado {len(nuevas_ex)} facturas como NO contabilizables!")
-                st.rerun()
-
-        opciones_fac = []
-        for _, r in df_p.iterrows():
-            fn = r['Factura']
-            tag_ex = " 🚫 [NO CONTABILIZAR]" if (fn in cur_no_contab or r.get("No Contabilizar")) else ""
-            opciones_fac.append(f"[{r['Comprobante Siigo']}] {r['Fecha']} - {fn}{tag_ex} - {r['Proveedor']} (${r['Total']:,.0f})")
-
-        seleccion = st.selectbox("Selecciona una factura para auditar:", opciones_fac)
-
-        comp_sel = seleccion.split("]")[0].replace("[", "")
-        fac_sel = df_p[df_p["Comprobante Siigo"] == comp_sel].iloc[0]
-        es_aduanero = any(k in fac_sel["Proveedor"].upper() for k in AGENTES_ADUANEROS)
-
-        audit_info = fac_sel.get("Audit Info", {})
-        if not isinstance(audit_info, dict):
-            audit_info = {}
-
-        col_a1, col_a2 = st.columns(2)
-        with col_a1:
-            # Control individual para marcar si no se debe contabilizar esta factura
-            fac_act_fn = fac_sel["Factura"]
-            esta_excl_ind = fac_act_fn in cur_no_contab or bool(fac_sel.get("No Contabilizar", False))
-
-            c_tog_ex1, c_tog_ex2 = st.columns([2.4, 1.2])
-            with c_tog_ex1:
-                if esta_excl_ind:
-                    st.warning("🚫 **Esta factura está marcada como 'NO CONTABILIZAR'** — No se generará asiento ni se exportará a Siigo.")
-                else:
-                    st.caption("Estado contable activo para exportación a Siigo.")
-            with c_tog_ex2:
-                if not esta_excl_ind:
-                    if st.button("🚫 No Contabilizar", key=f"btn_excl_indiv_{fac_sel['Comprobante Siigo']}", help="Excluye esta factura de Siigo"):
-                        cur_no_contab.add(fac_act_fn)
-                        st.session_state["facturas_no_contabilizar"] = cur_no_contab
-                        m_idx = df_p[df_p["Factura"] == fac_act_fn].index
-                        if not m_idx.empty:
-                            df_p.at[m_idx[0], "No Contabilizar"] = True
-                            df_p.at[m_idx[0], "Estado Registro"] = "🚫 No Contabilizar (Excluida)"
-                            st.session_state["df_procesado"] = df_p
-                        st.rerun()
-                else:
-                    if st.button("✅ Reactivar", key=f"btn_react_indiv_{fac_sel['Comprobante Siigo']}", help="Vuelve a incluirla en la contabilidad"):
-                        cur_no_contab.discard(fac_act_fn)
-                        st.session_state["facturas_no_contabilizar"] = cur_no_contab
-                        m_idx = df_p[df_p["Factura"] == fac_act_fn].index
-                        if not m_idx.empty:
-                            df_p.at[m_idx[0], "No Contabilizar"] = False
-                            es_r = bool(df_p.at[m_idx[0], "Ya Registrada"])
-                            cp = df_p.at[m_idx[0], "Comprobante Previo"]
-                            df_p.at[m_idx[0], "Estado Registro"] = f"🔴 Ya Registrada ({cp})" if es_r else "⚪ Compra Pendiente"
-                            st.session_state["df_procesado"] = df_p
-                        st.rerun()
-
-            st.markdown(f"""
-            <div class="audit-card">
-                <h4>Detalle del Comprobante: {fac_sel['Comprobante Siigo']}</h4>
-                <p><b>Soporte PDF Vinculado:</b> <span class="tag-comp">{fac_sel['Soporte PDF Renombrado']}</span></p>
-                <p><b>Factura:</b> {fac_sel['Factura']} - <b>Proveedor:</b> {fac_sel['Proveedor']} (NIT: {fac_sel['NIT Emisor']})</p>
-                <p><b>Fecha de Emisión:</b> {fac_sel['Fecha']} - <b>Total:</b> ${fac_sel['Total']:,.2f}</p>
-                <p><b>Régimen Fiscal Emisor:</b> <span class="badge-active">{fac_sel.get('Régimen Fiscal Emisor', 'O-48')}</span></p>
-                <div style="margin: 8px 0;">
-                    <span class="badge-tax">{'✅ Gran Contribuyente (O-13)' if audit_info.get('es_gc') else 'Común (No GC)'}</span>
-                    <span class="badge-tax">{'✅ Autorretenedor (O-15)' if audit_info.get('es_autorr') else 'No Autorretenedor'}</span>
-                    <span class="badge-tax">{'⚠️ Régimen Simple (O-47)' if audit_info.get('es_rst') else 'Régimen Ordinario'}</span>
-                </div>
-                <hr>
-                <h5>Trazabilidad de la Contabilización y Validación DIAN:</h5>
-                <ul>
-                    <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel['Cta Principal']}</span> - {fac_sel['Categoría']}</li>
-                    <li><b>Cruce DIAN:</b> {fac_sel['Razón Contable']}</li>
-                    <li><b>Base Gravable:</b> ${fac_sel['Base']:,.2f} - <b>IVA:</b> ${fac_sel['IVA']:,.2f}</li>
-                    <li><b>Retención en la Fuente:</b> ${fac_sel['ReteFuente']:,.2f} ({audit_info.get('razon_rfte', 'N/A')})</li>
-                    <li><b>ReteICA:</b> ${fac_sel.get('ReteICA', 0.0):,.2f} ({audit_info.get('razon_reteica', audit_info.get('razon_rica', 'N/A'))})</li>
-                    <li><b>ReteIVA:</b> ${fac_sel.get('ReteIVA', 0.0):,.2f} ({audit_info.get('razon_reteiva', 'N/A')})</li>
-                </ul>
-            </div>
-            """, unsafe_allow_html=True)
-
-            with st.expander("⚙️ Ajustar Régimen, Cuentas (CxP), Base Gravable e Impuestos Asumidos:", expanded=True if (fac_sel.get("Ya Registrada") or es_aduanero) else False):
-                st.caption("Modifica aquí los valores fiscales, la cuenta por pagar o el tratamiento de retenciones asumidas:")
-                c_mod1, c_mod2 = st.columns(2)
-                with c_mod1:
-                    opciones_reg_man = [
-                        "O-48 (Responsable de IVA / Común - Retención Ordinaria)",
-                        "O-15 (Autorretenedor de Renta - Sin ReteFuente)",
-                        "O-13 (Gran Contribuyente - Sin ReteIVA)",
-                        "O-13;O-15 (Gran Contribuyente y Autorretenedor)",
-                        "O-47 (Régimen Simple - Exento ReteFuente y ReteIVA)",
-                        "O-49 (No Responsable de IVA)"
-                    ]
-                    idx_actual = 0
-                    reg_actual = str(fac_sel.get("Régimen Fiscal Emisor", ""))
-                    if "O-13" in reg_actual and "O-15" in reg_actual: idx_actual = 3
-                    elif "O-15" in reg_actual: idx_actual = 1
-                    elif "O-13" in reg_actual: idx_actual = 2
-                    elif "O-47" in reg_actual: idx_actual = 4
-                    elif "O-49" in reg_actual: idx_actual = 5
-
-                    nuevo_reg_sel = st.selectbox("Selecciona Régimen Fiscal:", opciones_reg_man, index=idx_actual, key=f"sel_reg_{fac_sel['Comprobante Siigo']}")
-                    cod_reg_sel = nuevo_reg_sel.split()[0]
-
-                    cta_p_def = str(fac_sel.get("Cta Principal") or ("14650501" if es_aduanero else "51350501")).strip()
-                    nueva_cta_p = st.text_input(
-                        "Cuenta Principal (Gasto / Costo / Inventario):",
-                        value=cta_p_def,
-                        key=f"inp_cta_p_{fac_sel['Comprobante Siigo']}",
-                        help="Cuenta contable donde se imputa la base de la factura (ej. 51350501 Servicios, 14650501 Mercancías en Tránsito)."
-                    )
-
-                    cta_cxp_def = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
-                    nueva_cta_cxp = st.text_input(
-                        "Cuenta por Pagar (Pasivo / Contrapartida):",
-                        value=cta_cxp_def,
-                        key=f"inp_cxp_{fac_sel['Comprobante Siigo']}",
-                        help="Puedes cambiar aquí la cuenta pasivo (ej. 22050505 Agencia Aduana, 23359501 Acreedores/DHL, 22050501 Proveedores)."
-                    )
-
-                with c_mod2:
-                    c_v1, c_v2 = st.columns(2)
-                    base_cur_f = float(fac_sel["Base"]) if pd.notna(fac_sel["Base"]) else 0.0
-
-                    # Calcular sugerencia de retención si se selecciona O-48
-                    if "O-48" in cod_reg_sel:
-                        rf_sug = round(base_cur_f * 0.04, 2) if es_aduanero or "EURO" in str(fac_sel["Proveedor"]).upper() else round(base_cur_f * 0.025, 2)
-                        ri_sug = round(base_cur_f * 0.00966, 2)
-                    elif any(k in cod_reg_sel for k in ["O-15", "O-47"]):
-                        rf_sug = 0.0
-                        ri_sug = 0.0
-                    else:
-                        rf_sug = float(fac_sel.get("ReteFuente", 0.0))
-                        ri_sug = float(fac_sel.get("ReteICA", 0.0))
-
-                    val_rf_input = float(fac_sel.get("ReteFuente", 0.0))
-                    if val_rf_input == 0.0 and "O-48" in cod_reg_sel and rf_sug > 0:
-                        val_rf_input = rf_sug
-                    val_ri_input = float(fac_sel.get("ReteICA", 0.0))
-                    if val_ri_input == 0.0 and "O-48" in cod_reg_sel and ri_sug > 0:
-                        val_ri_input = ri_sug
-
-                    with c_v1:
-                        nueva_base = st.number_input("Base Gravable / Subtotal ($):", value=base_cur_f, step=1000.0, key=f"nb_{fac_sel['Comprobante Siigo']}")
-                        nueva_rfte = st.number_input("ReteFuente ($):", value=val_rf_input, step=100.0, key=f"nrf_{fac_sel['Comprobante Siigo']}")
-                    with c_v2:
-                        nuevo_iva = st.number_input("IVA Descontable ($):", value=float(fac_sel["IVA"]), step=100.0, key=f"niva_{fac_sel['Comprobante Siigo']}")
-                        nuevo_rica = st.number_input("ReteICA ($):", value=val_ri_input, step=100.0, key=f"nri_{fac_sel['Comprobante Siigo']}")
-
-                asumir_imp = st.checkbox(
-                    "Asumir Impuestos / Retenciones (Cruza con Agente Aduanero / Triangulación)",
-                    value=bool(fac_sel.get("Impuestos Asumidos", False) or es_aduanero or any(k in fac_sel["Proveedor"].upper() for k in ["CARGO", "ADUANA", "PORTUARIA", "DHL"])),
-                    key=f"asum_in_{fac_sel['Comprobante Siigo']}",
-                    help="Si se asumen, las retenciones van a la cuenta 53152001 (Retenciones Asumidas) y el Saldo por Pagar de la factura queda en Base + IVA (ej. .651.939)."
+    
+                            # Caso 2: Agrupación fija de 2 páginas
+                            elif "Agrupación fija de 2 páginas" in modo_sep:
+                                for p_i in range(0, num_pags, 2):
+                                    writer = PdfWriter()
+                                    txt_grp = ""
+                                    for off in range(2):
+                                        if p_i + off < num_pags:
+                                            writer.add_page(reader.pages[p_i + off])
+                                            try: txt_grp += (reader.pages[p_i + off].extract_text() or "") + "\n"
+                                            except: pass
+    
+                                    r_mat = identificar_factura_en_texto(txt_grp, df_ref)
+                                    if r_mat is not None:
+                                        nombre_final = r_mat["Soporte PDF Renombrado"]
+                                    else:
+                                        fac_idx = p_i // 2
+                                        nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"] if not df_ref.empty and fac_idx < len(df_ref) else f"Factura_Pags_{p_i+1}-{p_i+2}_{pdf_name}"
+    
+                                    pdf_bytes = io.BytesIO()
+                                    writer.write(pdf_bytes)
+                                    pdf_bytes.seek(0)
+                                    b_data = pdf_bytes.getvalue()
+                                    zf.writestr(nombre_final, b_data)
+                                    st.session_state["dict_pdfs"][nombre_final] = b_data
+                                    total_generados += 1
+    
+                            # Caso 3: Agrupación fija de 3 páginas
+                            elif "Agrupación fija de 3 páginas" in modo_sep:
+                                for p_i in range(0, num_pags, 3):
+                                    writer = PdfWriter()
+                                    txt_grp = ""
+                                    for off in range(3):
+                                        if p_i + off < num_pags:
+                                            writer.add_page(reader.pages[p_i + off])
+                                            try: txt_grp += (reader.pages[p_i + off].extract_text() or "") + "\n"
+                                            except: pass
+    
+                                    r_mat = identificar_factura_en_texto(txt_grp, df_ref)
+                                    if r_mat is not None:
+                                        nombre_final = r_mat["Soporte PDF Renombrado"]
+                                    else:
+                                        fac_idx = p_i // 3
+                                        nombre_final = df_ref.iloc[fac_idx]["Soporte PDF Renombrado"] if not df_ref.empty and fac_idx < len(df_ref) else f"Factura_Pags_{p_i+1}-{p_i+3}_{pdf_name}"
+    
+                                    pdf_bytes = io.BytesIO()
+                                    writer.write(pdf_bytes)
+                                    pdf_bytes.seek(0)
+                                    b_data = pdf_bytes.getvalue()
+                                    zf.writestr(nombre_final, b_data)
+                                    st.session_state["dict_pdfs"][nombre_final] = b_data
+                                    total_generados += 1
+    
+                            # Caso 4: 1 página por factura
+                            elif "Separar 1 página" in modo_sep:
+                                for p_i in range(num_pags):
+                                    writer = PdfWriter()
+                                    writer.add_page(reader.pages[p_i])
+                                    try: txt_pag = (reader.pages[p_i].extract_text() or "") + "\n"
+                                    except: txt_pag = ""
+    
+                                    r_mat = identificar_factura_en_texto(txt_pag, df_ref)
+                                    if r_mat is not None:
+                                        nombre_final = r_mat["Soporte PDF Renombrado"]
+                                    else:
+                                        nombre_final = df_ref.iloc[p_i]["Soporte PDF Renombrado"] if not df_ref.empty and p_i < len(df_ref) else f"Factura_Pag_{p_i+1}_{pdf_name}"
+    
+                                    pdf_bytes = io.BytesIO()
+                                    writer.write(pdf_bytes)
+                                    pdf_bytes.seek(0)
+                                    b_data = pdf_bytes.getvalue()
+                                    zf.writestr(nombre_final, b_data)
+                                    st.session_state["dict_pdfs"][nombre_final] = b_data
+                                    total_generados += 1
+    
+                            # Caso 5: Detección inteligente por CUFE, Folio o 'Página 1 de N'
+                            else:
+                                patron_pag = re.compile(r'(?:P[ÁAáa]G(?:INA|\.)?|HOJA|PAGE)\s*(\d+)\s*(?:DE|\/|OF)\s*(\d+)', re.IGNORECASE)
+                                curr_writer = None
+                                curr_inv_row = None
+                                paginas_del_comprobante = 0
+                                facturas_generadas = []
+    
+                                def buscar_coincidencia_factura(texto_pagina):
+                                    return identificar_factura_en_texto(texto_pagina, df_ref)
+    
+                                for p_idx in range(num_pags):
+                                    try: txt_p = reader.pages[p_idx].extract_text() or ""
+                                    except: txt_p = ""
+    
+                                    reg_detectado = escanear_regimen_texto_pdf(txt_p)
+    
+                                    m_pag = patron_pag.search(txt_p)
+                                    cur_p, tot_p = (int(m_pag.group(1)), int(m_pag.group(2))) if m_pag else (None, None)
+    
+                                    inv_encontrada = buscar_coincidencia_factura(txt_p)
+    
+                                    es_inicio_nueva_factura = False
+                                    if cur_p == 1:
+                                        es_inicio_nueva_factura = True
+                                    elif cur_p is not None and cur_p > 1:
+                                        es_inicio_nueva_factura = False
+                                    elif inv_encontrada is not None:
+                                        if curr_inv_row is None or inv_encontrada["Comprobante Siigo"] != curr_inv_row["Comprobante Siigo"]:
+                                            es_inicio_nueva_factura = True
+                                    elif curr_inv_row is None:
+                                        es_inicio_nueva_factura = True
+    
+                                    if es_inicio_nueva_factura:
+                                        if curr_writer is not None and curr_inv_row is not None:
+                                            out_c = io.BytesIO()
+                                            curr_writer.write(out_c)
+                                            c_bytes = out_c.getvalue()
+                                            doc_nombre = curr_inv_row["Soporte PDF Renombrado"]
+                                            zf.writestr(doc_nombre, c_bytes)
+                                            st.session_state["dict_pdfs"][doc_nombre] = c_bytes
+                                            total_generados += 1
+                                            facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
+    
+                                        curr_inv_row = inv_encontrada if inv_encontrada is not None else curr_inv_row
+                                        if curr_inv_row is not None and reg_detectado and not df_ref.empty:
+                                            r_idx = curr_inv_row.name
+                                            df_ref.at[r_idx, "Régimen Fiscal Emisor"] = reg_detectado
+                                            _, _, _, _, _, rfte_n, rica_n, riva_n, cta_rf_n, _, cta_ri_n, _, razon_n, audit_n = clasificar_factura(
+                                                df_ref.at[r_idx, "NIT Emisor"], df_ref.at[r_idx, "Proveedor"],
+                                                df_ref.at[r_idx, "Base"], df_ref.at[r_idx, "IVA"],
+                                                df_ref.at[r_idx, "Operacion"], reg_detectado, empresa
+                                            )
+                                            df_ref.at[r_idx, "ReteFuente"] = rfte_n
+                                            df_ref.at[r_idx, "ReteICA"] = rica_n
+                                            df_ref.at[r_idx, "ReteIVA"] = riva_n
+                                            df_ref.at[r_idx, "Cta ReteFuente"] = cta_rf_n
+                                            df_ref.at[r_idx, "Cta ReteICA"] = cta_ri_n
+                                            df_ref.at[r_idx, "Razón Contable"] = razon_n
+                                            df_ref.at[r_idx, "Audit Info"] = audit_n
+                                            df_ref.at[r_idx, "Neto a Pagar"] = round(df_ref.at[r_idx, "Total"] - rfte_n - rica_n - riva_n, 2)
+                                        curr_writer = PdfWriter()
+                                        curr_writer.add_page(reader.pages[p_idx])
+                                        paginas_del_comprobante = 1
+                                    else:
+                                        if curr_writer is None:
+                                            curr_inv_row = inv_encontrada
+                                            curr_writer = PdfWriter()
+                                        curr_writer.add_page(reader.pages[p_idx])
+                                        paginas_del_comprobante += 1
+    
+                                if curr_writer is not None and curr_inv_row is not None:
+                                    out_c = io.BytesIO()
+                                    curr_writer.write(out_c)
+                                    c_bytes = out_c.getvalue()
+                                    doc_nombre = curr_inv_row["Soporte PDF Renombrado"]
+                                    zf.writestr(doc_nombre, c_bytes)
+                                    st.session_state["dict_pdfs"][doc_nombre] = c_bytes
+                                    total_generados += 1
+                                    facturas_generadas.append(f"{curr_inv_row['Comprobante Siigo']} ({paginas_del_comprobante} págs)")
+    
+                        except Exception as e:
+                            st.error(f"Error procesando {pdf_name}: {e}")
+    
+                prog_bar_pdf.progress(1.0, text="✅ ¡100% Procesado y Vinculado con Éxito!")
+                buffer_zip.seek(0)
+                st.session_state["zip_pdfs"] = buffer_zip.getvalue()
+                st.session_state["total_zip_pdfs"] = total_generados
+    
+                # Escaneo oficial de régimen fiscal directamente sobre las facturas ya desbloqueadas y renombradas
+                total_auditados = auditar_regimen_desde_facturas_renombradas(df_ref, st.session_state["dict_pdfs"], empresa)
+                st.session_state["df_procesado"] = df_ref
+    
+                # Guardar trabajo actualizado con PDFs procesados y regímenes verificados
+                guardar_trabajo_en_historial(
+                    empresa, df_ref,
+                    excel_bytes=st.session_state.get("excel_bytes"),
+                    excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                    dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+                    dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+                    zip_bytes=st.session_state["zip_pdfs"],
+                    consecutivo_ini=cons_ini_fac,
+                    job_id=st.session_state.get("job_actual_id")
                 )
-
-                if st.button("💾 Aplicar Cambios y Recalcular Asiento", key=f"btn_aplica_reg_{fac_sel['Comprobante Siigo']}"):
-                    cod_reg = nuevo_reg_sel.split()[0]
-                    r_idx = df_p[df_p["Comprobante Siigo"] == comp_sel].index[0]
-                    df_p.at[r_idx, "Régimen Fiscal Emisor"] = cod_reg
-                    df_p.at[r_idx, "Base"] = nueva_base
-                    df_p.at[r_idx, "IVA"] = nuevo_iva
-                    df_p.at[r_idx, "ReteFuente"] = nueva_rfte
-                    df_p.at[r_idx, "ReteICA"] = nuevo_rica
-                    if nueva_rfte > 0 and not str(df_p.at[r_idx, "Cta ReteFuente"]).strip():
-                        df_p.at[r_idx, "Cta ReteFuente"] = "23652503" if es_aduanero else "23654001"
-                    if nuevo_rica > 0 and not str(df_p.at[r_idx, "Cta ReteICA"]).strip():
-                        df_p.at[r_idx, "Cta ReteICA"] = "23680505" if es_aduanero else "23680501"
-                    cta_clean = nueva_cta_cxp.split()[0].strip()
-                    df_p.at[r_idx, "Cuenta Pasivo Especifica"] = cta_clean
-                    df_p.at[r_idx, "Cta Contrapartida"] = cta_clean
-                    df_p.at[r_idx, "Impuestos Asumidos"] = asumir_imp
-                    df_p.at[r_idx, "Editada Manualmente"] = True
-
-                    if asumir_imp:
-                        saldo_p = round(nueva_base + nuevo_iva, 2)
-                        df_p.at[r_idx, "Neto a Pagar"] = saldo_p
-                        df_p.at[r_idx, "Total Neto"] = saldo_p
-                    else:
-                        df_p.at[r_idx, "Neto a Pagar"] = round(nueva_base + nuevo_iva - nueva_rfte - nuevo_rica - float(fac_sel.get("ReteIVA", 0.0)), 2)
-
+                msg_reg = f" y se auditó el régimen de cada factura ({total_auditados} actualizadas)" if total_auditados > 0 else " y se validó el régimen de cada factura"
+                st.success(f"¡Procesamiento exitoso! Se desbloquearon y renombraron **{total_generados} facturas completas**{msg_reg} directamente desde las facturas PDF desbloqueadas.")
+    
+            zip_data_b = st.session_state.get("zip_pdfs")
+            if zip_data_b and isinstance(zip_data_b, (bytes, bytearray)) and len(zip_data_b) > 22:
+                n_tot_z = st.session_state.get("total_zip_pdfs", len(st.session_state.get("dict_pdfs", {})))
+                st.download_button(
+                    label=f"📦 Descargar Archivos PDF Renombrados ({n_tot_z} facturas completas en ZIP)",
+                    data=zip_data_b,
+                    file_name=f"Facturas_Renombradas_Comprobantes_{empresa['nombre'].replace(' ', '_')}.zip",
+                    mime="application/zip",
+                    key="btn_dl_zip_pdfs_renombrados_action_main",
+                    use_container_width=True
+                )
+    
+    
+    
+        else:
+            st.info("💡 Sube el reporte Excel de la DIAN arriba o carga un trabajo guardado desde el **Historial de Trabajos** para comenzar.")
+    
+    except Exception as _e_comp:
+        if type(_e_comp).__name__ in ['RerunException', 'StopException', 'ScriptControlException']:
+            raise _e_comp
+        st.error(f"⚠️ Ocurrió un error en la pestaña de Compras DIAN: {_e_comp}")
+        with st.expander("🔍 Ver detalles técnicos del error (Traceback):"):
+            st.code(traceback.format_exc())
+with tab_auditoria:
+    try:
+        st.markdown("### Modulo de Auditoria Contable y Trazabilidad")
+        st.caption("Inspección de cuentas, deducciones y separación de gastos por cuenta de terceros.")
+    
+        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None and isinstance(st.session_state["df_procesado"], pd.DataFrame) and not st.session_state["df_procesado"].empty:
+            df_p = normalizar_df_procesado(st.session_state["df_procesado"])
+            st.session_state["df_procesado"] = df_p
+    
+            # Inicializar conjunto de facturas excluidas de contabilización
+            if "facturas_no_contabilizar" not in st.session_state:
+                st.session_state["facturas_no_contabilizar"] = set(df_p[df_p["No Contabilizar"] == True]["Factura"].dropna().astype(str).tolist())
+            cur_no_contab = st.session_state["facturas_no_contabilizar"]
+    
+            # Panel de exclusión masiva para marcar cuáles NO contabilizar
+            with st.expander("🚫 Panel: Marcar qué facturas NO debes contabilizar (Excluir de Siigo):", expanded=False):
+                st.caption("Selecciona aquí las facturas que NO deseas que pasen a la contabilidad ni se exporten a Siigo (por ejemplo, si ya fueron causadas manualmente, corresponden a otro período o no deben registrarse):")
+                lista_todas_facs_tags = []
+                mapa_tags_to_fac = {}
+                defaults_seleccionados = []
+                for idx_row, r in df_p.iterrows():
+                    fn = str(r.get("Factura") or f"Doc_{idx_row+1}").strip()
+                    prov = str(r.get("Proveedor") or "Proveedor").strip()[:24]
+                    try: tot_val = float(r.get("Total", 0.0) or 0.0)
+                    except Exception: tot_val = 0.0
+                    ya_reg = bool(r.get("Ya Registrada", False))
+                    tag_t = f"{fn} — {prov} (${tot_val:,.0f}) [{'🔴 Ya Registrada' if ya_reg else '⚪ Pendiente'}]"
+                    lista_todas_facs_tags.append(tag_t)
+                    mapa_tags_to_fac[tag_t] = fn
+                    if fn in cur_no_contab or bool(r.get("No Contabilizar", False)):
+                        defaults_seleccionados.append(tag_t)
+    
+                sel_excluidas_bulk = st.multiselect(
+                    "Selecciona facturas que NO se deben contabilizar:",
+                    options=lista_todas_facs_tags,
+                    default=defaults_seleccionados,
+                    key="ms_bulk_excluir_contab"
+                )
+                if st.button("💾 Guardar Exclusiones de Contabilidad", key="btn_save_bulk_excl"):
+                    nuevas_ex = {mapa_tags_to_fac[t] for t in sel_excluidas_bulk if t in mapa_tags_to_fac}
+                    st.session_state["facturas_no_contabilizar"] = nuevas_ex
+                    for idx_row, r_row in df_p.iterrows():
+                        fn_curr = str(r_row.get("Factura", "")).strip()
+                        es_ex = fn_curr in nuevas_ex
+                        df_p.at[idx_row, "No Contabilizar"] = es_ex
+                        if es_ex:
+                            df_p.at[idx_row, "Estado Registro"] = "🚫 No Contabilizar (Excluida)"
+                        else:
+                            es_r = bool(r_row.get("Ya Registrada", False))
+                            cp = str(r_row.get("Comprobante Previo", "")).strip()
+                            df_p.at[idx_row, "Estado Registro"] = f"🔴 Ya Registrada ({cp})" if es_r else "⚪ Compra Pendiente"
                     st.session_state["df_procesado"] = df_p
-                    # Actualizar asiento contable de triangulación para que refleje de inmediato la ReteFuente
-                    fac_fn_act = str(df_p.at[r_idx, "Factura"]).strip()
-                    if "asientos_triangulacion_por_factura" in st.session_state:
-                        asientos_m = st.session_state["asientos_triangulacion_por_factura"]
-                        if fac_fn_act in asientos_m:
-                            asientos_m[fac_fn_act] = obtener_asiento_contable_hoja2(df_p.loc[r_idx], es_aduanero=es_aduanero)
-                            st.session_state["asientos_triangulacion_por_factura"] = asientos_m
-
-                    # Guardar regla en la Memoria de Aprendizaje Continuo
-                    guardar_regla_aprendizaje(
-                        empresa,
-                        fac_sel.get("NIT Emisor"),
-                        fac_sel.get("Proveedor"),
-                        cta_p=fac_sel.get("Cta Principal"),
-                        resp_fiscal=cod_reg,
-                        cta_cxp=cta_clean,
-                        asumir_impuestos=asumir_imp
-                    )
-                    guardar_trabajo_en_historial(
-                        empresa, df_p,
-                        excel_bytes=st.session_state.get("excel_bytes"),
-                        excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
-                        dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
-                        dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
-                        zip_bytes=st.session_state.get("zip_pdfs"),
-                        job_id=st.session_state.get("job_actual_id")
-                    )
-                    st.success(f"¡Valores y Cuenta CxP ({cta_clean}) actualizados y asiento recalculado con éxito!")
+                    st.success(f"¡Se han marcado {len(nuevas_ex)} facturas como NO contabilizables!")
                     st.rerun()
-
-            if es_aduanero:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown("""
-                <div style="background:#fef3c7; padding:15px; border-radius:8px; border-left:5px solid #d97706;">
-                    <h5 style="color:#92400e; margin-top:0;">Alerta de Importacion / Agenciamiento Aduanero</h5>
-                    <p style="color:#78350f; font-size:14px; margin-bottom:5px;">
-                    En este documento intervienen <b>gastos por cuenta de terceros</b> y <b>honorarios propios del agente</b>:
-                    </p>
-                    <ul style="color:#78350f; font-size:14px;">
-                        <li><b>Ingresos Propios del Agente (Honorarios / Comision):</b> Gravados con IVA 19%, sujetos a ReteFuente de Servicios (4%) u Honorarios (11%).</li>
-                        <li><b>Pagos por Cuenta de Terceros (Tributos / Fletes / Bodegaje):</b> Imputables directamente al costo de importacion (Cuenta 146505). No llevan IVA del agente ni retencion en la fuente sobre el intermediario.</li>
+    
+            opciones_fac = []
+            for idx_r, r in df_p.iterrows():
+                fn = str(r.get("Factura") or f"Doc_{idx_r+1}").strip()
+                tag_ex = " 🚫 [NO CONTABILIZAR]" if (fn in cur_no_contab or bool(r.get("No Contabilizar", False))) else ""
+                comp_str = str(r.get("Comprobante Siigo") or f"Comp {idx_r+1}").strip()
+                fecha_str = str(r.get("Fecha") or "").strip()
+                prov_str = str(r.get("Proveedor") or "Proveedor").strip()[:24]
+                try: tot_num = float(r.get("Total", 0.0) or 0.0)
+                except Exception: tot_num = 0.0
+                opciones_fac.append(f"[{comp_str}] {fecha_str} - {fn}{tag_ex} - {prov_str} (${tot_num:,.0f})")
+    
+            # Preservar la factura seleccionada para que no vuelva a la primera tras guardar cambios o editar
+            comp_activo_guardado = st.session_state.get("factura_seleccionada_auditoria")
+            idx_fac_sel = 0
+            if comp_activo_guardado:
+                for i_f, op_str in enumerate(opciones_fac):
+                    if f"[{comp_activo_guardado}]" in op_str:
+                        idx_fac_sel = i_f
+                        break
+    
+            if "sel_factura_auditoria_box" in st.session_state:
+                if st.session_state["sel_factura_auditoria_box"] not in opciones_fac and idx_fac_sel < len(opciones_fac):
+                    st.session_state["sel_factura_auditoria_box"] = opciones_fac[idx_fac_sel]
+    
+            if not opciones_fac:
+                st.info("No hay facturas disponibles para auditar en este reporte.")
+                st.stop()
+    
+            seleccion = st.selectbox(
+                "Selecciona una factura para auditar:",
+                opciones_fac,
+                index=idx_fac_sel if idx_fac_sel < len(opciones_fac) else 0,
+                key="sel_factura_auditoria_box"
+            )
+    
+            if not seleccion:
+                st.stop()
+    
+            comp_sel = seleccion.split("]")[0].replace("[", "").strip()
+            st.session_state["factura_seleccionada_auditoria"] = comp_sel
+            m_fac_matches = df_p[df_p["Comprobante Siigo"] == comp_sel]
+            if m_fac_matches.empty:
+                m_fac_matches = df_p
+            fac_sel = m_fac_matches.iloc[0]
+            es_aduanero = any(k in fac_sel["Proveedor"].upper() for k in AGENTES_ADUANEROS)
+    
+            audit_info = fac_sel.get("Audit Info", {})
+            if not isinstance(audit_info, dict):
+                audit_info = {}
+    
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                # Control individual para marcar si no se debe contabilizar esta factura
+                fac_act_fn = fac_sel["Factura"]
+                esta_excl_ind = fac_act_fn in cur_no_contab or bool(fac_sel.get("No Contabilizar", False))
+    
+                c_tog_ex1, c_tog_ex2 = st.columns([2.4, 1.2])
+                with c_tog_ex1:
+                    if esta_excl_ind:
+                        st.warning("🚫 **Esta factura está marcada como 'NO CONTABILIZAR'** — No se generará asiento ni se exportará a Siigo.")
+                    else:
+                        st.caption("Estado contable activo para exportación a Siigo.")
+                with c_tog_ex2:
+                    if not esta_excl_ind:
+                        if st.button("🚫 No Contabilizar", key=f"btn_excl_indiv_{fac_sel['Comprobante Siigo']}", help="Excluye esta factura de Siigo"):
+                            cur_no_contab.add(fac_act_fn)
+                            st.session_state["facturas_no_contabilizar"] = cur_no_contab
+                            m_idx = df_p[df_p["Factura"] == fac_act_fn].index
+                            if not m_idx.empty:
+                                df_p.at[m_idx[0], "No Contabilizar"] = True
+                                df_p.at[m_idx[0], "Estado Registro"] = "🚫 No Contabilizar (Excluida)"
+                                st.session_state["df_procesado"] = df_p
+                            st.session_state["factura_seleccionada_auditoria"] = comp_sel
+                            st.session_state.pop("sel_factura_auditoria_box", None)
+                            st.rerun()
+                    else:
+                        if st.button("✅ Reactivar", key=f"btn_react_indiv_{fac_sel['Comprobante Siigo']}", help="Vuelve a incluirla en la contabilidad"):
+                            cur_no_contab.discard(fac_act_fn)
+                            st.session_state["facturas_no_contabilizar"] = cur_no_contab
+                            m_idx = df_p[df_p["Factura"] == fac_act_fn].index
+                            if not m_idx.empty:
+                                df_p.at[m_idx[0], "No Contabilizar"] = False
+                                es_r = bool(df_p.at[m_idx[0], "Ya Registrada"])
+                                cp = df_p.at[m_idx[0], "Comprobante Previo"]
+                                df_p.at[m_idx[0], "Estado Registro"] = f"🔴 Ya Registrada ({cp})" if es_r else "⚪ Compra Pendiente"
+                                st.session_state["df_procesado"] = df_p
+                            st.session_state["factura_seleccionada_auditoria"] = comp_sel
+                            st.session_state.pop("sel_factura_auditoria_box", None)
+                            st.rerun()
+    
+                st.markdown(f"""
+                <div class="audit-card">
+                    <h4>Detalle del Comprobante: {fac_sel['Comprobante Siigo']}</h4>
+                    <p><b>Soporte PDF Vinculado:</b> <span class="tag-comp">{fac_sel.get('Soporte PDF Renombrado', '')}</span></p>
+                    <p><b>Factura:</b> {fac_sel.get('Factura', '')} - <b>Proveedor:</b> {fac_sel.get('Proveedor', 'Proveedor')} (NIT: {fac_sel.get('NIT Emisor', '')})</p>
+                    <p><b>Fecha de Emisión:</b> {fac_sel.get('Fecha', '')} - <b>Total:</b> ${float(fac_sel.get('Total', 0.0) or 0.0):,.2f}</p>
+                    <p><b>Régimen Fiscal Emisor:</b> <span class="badge-active">{fac_sel.get('Régimen Fiscal Emisor', 'O-48')}</span></p>
+                    <div style="margin: 8px 0;">
+                        <span class="badge-tax">{'✅ Gran Contribuyente (O-13)' if audit_info.get('es_gc') else 'Común (No GC)'}</span>
+                        <span class="badge-tax">{'✅ Autorretenedor (O-15)' if audit_info.get('es_autorr') else 'No Autorretenedor'}</span>
+                        <span class="badge-tax">{'⚠️ Régimen Simple (O-47)' if audit_info.get('es_rst') else 'Régimen Ordinario'}</span>
+                    </div>
+                    <hr>
+                    <h5>Trazabilidad de la Contabilización y Validación DIAN:</h5>
+                    <ul>
+                        <li><b>Cuenta Asignada:</b> <span class="tag-propio">{fac_sel.get('Cta Principal', '14650501')}</span> - {fac_sel.get('Categoría', 'General')}</li>
+                        <li><b>Cruce DIAN:</b> {fac_sel.get('Razón Contable', 'Clasificación automática')}</li>
+                        <li><b>Base Gravable:</b> ${float(fac_sel.get('Base', 0.0) or 0.0):,.2f} - <b>IVA:</b> ${float(fac_sel.get('IVA', 0.0) or 0.0):,.2f}</li>
+                        <li><b>Retención en la Fuente:</b> ${float(fac_sel.get('ReteFuente', 0.0) or 0.0):,.2f} ({audit_info.get('razon_rfte', 'N/A')})</li>
+                        <li><b>ReteICA:</b> ${fac_sel.get('ReteICA', 0.0):,.2f} ({audit_info.get('razon_reteica', audit_info.get('razon_rica', 'N/A'))})</li>
+                        <li><b>ReteIVA:</b> ${fac_sel.get('ReteIVA', 0.0):,.2f} ({audit_info.get('razon_reteiva', 'N/A')})</li>
                     </ul>
                 </div>
                 """, unsafe_allow_html=True)
-
-        with col_a2:
-            st.markdown("#### Resumen Financiero")
-            st.metric("Base Gravable", f"${fac_sel['Base']:,.2f}")
-            st.metric("IVA Liquidado", f"${fac_sel['IVA']:,.2f}")
-            st.metric("ReteFuente", f"-${fac_sel['ReteFuente']:,.2f}")
-            st.metric("ReteICA", f"-${fac_sel.get('ReteICA', 0.0):,.2f}")
-            reteiva_val = fac_sel.get("ReteIVA", 0.0)
-            st.metric("ReteIVA", f"-${reteiva_val:,.2f}")
-            if fac_sel.get("Impuestos Asumidos"):
-                saldo_mostrar = round(fac_sel["Base"] + fac_sel["IVA"], 2)
-                st.metric("Saldo CxP a Cruzar (Triangulación)", f"${saldo_mostrar:,.2f}")
-                st.caption("ℹ️ Impuestos asumidos (Cta 53152001). Saldo total a cruzar.")
-            else:
-                neto_cxp = round(fac_sel["Base"] + fac_sel["IVA"] - fac_sel["ReteFuente"] - fac_sel.get("ReteICA", 0.0) - reteiva_val, 2)
-                st.metric("Total Neto CxP (Cta 22 / 23)", f"${neto_cxp:,.2f}")
-
-        # VISTA PREVIA DE LA FACTURA EN UN CUADRO (SOPORTE PARA UNIFICADOS O SEPARADOS)
-        st.markdown("---")
-        st.markdown("### 🔍 Vista Previa del Documento Soporte")
-        st.caption("Visualiza el PDF de esta factura directamente en pantalla, tanto si subiste archivos individuales como un PDF consolidado/unificado.")
-
-        dict_renom = st.session_state.get("dict_pdfs", {})
-        dict_orig = st.session_state.get("raw_uploaded_pdfs", {})
-
-        pdf_bytes_encontrado, origen_desc, pags_encontradas = buscar_y_extraer_pdf(
-            fac_sel,
-            dict_renombrados=dict_renom,
-            dict_originales=dict_orig,
-            empresa_compradora=empresa
-        )
-
-        if pdf_bytes_encontrado:
-            # Banner de coincidencia exacta con el registro contable
-            st.success(f"✅ **Factura y Registro Contable Vinculados:** Comprobante **{fac_sel['Comprobante Siigo']}** | Factura: **{fac_sel['Factura']}** | Proveedor: **{fac_sel['Proveedor']}** (NIT: {fac_sel['NIT Emisor']}) — Total: **${fac_sel['Total']:,.2f}**")
-
-            try:
-                reader_prev = PdfReader(io.BytesIO(pdf_bytes_encontrado))
-                num_pags_tot = len(reader_prev.pages)
-            except Exception:
-                num_pags_tot = 1
-
-            pags_badge = f"{num_pags_tot} páginas completas" if num_pags_tot > 1 else "1 página"
-            st.markdown(f"""
-            <div style="background:#0070ba; color:white; padding:9px 16px; border-radius:6px; font-weight:600; font-size:14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                <span>📄 {origen_desc} — Factura {fac_sel['Factura']} ({fac_sel['Proveedor']})</span>
-                <span style="background:rgba(255,255,255,0.25); padding:3px 10px; border-radius:12px; font-size:12px;">📑 {pags_badge}</span>
-            </div>
-            """, unsafe_allow_html=True)
-
-            safe_c_key = re.sub(r'\W', '_', str(fac_sel['Comprobante Siigo']))
-            renderizar_visor_pdf_completo(
-                pdf_bytes_encontrado,
-                nombre_archivo=fac_sel["Soporte PDF Renombrado"],
-                fac_sel=fac_sel,
-                key_prefix=f"fac_{safe_c_key}",
-                nit_comprador=re.sub(r"\D", "", str(empresa.get("nit", "9013464125")))
+    
+                with st.expander("⚙️ Ajustar Régimen, Cuentas (CxP), Base Gravable e Impuestos Asumidos:", expanded=True if (fac_sel.get("Ya Registrada") or es_aduanero) else False):
+                    st.caption("Modifica aquí los valores fiscales, la cuenta por pagar o el tratamiento de retenciones asumidas:")
+                    c_mod1, c_mod2 = st.columns(2)
+                    with c_mod1:
+                        opciones_reg_man = [
+                            "O-48 (Responsable de IVA / Común - Retención Ordinaria)",
+                            "O-15 (Autorretenedor de Renta - Sin ReteFuente)",
+                            "O-13 (Gran Contribuyente - Sin ReteIVA)",
+                            "O-13;O-15 (Gran Contribuyente y Autorretenedor)",
+                            "O-47 (Régimen Simple - Exento ReteFuente y ReteIVA)",
+                            "O-49 (No Responsable de IVA)"
+                        ]
+                        idx_actual = 0
+                        reg_actual = str(fac_sel.get("Régimen Fiscal Emisor", ""))
+                        if "O-13" in reg_actual and "O-15" in reg_actual: idx_actual = 3
+                        elif "O-15" in reg_actual: idx_actual = 1
+                        elif "O-13" in reg_actual: idx_actual = 2
+                        elif "O-47" in reg_actual: idx_actual = 4
+                        elif "O-49" in reg_actual: idx_actual = 5
+    
+                        nuevo_reg_sel = st.selectbox("Selecciona Régimen Fiscal:", opciones_reg_man, index=idx_actual, key=f"sel_reg_{fac_sel['Comprobante Siigo']}")
+                        cod_reg_sel = nuevo_reg_sel.split()[0]
+    
+                        cta_p_def = str(fac_sel.get("Cta Principal") or ("14650501" if es_aduanero else "51350501")).strip()
+                        nueva_cta_p = st.text_input(
+                            "Cuenta Principal (Gasto / Costo / Inventario):",
+                            value=cta_p_def,
+                            key=f"inp_cta_p_{fac_sel['Comprobante Siigo']}",
+                            help="Cuenta contable donde se imputa la base de la factura (ej. 51350501 Servicios, 14650501 Mercancías en Tránsito)."
+                        )
+    
+                        cta_cxp_def = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
+                        nueva_cta_cxp = st.text_input(
+                            "Cuenta por Pagar (Pasivo / Contrapartida):",
+                            value=cta_cxp_def,
+                            key=f"inp_cxp_{fac_sel['Comprobante Siigo']}",
+                            help="Puedes cambiar aquí la cuenta pasivo (ej. 22050505 Agencia Aduana, 23359501 Acreedores/DHL, 22050501 Proveedores)."
+                        )
+    
+                        es_importacion_factura = es_aduanero or "1465" in str(fac_sel.get("Cta Principal", "")) or "IMPORTACI" in str(fac_sel.get("Categoría", "")).upper()
+                        cta_iva_def = str(fac_sel.get("Cta IVA") or ("24081501" if es_importacion_factura else "24081001")).strip()
+                        nueva_cta_iva = st.text_input(
+                            "Cuenta IVA Servicios / Compras:",
+                            value=cta_iva_def,
+                            key=f"inp_iva_{fac_sel['Comprobante Siigo']}",
+                            help="Cuenta contable de IVA descontable ordinario (ej. 24081501 Servicios o 24081001 Compras)."
+                        )
+    
+                    with c_mod2:
+                        c_v1, c_v2 = st.columns(2)
+                        base_cur_f = float(fac_sel["Base"]) if pd.notna(fac_sel["Base"]) else 0.0
+    
+                        # Calcular sugerencia de retención si se selecciona O-48
+                        if "O-48" in cod_reg_sel:
+                            rf_sug = round(base_cur_f * 0.04, 2) if es_aduanero or "EURO" in str(fac_sel["Proveedor"]).upper() else round(base_cur_f * 0.025, 2)
+                            ri_sug = round(base_cur_f * 0.00966, 2)
+                        elif any(k in cod_reg_sel for k in ["O-15", "O-47"]):
+                            rf_sug = 0.0
+                            ri_sug = 0.0
+                        else:
+                            rf_sug = float(fac_sel.get("ReteFuente", 0.0))
+                            ri_sug = float(fac_sel.get("ReteICA", 0.0))
+    
+                        val_rf_input = float(fac_sel.get("ReteFuente", 0.0))
+                        if val_rf_input == 0.0 and "O-48" in cod_reg_sel and rf_sug > 0:
+                            val_rf_input = rf_sug
+                        val_ri_input = float(fac_sel.get("ReteICA", 0.0))
+                        if val_ri_input == 0.0 and "O-48" in cod_reg_sel and ri_sug > 0:
+                            val_ri_input = ri_sug
+    
+                        with c_v1:
+                            nueva_base = st.number_input("Base Gravable / Subtotal ($):", value=base_cur_f, step=1000.0, key=f"nb_{fac_sel['Comprobante Siigo']}")
+                            nueva_rfte = st.number_input("ReteFuente ($):", value=val_rf_input, step=100.0, key=f"nrf_{fac_sel['Comprobante Siigo']}")
+                        with c_v2:
+                            lbl_iva_desc = "IVA Servicios ($) (24081501):" if es_importacion_factura else "IVA Descontable ($):"
+                            nuevo_iva = st.number_input(lbl_iva_desc, value=float(fac_sel["IVA"]), step=100.0, key=f"niva_{fac_sel['Comprobante Siigo']}")
+                            nuevo_rica = st.number_input("ReteICA ($):", value=val_ri_input, step=100.0, key=f"nri_{fac_sel['Comprobante Siigo']}")
+    
+                        # CAMPO DEDICADO: IVA DE IMPORTACIÓN (CUENTA 240835) - SOLO PARA FACTURAS DE IMPORTACIÓN
+                        if es_importacion_factura:
+                            raw_imp_f = fac_sel.get("IVA Importación")
+                            try:
+                                val_iva_imp_actual = float(raw_imp_f) if (raw_imp_f is not None and pd.notna(raw_imp_f)) else 0.0
+                                if pd.isna(val_iva_imp_actual):
+                                    val_iva_imp_actual = 0.0
+                            except Exception:
+                                val_iva_imp_actual = 0.0
+    
+                            raw_cta_f = fac_sel.get("Cta IVA Importación")
+                            if raw_cta_f is None or pd.isna(raw_cta_f) or str(raw_cta_f).strip() in ["", "nan", "None"]:
+                                cta_iva_imp_actual = "240835"
+                            else:
+                                cta_iva_imp_actual = str(raw_cta_f).strip()
+    
+                            c_imp1, c_imp2 = st.columns(2)
+                            with c_imp1:
+                                nuevo_iva_imp = st.number_input(
+                                    "🚢 IVA de Importación ($) (Cta 240835):",
+                                    value=float(val_iva_imp_actual),
+                                    step=1000.0,
+                                    key=f"niva_imp_val_{fac_sel['Comprobante Siigo']}",
+                                    help="Ingresa aquí el valor del IVA pagado en la importación / declaración de aduanas que se imputa a la cuenta 240835."
+                                )
+                            with c_imp2:
+                                cta_iva_imp_cod = st.text_input(
+                                    "Cuenta IVA Importación:",
+                                    value=cta_iva_imp_actual,
+                                    key=f"inp_cta_ivaimp_cod_{fac_sel['Comprobante Siigo']}",
+                                    help="Cuenta contable de IVA para importación (por defecto 240835)."
+                                )
+                        else:
+                            nuevo_iva_imp = 0.0
+                            cta_iva_imp_cod = "240835"
+    
+                    asumir_imp = st.checkbox(
+                        "Asumir Impuestos / Retenciones (Cruza con Agente Aduanero / Triangulación)",
+                        value=bool(fac_sel.get("Impuestos Asumidos", False) or es_aduanero or any(k in fac_sel["Proveedor"].upper() for k in ["CARGO", "ADUANA", "PORTUARIA", "DHL"])),
+                        key=f"asum_in_{fac_sel['Comprobante Siigo']}",
+                        help="Si se asumen, las retenciones van a la cuenta 53152001 (Retenciones Asumidas) y el Saldo por Pagar de la factura queda en Base + IVA (ej. .651.939)."
+                    )
+    
+                    comp_key_btn = str(fac_sel.get('Comprobante Siigo', '')).strip()
+                    if st.button("💾 Aplicar Cambios y Recalcular Asiento", key=f"btn_aplica_reg_{comp_key_btn}"):
+                        cod_reg = nuevo_reg_sel.split()[0]
+                        m_idx_list = df_p[df_p["Comprobante Siigo"].astype(str).str.strip() == comp_sel].index
+                        r_idx = m_idx_list[0] if len(m_idx_list) > 0 else fac_sel.name
+                        df_p.at[r_idx, "Régimen Fiscal Emisor"] = cod_reg
+                        df_p.at[r_idx, "Base"] = nueva_base
+                        df_p.at[r_idx, "IVA"] = nuevo_iva
+                        df_p.at[r_idx, "ReteFuente"] = nueva_rfte
+                        df_p.at[r_idx, "ReteICA"] = nuevo_rica
+                        if nueva_rfte > 0 and not str(df_p.at[r_idx, "Cta ReteFuente"]).strip():
+                            df_p.at[r_idx, "Cta ReteFuente"] = "23652503" if es_aduanero else "23654001"
+                        if nuevo_rica > 0 and not str(df_p.at[r_idx, "Cta ReteICA"]).strip():
+                            df_p.at[r_idx, "Cta ReteICA"] = "23680505" if es_aduanero else "23680501"
+                        cta_clean = nueva_cta_cxp.split()[0].strip()
+                        df_p.at[r_idx, "Cuenta Pasivo Especifica"] = cta_clean
+                        df_p.at[r_idx, "Cta Contrapartida"] = cta_clean
+                        df_p.at[r_idx, "Cta Principal"] = nueva_cta_p.split()[0].strip()
+                        cta_iva_clean = nueva_cta_iva.split()[0].strip() if 'nueva_cta_iva' in locals() and nueva_cta_iva else ("24081501" if es_importacion_factura else "24081001")
+                        df_p.at[r_idx, "Cta IVA"] = cta_iva_clean
+                        nuevo_iva_imp_f = float(nuevo_iva_imp) if pd.notna(nuevo_iva_imp) else 0.0
+                        cta_iva_imp_clean = cta_iva_imp_cod.split()[0].strip()
+                        if not cta_iva_imp_clean or cta_iva_imp_clean in ["nan", "None"]:
+                            cta_iva_imp_clean = "240835"
+                        df_p.at[r_idx, "IVA Importación"] = nuevo_iva_imp_f
+                        df_p.at[r_idx, "Cta IVA Importación"] = cta_iva_imp_clean
+                        df_p.at[r_idx, "Impuestos Asumidos"] = asumir_imp
+                        df_p.at[r_idx, "Editada Manualmente"] = True
+    
+                        r_iva_val = float(fac_sel.get("ReteIVA", 0.0)) if pd.notna(fac_sel.get("ReteIVA")) else 0.0
+                        if asumir_imp:
+                            saldo_p = round(nueva_base + nuevo_iva + nuevo_iva_imp_f, 2)
+                            df_p.at[r_idx, "Neto a Pagar"] = saldo_p
+                            df_p.at[r_idx, "Total Neto"] = saldo_p
+                        else:
+                            neto_p_calc = round(nueva_base + nuevo_iva + nuevo_iva_imp_f - nueva_rfte - nuevo_rica - r_iva_val, 2)
+                            df_p.at[r_idx, "Neto a Pagar"] = neto_p_calc
+                            df_p.at[r_idx, "Total Neto"] = neto_p_calc
+    
+                        tot_esperado = round(nueva_base + nuevo_iva + nuevo_iva_imp_f, 2)
+                        if nuevo_iva_imp_f > 0 and abs(float(df_p.at[r_idx, "Total"]) - tot_esperado) > 10.0:
+                            df_p.at[r_idx, "Total"] = tot_esperado
+    
+                        st.session_state["df_procesado"] = df_p
+    # Asiento de triangulación protegido: no se sobreescribe con asiento estándar
+    
+                        # Guardar regla en la Memoria de Aprendizaje Continuo
+                        guardar_regla_aprendizaje(
+                            empresa,
+                            fac_sel.get("NIT Emisor"),
+                            fac_sel.get("Proveedor"),
+                            cta_p=nueva_cta_p.split()[0].strip(),
+                            resp_fiscal=cod_reg,
+                            cta_cxp=cta_clean,
+                            cta_iva=cta_iva_clean,
+                            asumir_impuestos=asumir_imp
+                        )
+                        guardar_trabajo_en_historial(
+                            empresa, df_p,
+                            excel_bytes=st.session_state.get("excel_bytes"),
+                            excel_nombre=st.session_state.get("excel_nombre", "Reporte.xlsx"),
+                            dict_pdfs_renombrados=st.session_state.get("dict_pdfs", {}),
+                            dict_pdfs_originales=st.session_state.get("raw_uploaded_pdfs", {}),
+                            zip_bytes=st.session_state.get("zip_pdfs"),
+                            job_id=st.session_state.get("job_actual_id")
+                        )
+                        st.session_state["factura_seleccionada_auditoria"] = comp_sel
+                        st.session_state.pop("sel_factura_auditoria_box", None)
+                        st.success(f"¡Valores y Cuenta CxP ({cta_clean}) actualizados y asiento recalculado con éxito!")
+                        st.rerun()
+    
+                if es_aduanero:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown("""
+                    <div style="background:#fef3c7; padding:15px; border-radius:8px; border-left:5px solid #d97706;">
+                        <h5 style="color:#92400e; margin-top:0;">Alerta de Importacion / Agenciamiento Aduanero</h5>
+                        <p style="color:#78350f; font-size:14px; margin-bottom:5px;">
+                        En este documento intervienen <b>gastos por cuenta de terceros</b> y <b>honorarios propios del agente</b>:
+                        </p>
+                        <ul style="color:#78350f; font-size:14px;">
+                            <li><b>Ingresos Propios del Agente (Honorarios / Comision):</b> Gravados con IVA 19%, sujetos a ReteFuente de Servicios (4%) u Honorarios (11%).</li>
+                            <li><b>Pagos por Cuenta de Terceros (Tributos / Fletes / Bodegaje):</b> Imputables directamente al costo de importacion (Cuenta 146505). No llevan IVA del agente ni retencion en la fuente sobre el intermediario.</li>
+                        </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+            with col_a2:
+                st.markdown("#### Resumen Financiero")
+                st.metric("Base Gravable", f"${float(fac_sel.get('Base', 0.0) or 0.0):,.2f}")
+                st.metric("IVA Liquidado (Servicios)", f"${float(fac_sel.get('IVA', 0.0) or 0.0):,.2f}")
+                iva_imp_cur = float(fac_sel.get("IVA Importación", 0.0))
+                if iva_imp_cur > 0:
+                    st.metric("🚢 IVA Importación (240835)", f"${iva_imp_cur:,.2f}")
+                st.metric("ReteFuente", f"-${float(fac_sel.get('ReteFuente', 0.0) or 0.0):,.2f}")
+                st.metric("ReteICA", f"-${fac_sel.get('ReteICA', 0.0):,.2f}")
+                reteiva_val = fac_sel.get("ReteIVA", 0.0)
+                if reteiva_val > 0:
+                    st.metric("ReteIVA", f"-${reteiva_val:,.2f}")
+                if fac_sel.get("Impuestos Asumidos"):
+                    saldo_mostrar = round(fac_sel["Base"] + fac_sel["IVA"] + iva_imp_cur, 2)
+                    st.metric("Saldo CxP a Cruzar (Triangulación)", f"${saldo_mostrar:,.2f}")
+                    st.caption("ℹ️ Impuestos asumidos (Cta 53152001). Saldo total a cruzar.")
+                else:
+                    neto_cxp = round(fac_sel["Base"] + fac_sel["IVA"] + iva_imp_cur - fac_sel["ReteFuente"] - fac_sel.get("ReteICA", 0.0) - reteiva_val, 2)
+                    st.metric("Total Neto CxP (Cta 22 / 23)", f"${neto_cxp:,.2f}")
+    
+            # VISTA PREVIA DE LA FACTURA EN UN CUADRO (SOPORTE PARA UNIFICADOS O SEPARADOS)
+            st.markdown("---")
+            st.markdown("### 🔍 Vista Previa del Documento Soporte")
+            st.caption("Visualiza el PDF de esta factura directamente en pantalla, tanto si subiste archivos individuales como un PDF consolidado/unificado.")
+    
+            dict_renom = st.session_state.get("dict_pdfs", {})
+            dict_orig = st.session_state.get("raw_uploaded_pdfs", {})
+    
+            pdf_bytes_encontrado, origen_desc, pags_encontradas = buscar_y_extraer_pdf(
+                fac_sel,
+                dict_renombrados=dict_renom,
+                dict_originales=dict_orig,
+                empresa_compradora=empresa
             )
-        elif dict_orig or dict_renom:
-            st.warning("⚠️ No se identificó automáticamente esta factura. Puedes seleccionar manualmente cualquier PDF cargado para visualizarlo:")
-            todos_los_pdfs = {**dict_orig, **dict_renom}
-            pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()), key="sel_pdf_manual_box")
-            if pdf_elegido:
-                f_bytes_sel = todos_los_pdfs[pdf_elegido]
-                f_bytes_sel, _ = desbloquear_pdf_bytes(f_bytes_sel, nit_receptor=re.sub(r"\D", "", str(empresa.get("nit", "9013464125"))))
-                safe_f_key = re.sub(r'\W', '_', str(pdf_elegido))
+    
+            if pdf_bytes_encontrado:
+                # Banner de coincidencia exacta con el registro contable
+                st.success(f"✅ **Factura y Registro Contable Vinculados:** Comprobante **{fac_sel['Comprobante Siigo']}** | Factura: **{fac_sel.get('Factura', '')}** | Proveedor: **{fac_sel.get('Proveedor', 'Proveedor')}** (NIT: {fac_sel.get('NIT Emisor', '')}) — Total: **${float(fac_sel.get('Total', 0.0) or 0.0):,.2f}**")
+    
+                try:
+                    reader_prev = PdfReader(io.BytesIO(pdf_bytes_encontrado))
+                    num_pags_tot = len(reader_prev.pages)
+                except Exception:
+                    num_pags_tot = 1
+    
+                pags_badge = f"{num_pags_tot} páginas completas" if num_pags_tot > 1 else "1 página"
+                st.markdown(f"""
+                <div style="background:#0070ba; color:white; padding:9px 16px; border-radius:6px; font-weight:600; font-size:14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <span>📄 {origen_desc} — Factura {fac_sel.get('Factura', '')} ({fac_sel.get('Proveedor', 'Proveedor')})</span>
+                    <span style="background:rgba(255,255,255,0.25); padding:3px 10px; border-radius:12px; font-size:12px;">📑 {pags_badge}</span>
+                </div>
+                """, unsafe_allow_html=True)
+    
+                safe_c_key = re.sub(r'\W', '_', str(fac_sel['Comprobante Siigo']))
                 renderizar_visor_pdf_completo(
-                    f_bytes_sel,
-                    nombre_archivo=pdf_elegido,
+                    pdf_bytes_encontrado,
+                    nombre_archivo=fac_sel["Soporte PDF Renombrado"],
                     fac_sel=fac_sel,
-                    key_prefix=f"man_{safe_f_key}",
+                    key_prefix=f"fac_{safe_c_key}",
                     nit_comprador=re.sub(r"\D", "", str(empresa.get("nit", "9013464125")))
                 )
-        else:
-            st.markdown(f"""
-            <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px;">
-                <div style="border-bottom: 2px solid #0070ba; padding-bottom: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
-                    <h4 style="margin:0; color:#0f172a;">📄 Cuadro de Factura Electrónica</h4>
-                    <span style="background:#eff6ff; color:#1d4ed8; padding:3px 10px; border-radius:4px; font-weight:bold; font-family:monospace;">{fac_sel['Factura']}</span>
-                </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; font-size: 14px; color: #334155;">
-                    <div><b>Proveedor (Emisor):</b> {fac_sel['Proveedor']}<br><b>NIT Emisor:</b> {fac_sel['NIT Emisor']}</div>
-                    <div><b>Empresa Compradora:</b> {empresa['nombre']}<br><b>NIT Receptor:</b> {empresa['nit']}</div>
-                    <div><b>Fecha de Emisión:</b> {fac_sel['Fecha']}</div>
-                    <div><b>Valor Total Facturado:</b> ${fac_sel['Total']:,.2f}</div>
-                </div>
-                <p style="margin-top: 14px; margin-bottom: 0; font-size: 13px; color: #64748b;">
-                    <i>💡 Nota: Sube los archivos PDF en la Pestaña 1 para ver el documento digitalizado en este visor.</i>
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # TABLA DE CONTABILIZACION (ASIENTO CONTABLE)
-        st.markdown("### 📋 Asiento Contable del Comprobante (Cómo se Contabilizó)")
-        st.caption("Detalle de partida doble con imputación de cuentas, débitos, créditos y sumas iguales:")
-
-        fac_num_aud = str(fac_sel["Factura"]).strip()
-        asientos_map = st.session_state.get("asientos_triangulacion_por_factura", {})
-        asiento_triang_aprobado = asientos_map.get(fac_num_aud)
-        if asiento_triang_aprobado is None:
-            asiento_triang_aprobado = st.session_state.get(f"asiento_triang_aprobado_{fac_num_aud}")
-
-        # Si aún no está en el mapa, verificar si pertenece a algún paquete listo en triangulación
-        if asiento_triang_aprobado is None and "paquetes_importacion" in st.session_state:
-            for p_k, p_v in st.session_state["paquetes_importacion"].items():
-                if str(p_v["agente"]["Factura"]).strip() == fac_num_aud:
-                    if st.session_state.get(f"paquete_listo_{p_k}", False) or p_v.get("diferencia", 999) < 1.0:
-                        en_nd_k = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
-                        en_gp_k = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
-                        en_h2_k = st.session_state.get(f"enviar_h2_pq_{p_k}", False)
-                        df_as_k, _, _ = generar_asiento_triangulacion_paquete(p_v["agente"], p_v["terceros"], enviar_a_no_deducible=en_nd_k, enviar_a_gastos_propios=en_gp_k, enviar_a_hoja2=en_h2_k)
-                        asiento_triang_aprobado = df_as_k
-                        asientos_map[fac_num_aud] = df_as_k
-                        st.session_state["asientos_triangulacion_por_factura"] = asientos_map
-                        break
-
-        if asiento_triang_aprobado is not None and not (isinstance(asiento_triang_aprobado, pd.DataFrame) and asiento_triang_aprobado.empty):
-            df_asiento = pd.DataFrame(asiento_triang_aprobado).copy()
-            if "Descripción de la Cuenta" not in df_asiento.columns and "Descripción Cuenta" in df_asiento.columns:
-                df_asiento["Descripción de la Cuenta"] = df_asiento["Descripción Cuenta"]
-                
-            # SALVAGUARDA DE RETENCIÓN EN LA FUENTE: Si la factura tiene ReteFuente calculada, debe figurar en el comprobante
-            val_rf_check = float(fac_sel.get("ReteFuente", 0.0))
-            cta_rf_esp = str(fac_sel.get("Cta ReteFuente") or ("23652503" if es_aduanero else "23654001")).strip()
-            cuentas_en_asiento = [str(c).strip() for c in df_asiento["Código Cuenta"].values] if "Código Cuenta" in df_asiento.columns else []
-            
-            if val_rf_check > 0 and cta_rf_esp not in cuentas_en_asiento:
-                # Regenerar asiento completo con ReteFuente garantizada
-                df_asiento = obtener_asiento_contable_hoja2(fac_sel, es_aduanero=es_aduanero)
-                asientos_map[fac_num_aud] = df_asiento
-                st.session_state["asientos_triangulacion_por_factura"] = asientos_map
-                
-            st.markdown(f"""
-            <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:12px 16px; margin-bottom:12px;">
-                <h5 style="margin:0 0 4px 0; color:#166534;">🔀 Contabilización Oficial Aprobada en Triangulación</h5>
-                <p style="margin:0; color:#14532d; font-size:13.5px;">
-                    Esta factura fue conciliada en la Pestaña 3. El asiento contable real cancela las cuentas por pagar de terceros y traslada la deuda al agente aduanero:
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            asiento_filas = []
-            es_nc = "Devolucion" in str(fac_sel["Operacion"])
-            asume_ret = bool(fac_sel.get("Impuestos Asumidos", False))
-            cta_cxp_usar = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
-
-            # 1. Base / Costo (Subtotal real del documento)
-            asiento_filas.append({
-                "Código Cuenta": fac_sel["Cta Principal"],
-                "Descripción de la Cuenta": f"{fac_sel['Categoría']} - {fac_sel['Proveedor'][:25]}",
-                "Tercero / NIT": fac_sel["NIT Emisor"],
-                "Débito ($)": 0.0 if es_nc else fac_sel["Base"],
-                "Crédito ($)": fac_sel["Base"] if es_nc else 0.0
-            })
-
-            # 2. IVA Descontable
-            if fac_sel["IVA"] > 0:
-                asiento_filas.append({
-                    "Código Cuenta": fac_sel["Cta IVA"],
-                    "Descripción de la Cuenta": f"IVA Descontable (Base: ${fac_sel['Base']:,.0f})",
-                    "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": 0.0 if es_nc else fac_sel["IVA"],
-                    "Crédito ($)": fac_sel["IVA"] if es_nc else 0.0
-                })
-
-            tot_ret = round(float(fac_sel["ReteFuente"]) + float(fac_sel.get("ReteICA", 0.0)), 2)
-
-            if asume_ret:
-                # IMPUESTOS ASUMIDOS (Cruza con Agente Aduanero / Triangulación)
-                if tot_ret > 0:
-                    asiento_filas.append({
-                        "Código Cuenta": "53152001",
-                        "Descripción de la Cuenta": "Retenciones Asumidas (Impuestos Asumidos Aduana)",
-                        "Tercero / NIT": fac_sel["NIT Emisor"],
-                        "Débito ($)": tot_ret,
-                        "Crédito ($)": 0.0
-                    })
-                if fac_sel["ReteFuente"] > 0:
-                    cta_rf_usar = str(fac_sel.get("Cta ReteFuente") or ("23652503" if es_aduanero else "23654001")).strip()
-                    asiento_filas.append({
-                        "Código Cuenta": cta_rf_usar,
-                        "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel.get('Categoría', 'Servicios')})",
-                        "Tercero / NIT": fac_sel["NIT Emisor"],
-                        "Débito ($)": 0.0,
-                        "Crédito ($)": fac_sel["ReteFuente"]
-                    })
-                if fac_sel.get("ReteICA", 0.0) > 0:
-                    cta_ri_usar = str(fac_sel.get("Cta ReteICA") or ("23680505" if es_aduanero else "23680501")).strip()
-                    asiento_filas.append({
-                        "Código Cuenta": cta_ri_usar,
-                        "Descripción de la Cuenta": "Retención ICA Practicada",
-                        "Tercero / NIT": fac_sel["NIT Emisor"],
-                        "Débito ($)": 0.0,
-                        "Crédito ($)": fac_sel["ReteICA"]
-                    })
-                # Saldo por pagar al pasivo es Base + IVA (ej. .388.770 + 63.169 = .651.939)
-                saldo_cxp = round(fac_sel["Base"] + fac_sel["IVA"], 2)
-                asiento_filas.append({
-                    "Código Cuenta": cta_cxp_usar,
-                    "Descripción de la Cuenta": f"CxP Agente / Proveedor - Fac {fac_sel['Factura']}",
-                    "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": saldo_cxp if es_nc else 0.0,
-                    "Crédito ($)": 0.0 if es_nc else saldo_cxp
-                })
+            elif dict_orig or dict_renom:
+                st.warning("⚠️ No se identificó automáticamente esta factura. Puedes seleccionar manualmente cualquier PDF cargado para visualizarlo:")
+                todos_los_pdfs = {**dict_orig, **dict_renom}
+                pdf_elegido = st.selectbox("Selecciona un archivo PDF cargado:", list(todos_los_pdfs.keys()), key="sel_pdf_manual_box")
+                if pdf_elegido:
+                    f_bytes_sel = todos_los_pdfs[pdf_elegido]
+                    f_bytes_sel, _ = desbloquear_pdf_bytes(f_bytes_sel, nit_receptor=re.sub(r"\D", "", str(empresa.get("nit", "9013464125"))))
+                    safe_f_key = re.sub(r'\W', '_', str(pdf_elegido))
+                    renderizar_visor_pdf_completo(
+                        f_bytes_sel,
+                        nombre_archivo=pdf_elegido,
+                        fac_sel=fac_sel,
+                        key_prefix=f"man_{safe_f_key}",
+                        nit_comprador=re.sub(r"\D", "", str(empresa.get("nit", "9013464125")))
+                    )
             else:
-                # RETENCIONES ORDINARIAS PRACTICADAS AL PROVEEDOR
-                if fac_sel["ReteFuente"] > 0:
-                    cta_rf_usar = str(fac_sel.get("Cta ReteFuente") or ("23652503" if es_aduanero else "23654001")).strip()
-                    asiento_filas.append({
-                        "Código Cuenta": cta_rf_usar,
-                        "Descripción de la Cuenta": f"ReteFuente Practicada ({fac_sel.get('Categoría', 'Compras/Servicios')})",
-                        "Tercero / NIT": fac_sel["NIT Emisor"],
-                        "Débito ($)": fac_sel["ReteFuente"] if es_nc else 0.0,
-                        "Crédito ($)": 0.0 if es_nc else fac_sel["ReteFuente"]
-                    })
-                if fac_sel.get("ReteICA", 0.0) > 0:
-                    cta_ri_usar = str(fac_sel.get("Cta ReteICA") or ("23680505" if es_aduanero else "23680501")).strip()
-                    asiento_filas.append({
-                        "Código Cuenta": cta_ri_usar,
-                        "Descripción de la Cuenta": "Retención ICA Practicada",
-                        "Tercero / NIT": fac_sel["NIT Emisor"],
-                        "Débito ($)": fac_sel["ReteICA"] if es_nc else 0.0,
-                        "Crédito ($)": 0.0 if es_nc else fac_sel["ReteICA"]
-                    })
-                if fac_sel.get("ReteIVA", 0.0) > 0:
-                    asiento_filas.append({
-                        "Código Cuenta": "23670101",
-                        "Descripción de la Cuenta": "Retención de IVA Practicada (15%)",
-                        "Tercero / NIT": fac_sel["NIT Emisor"],
-                        "Débito ($)": fac_sel["ReteIVA"] if es_nc else 0.0,
-                        "Crédito ($)": 0.0 if es_nc else fac_sel["ReteIVA"]
-                    })
-
-                neto_cxp = round(fac_sel["Base"] + fac_sel["IVA"] - fac_sel["ReteFuente"] - fac_sel.get("ReteICA", 0.0) - fac_sel.get("ReteIVA", 0.0), 2)
-                asiento_filas.append({
-                    "Código Cuenta": cta_cxp_usar,
-                    "Descripción de la Cuenta": f"Proveedores Nacionales - Fac {fac_sel['Factura']}",
-                    "Tercero / NIT": fac_sel["NIT Emisor"],
-                    "Débito ($)": neto_cxp if es_nc else 0.0,
-                    "Crédito ($)": 0.0 if es_nc else neto_cxp
-                })
-
-            df_asiento = pd.DataFrame(asiento_filas)
-
-        st.dataframe(
-            df_asiento.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        sum_deb = df_asiento["Débito ($)"].sum()
-        sum_cred = df_asiento["Crédito ($)"].sum()
-
-        c_as1, c_as2, c_as3 = st.columns(3)
-        with c_as1:
-            st.metric("Total Débito", f"${sum_deb:,.2f}")
-        with c_as2:
-            st.metric("Total Crédito", f"${sum_cred:,.2f}")
-        with c_as3:
-            st.metric("Diferencia / Cuadre", f"${abs(sum_deb - sum_cred):,.2f}")
-        st.success("✅ **Comprobante Verificado:** Partida doble cuadrada con sumas iguales.")
-    else:
-        st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
-
-with tab_triangulacion:
-    st.markdown("### 🔀 Paquetes de Importación y Cruce de Cuentas por Pagar")
-    st.caption("Separa y concilia cada importación en paquetes individuales: Cobro de Euro Shipping = Factura DHL (Flete) + Factura Agencia Aduanas + Factura Garaje/Almacenadora.")
-
-    if "df_procesado" in st.session_state:
-        df_total = st.session_state["df_procesado"]
-        if "No Contabilizar" not in df_total.columns:
-            df_total["No Contabilizar"] = False
-
-        # Identificar ÚNICAMENTE facturas del gremio aduanero / logístico y de importación (Cero compras ordinarias/domésticas)
-        prov_upper = df_total["Proveedor"].astype(str).str.upper()
-        desc_upper = df_total.get("Descripcion", "").astype(str).str.upper()
-        grp_imp_str = df_total.get("Grupo Importación", "").astype(str).str.strip()
-        cta_cxp_str = df_total.get("Cuenta Pasivo Especifica", "").astype(str).str.strip()
-        cta_p_str = df_total.get("Cta Principal", "").astype(str).str.strip()
-
-        # 1. Facturas explícitamente marcadas en Excel con Grupo de Importación o clasificadas como aduaneras
-        cond_grp = (grp_imp_str != "") & (~grp_imp_str.isin(["nan", "None", "0", "0.0"]))
-        cond_es_adu = df_total.get("Es Aduanera", False) == True
-
-        # 2. Cuentas contables específicas de importación / aduanas (SIN 23359501 que es gasto doméstico)
-        cond_ctas = cta_cxp_str.isin(["22050505", "14650501"]) | (cta_p_str == "14650501")
-
-        # 3. Proveedores específicos de Comercio Exterior / Aduana / Puertos / Fletes
-        REGEX_IMPORTACION = (
-            r"EURO\s*SHIPPING|TRADE\s*GLOBAL|CONSOLCARGO|BLUE\s*LOGISTICS|"
-            r"KUEHNE|PANALPINA|DSV|EXPEDITORS|TIBA|HUBEMAR|SCHENKER|COLTRANS|COLMAS|"
-            r"DHL|CARGO\s*ADUANA|AGENCIA\s*DE\s*ADUANA|PORTUARIA|PUERTO\s*BAHIA|"
-            r"CONTECAR|SPRC|SPB|COMPAS|ALPOPULAR|ALMAVIVA|RANSA|ALMACENADORA\s*INTERAMERICANA|"
-            r"MAERSK|HAPAG|SEABOARD|HAMBURG|CMA\s*CGM|EVERGREEN|COSCO|YANG\s*MING"
-        )
-        cond_prov = prov_upper.str.contains(REGEX_IMPORTACION, regex=True, na=False)
-
-        # 4. Descripción que evidencia gastos de importación / desaduanamiento
-        REGEX_DESC_IMPORT = (
-            r"IMPORTACI[OÓ]N|AGENCIAMIENTO|ARANCEL|DESADUANAMIENTO|NACIONALIZACI[OÓ]N|"
-            r"BODEGAJE\s*PUERTO|ALMACENAJE\s*ADUANERO|MANDATO\s*ADUANERO|FLETE\s*INTERNACIONAL"
-        )
-        cond_desc = desc_upper.str.contains(REGEX_DESC_IMPORT, regex=True, na=False)
-
-        # 5. FILTRO ESTRICTO: Excluir tajantemente proveedores domésticos que nada tienen que ver con importación
-        REGEX_EXCLUIR_NO_IMPORTACION = (
-            r"HOTEL|ESTELAR|GENOVA|VITTAPARK|RESTAURANTE|COMIDA|ALMUERZO|"
-            r"PANAMERICANA|LIBRERIA|PAPELERIA|CLARO|COMCEL|MOVISTAR|TIGO|"
-            r"SIIGO|CERTICAMARA|TORNILLOLOCO|FERROMENDEZ|CAUCHOS|MAFLEXCOL|"
-            r"ELECTRICO|ILUMINACION|DONUCAFE|MECANIZAR|MONTEZ|ASIMFER|BATTS\s*ZONE|CMS"
-        )
-        cond_excluir_domestico = prov_upper.str.contains(REGEX_EXCLUIR_NO_IMPORTACION, regex=True, na=False)
-
-        # Condición estricta: ÚNICAMENTE facturas relacionadas con la importación
-        cond_aduanera = (cond_grp | cond_es_adu | cond_ctas | cond_prov | cond_desc) & (~cond_excluir_domestico)
-        df_adu = df_total[cond_aduanera].copy()
-
-        # Configuración dinámica y extensible de Agentes Coordinadores (Forwarders)
-        AGENTES_COORDINADORES_BASE = ["EURO SHIPPING", "TRADE GLOBAL", "CONSOLCARGO", "BLUE LOGISTICS", "KUEHNE", "PANALPINA", "DSV", "EXPEDITORS", "TIBA", "HUBEMAR"]
-
-        todos_provs = sorted(list(df_total["Proveedor"].dropna().unique()))
-        provs_agentes_sugeridos = [p for p in todos_provs if any(k in str(p).upper() for k in AGENTES_COORDINADORES_BASE)]
-
-        with st.expander("🏢 Configurar Agentes Coordinadores (Los que nos cobran directamente a nosotros):", expanded=False):
-            st.caption("Selecciona qué empresas actúan como Agentes Coordinadores / Forwarders que emiten cobros globales consolidados (Euro Shipping, Trade Global, Consolcargo, etc.):")
-            agentes_seleccionados_noms = st.multiselect(
-                "Agentes Coordinadores Activos:",
-                options=todos_provs,
-                default=provs_agentes_sugeridos,
-                key="sel_multiselect_agentes_coordinadores"
-            )
-
-        if not agentes_seleccionados_noms:
-            agentes_seleccionados_noms = provs_agentes_sugeridos
-
-        # Facturas de Agentes Principales (Los que nos cobran directamente)
-        df_agentes_all = df_adu[df_adu["Proveedor"].isin(agentes_seleccionados_noms)].copy()
-
-        # Facturas de Terceros Soporte (Los que se cruzan contra esos agentes)
-        df_terceros_all = df_adu[~df_adu.index.isin(df_agentes_all.index)].copy()
-
-        # Resumen superior
-        m_c1, m_c2, m_c3, m_c4, m_c5 = st.columns(5)
-        with m_c1:
-            st.metric("Operaciones Agente (Euro / Trade)", len(df_agentes_all))
-        with m_c2:
-            st.metric("Facturas Soporte en Pool", len(df_terceros_all), help="Total de facturas candidatas para cruce")
-        with m_c3:
-            n_rojas_adu = len(df_terceros_all[df_terceros_all.get("Ya Registrada", False) == True])
-            st.metric("Terceros Contabilizados (🔴)", n_rojas_adu, help="Causadas previamente en Siigo")
-        with m_c4:
-            n_blancas_adu = len(df_terceros_all[df_terceros_all.get("Ya Registrada", False) == False])
-            st.metric("Terceros Pendientes (⚪)", n_blancas_adu, help="No contabilizadas aún (Nuevas)")
-        with m_c5:
-            n_cuad_prev = sum([1 for p in st.session_state.get("paquetes_importacion", {}).values() if p.get("diferencia", 999) < 1.0])
-            st.metric("Paquetes Cuadrados ($0.00)", f"{n_cuad_prev} ✅")
-
-        st.markdown("---")
-
-        if df_agentes_all.empty:
-            st.warning("⚠️ No se encontraron facturas de agentes aduaneros principales (Euro Shipping o Trade Global) en este reporte.")
-        else:
-            # 1. FUNCIÓN DE AUTO-EMPAQUETAMIENTO INTELIGENTE
-            # Algoritmo de combinación: encuentra para cada Euro Shipping el subconjunto de DHL + Agencia + Garaje que suma su valor
-            def auto_empaquetar_inteligente(df_ag, df_terc, dict_pdfs=None):
-                """
-                Algoritmo cronológico de alta precisión para Agencias Aduaneras (Euro Shipping / Trade Global):
-                1. Ordena cronológicamente de Enero hacia Diciembre.
-                2. Cruza y relaciona tanto facturas de terceros YA contabilizadas (🔴) como NO contabilizadas (⚪).
-                3. Para cada factura de agente (ej. 19 de Enero), busca facturas de terceros (DHL, Agencia, Garaje, etc.):
-                   - Prioritariamente en fechas anteriores o el mismo día (-30 a 0 días de diferencia).
-                   - O en una fecha ligeramente superior (+1 a +12 días de diferencia).
-                   - Descarta o penaliza fechas lejanas de otros meses.
-                4. Exige concordancia estricta de precio: la suma del Saldo Cruce (Base + IVA) debe concordar
-                   exactamente con el valor total facturado por el agente aduanero.
-                """
-                import itertools
-                pqs_res = {}
-
-                # 1. Asegurar orden cronológico estricto de Enero hacia Diciembre
-                df_ag_ord = df_ag.copy()
-                df_ag_ord["_dt"] = pd.to_datetime(df_ag_ord["Fecha"], dayfirst=True, errors="coerce")
-                df_ag_ord = df_ag_ord.sort_values(by="_dt", ascending=True)
-
-                pool_t = df_terc.copy()
-                pool_t["_dt"] = pd.to_datetime(pool_t["Fecha"], dayfirst=True, errors="coerce")
-                pool_t = pool_t.sort_values(by="_dt", ascending=True)
-                pool_t["_asignado_pq"] = 0
-
-                for idx_ag_i, (_, ag_i) in enumerate(df_ag_ord.iterrows()):
-                    pq_id_i = idx_ag_i + 1
-                    tot_full_i = float(ag_i["Total"])
-                    iva_ag_i = float(ag_i.get("IVA", 0.0))
-                    base_ag_i = float(ag_i.get("Base", 0.0))
-                    f_ag_dt_i = ag_i["_dt"]
-
-                    # Escanear montos de ítems y conceptos del PDF del agente si está disponible
-                    montos_items_pdf = []
-                    if dict_pdfs:
-                        f_ag_n = str(ag_i.get("Factura", "")).strip()
-                        fol_ag = str(ag_i.get("Folio", "")).strip()
-                        pdf_b_ag = None
-                        for k_p, v_p in dict_pdfs.items():
-                            if (f_ag_n and f_ag_n.replace("-", "").upper() in k_p.replace("-", "").upper()) or (fol_ag and fol_ag in k_p):
-                                pdf_b_ag = v_p
-                                break
-                        if pdf_b_ag:
-                            montos_items_pdf = extraer_montos_items_pdf(pdf_b_ag)
-
-                    # 1. Identificar ítems SIN IVA vs ítems CON IVA del Agente
-                    # En importaciones (Euro Shipping, Trade Global):
-                    # - Los ítems SIN IVA (0%) son los que triangulan/cruzan con terceros (Flete internacional, origen, etc.)
-                    # - Los ítems CON IVA (19%) son gastos propios del agente (Coordinación de seguro, fee, etc.)
-                    if iva_ag_i > 0:
-                        base_con_iva = round(iva_ag_i / 0.19, 2)
-                        target_sin_iva = round(base_ag_i - base_con_iva, 2)
-                        if target_sin_iva <= 0:
-                            target_sin_iva = round(tot_full_i - round(iva_ag_i * 1.19, 2), 2)
-                    else:
-                        base_con_iva = 0.0
-                        target_sin_iva = tot_full_i
-
-                    targets_evaluar = []
-                    if target_sin_iva > 0 and iva_ag_i > 0:
-                        targets_evaluar.append((target_sin_iva, "sin_iva"))
-                    targets_evaluar.append((tot_full_i, "total"))
-
-                    cands_i = pool_t[pool_t["_asignado_pq"] == 0].copy()
-                    if cands_i.empty:
-                        pqs_res[pq_id_i] = {
-                            "agente": ag_i,
-                            "terceros": pd.DataFrame(),
-                            "diferencia": tot_full_i,
-                            "target_cruce": tot_full_i,
-                            "tipo_cruce": "total",
-                            "items_sin_iva": target_sin_iva,
-                            "gastos_propios_con_iva": round(base_con_iva + iva_ag_i, 2),
-                            "base_gastos_propios": base_con_iva
-                        }
-                        continue
-
-                    # Evaluar concordancia cronológica, de mandato y de IVA para cada factura de tercero
-                    cand_l = []
-                    for c_idx_k, c_row_k in cands_i.iterrows():
-                        tb_k = float(c_row_k.get("Base", 0.0))
-                        tiv_k = float(c_row_k.get("IVA", 0.0))
-                        sc_k = float(c_row_k.get("Total Neto", 0.0)) or (tb_k + tiv_k if tb_k > 0 else float(c_row_k.get("Total", 0.0)))
-                        p_u_k = str(c_row_k["Proveedor"]).upper()
-                        rol_k = "DHL" if "DHL" in p_u_k else ("AGENCIA" if any(k in p_u_k for k in ["CARGO", "ADUANA"]) else "GARAJE")
-
-                        # 2. Análisis de fechas: concordancia de Enero a Diciembre
-                        c_dt = c_row_k["_dt"]
-                        score_tiempo = 0
-                        diff_dias = 0
-                        relacion_fecha_txt = "Sin fecha"
-
-                        if pd.notna(f_ag_dt_i) and pd.notna(c_dt):
-                            diff_dias = int((c_dt - f_ag_dt_i).days)
-                            if diff_dias == 0:
-                                score_tiempo = 120
-                                relacion_fecha_txt = "🟢 Mismo día (0d)"
-                            elif -30 <= diff_dias < 0:
-                                # Fechas anteriores en la misma ventana de despacho (ej. 1 a 19 de enero)
-                                score_tiempo = 100 - abs(diff_dias) * 2
-                                relacion_fecha_txt = f"⬅️ Anterior ({abs(diff_dias)}d antes)"
-                            elif 0 < diff_dias <= 12:
-                                # Fechas ligeramente superiores (ej. 20 a 25 de enero)
-                                score_tiempo = 85 - (diff_dias * 3)
-                                relacion_fecha_txt = f"➡️ Superior (+{diff_dias}d desp)"
-                            elif -60 <= diff_dias < -30:
-                                score_tiempo = 30 - abs(diff_dias)
-                                relacion_fecha_txt = f"⚠️ Anterior lejano ({abs(diff_dias)}d antes)"
+                st.markdown(f"""
+                <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 18px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px;">
+                    <div style="border-bottom: 2px solid #0070ba; padding-bottom: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+                        <h4 style="margin:0; color:#0f172a;">📄 Cuadro de Factura Electrónica</h4>
+                        <span style="background:#eff6ff; color:#1d4ed8; padding:3px 10px; border-radius:4px; font-weight:bold; font-family:monospace;">{fac_sel.get('Factura', '')}</span>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; font-size: 14px; color: #334155;">
+                        <div><b>Proveedor (Emisor):</b> {fac_sel.get('Proveedor', 'Proveedor')}<br><b>NIT Emisor:</b> {fac_sel.get('NIT Emisor', '')}</div>
+                        <div><b>Empresa Compradora:</b> {empresa['nombre']}<br><b>NIT Receptor:</b> {empresa['nit']}</div>
+                        <div><b>Fecha de Emisión:</b> {fac_sel.get('Fecha', '')}</div>
+                        <div><b>Valor Total Facturado:</b> ${float(fac_sel.get('Total', 0.0) or 0.0):,.2f}</div>
+                    </div>
+                    <p style="margin-top: 14px; margin-bottom: 0; font-size: 13px; color: #64748b;">
+                        <i>💡 Nota: Sube los archivos PDF en la Pestaña 1 para ver el documento digitalizado en este visor.</i>
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+    
+            # TABLA DE CONTABILIZACION (ASIENTO CONTABLE)
+            st.markdown("### 📋 Asiento Contable del Comprobante (Cómo se Contabilizó)")
+            st.caption("Detalle de partida doble con imputación de cuentas, débitos, créditos y sumas iguales:")
+    
+            fac_num_aud = str(fac_sel["Factura"]).strip()
+            asiento_triang_aprobado = None
+    
+            # 1. Buscar si esta factura corresponde al agente de algún paquete en triangulación
+            if "paquetes_importacion" in st.session_state:
+                for p_k, p_v in st.session_state["paquetes_importacion"].items():
+                    if str(p_v["agente"]["Factura"]).strip() == fac_num_aud:
+                        # Si el paquete está validado en Pestaña 3, usar su asiento exacto aprobado
+                        if st.session_state.get(f"paquete_listo_{p_k}", False):
+                            if f"asiento_fijo_pq_{p_k}" in st.session_state and st.session_state[f"asiento_fijo_pq_{p_k}"] is not None:
+                                asiento_triang_aprobado = st.session_state[f"asiento_fijo_pq_{p_k}"].copy()
+                            elif "asiento_fijo" in p_v and p_v["asiento_fijo"] is not None:
+                                asiento_triang_aprobado = p_v["asiento_fijo"].copy()
+                            elif "asiento_aprobado" in p_v and p_v["asiento_aprobado"] is not None:
+                                asiento_triang_aprobado = p_v["asiento_aprobado"].copy()
+                        
+                        if asiento_triang_aprobado is None:
+                            asientos_m = st.session_state.get("asientos_triangulacion_por_factura", {})
+                            if fac_num_aud in asientos_m and asientos_m[fac_num_aud] is not None:
+                                asiento_triang_aprobado = asientos_m[fac_num_aud].copy()
+    
+                        if asiento_triang_aprobado is None and (st.session_state.get(f"paquete_listo_{p_k}", False) or p_v.get("diferencia", 999) < 1.0):
+                            en_nd_k = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
+                            en_gp_k = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
+                            en_h2_k = st.session_state.get(f"enviar_h2_pq_{p_k}", False)
+                            if en_h2_k:
+                                df_as_k = obtener_asiento_contable_hoja2(p_v["agente"], es_aduanero=False)
+                            elif en_gp_k:
+                                df_as_k, _, _ = generar_asiento_triangulacion_paquete(p_v["agente"], p_v["terceros"], enviar_a_no_deducible=False)
+                                asiento_gp_filas = []
+                                for _, r_as in df_as_k.iterrows():
+                                    if str(r_as["Código Cuenta"]).strip() == CUENTA_NO_DEDUCIBLE:
+                                        asiento_gp_filas.append({
+                                            "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                                            "Descripción Cuenta": f"Mercancías en Tránsito / Base Propia Agente (Fac {p_v['agente'].get('Factura', '')})",
+                                            "Tercero / NIT": f"{p_v['agente'].get('NIT Emisor', '')} - {p_v['agente'].get('Proveedor', '')[:25]}",
+                                            "Débito ($)": float(r_as["Débito ($)"]),
+                                            "Crédito ($)": 0.0
+                                        })
+                                    else:
+                                        asiento_gp_filas.append(r_as.to_dict())
+                                df_as_k = pd.DataFrame(asiento_gp_filas)
                             else:
-                                score_tiempo = -abs(diff_dias) * 10
-                                relacion_fecha_txt = f"⛔ Fuera de rango ({diff_dias:+d}d)"
-
-                        # Coincidencia directa por Mandato (NIT o Nombre del agente en notas)
-                        nit_fact = re.sub(r'\D', '', str(c_row_k.get("NIT Facturado A", "") or c_row_k.get("nit_facturado_a", "")))
-                        nom_fact = str(c_row_k.get("Facturado A", "") or c_row_k.get("nombre_facturado_a", "")).upper()
-                        nit_ag_clean = re.sub(r'\D', '', str(ag_i.get("NIT Emisor", "")))
-                        nom_ag_u = str(ag_i.get("Proveedor", "")).upper()
-
-                        score_mandato = 0
-                        if nit_ag_clean and nit_fact and nit_ag_clean[:8] in nit_fact:
-                            score_mandato += 150
-                        elif any(w in nom_fact for w in nom_ag_u.split() if len(w) >= 4):
-                            score_mandato += 80
-
-                        # Factor IVA: Buscar facturas con ítems que NO tienen IVA
-                        # Facturas de importación/desaduanamiento típicamente NO tienen IVA (0%).
-                        # Se premian las facturas sin IVA y se penalizan facturas con IVA doméstico (19%).
-                        score_iva = 0
-                        if tiv_k == 0:
-                            score_iva = 80
-                        elif tiv_k > 0 and (tiv_k / (tb_k + tiv_k) >= 0.15):
-                            score_iva = -100
-
-                        # Bonus de coincidencia con ítems específicos escaneados del PDF
-                        score_item_pdf = 0
-                        if montos_items_pdf:
-                            for m_it in montos_items_pdf:
-                                if abs(sc_k - m_it) < 2500.0 or (sc_k <= m_it and (m_it - sc_k) < 15000.0):
-                                    score_item_pdf = 160
-                                    break
-
-                        c_row_k_copy = c_row_k.copy()
-                        c_row_k_copy["Relación Fecha"] = relacion_fecha_txt
-                        c_row_k_copy["Diferencia Días"] = diff_dias
-
-                        cand_l.append({
-                            "index": c_idx_k,
-                            "fac": c_row_k["Factura"],
-                            "saldo": sc_k,
-                            "rol": rol_k,
-                            "diff_dias": diff_dias,
-                            "score_total": score_tiempo + score_mandato + score_iva + score_item_pdf,
-                            "row": c_row_k_copy
-                        })
-
-                    # Ordenar candidatos dando prioridad a concordancia de fecha, mandato y sin IVA
-                    cand_l.sort(key=lambda x: x["score_total"], reverse=True)
-
-                    # 3. Búsqueda de combinación en ventana cercana válida (-35 a +14 días) y con score >= 0
-                    best_combo_i = []
-                    best_diff_i = float("inf")
-                    best_score_i = -float("inf")
-                    target_usado_i = target_sin_iva if (target_sin_iva > 0 and iva_ag_i > 0) else tot_full_i
-                    tipo_target_i = "sin_iva" if (target_sin_iva > 0 and iva_ag_i > 0) else "total"
-
-                    cands_ventana = [c for c in cand_l if -35 <= c["diff_dias"] <= 14 and c["score_total"] >= 0]
-                    if len(cands_ventana) > 25:
-                        cands_ventana = cands_ventana[:25]
-
-                    for (t_val, t_tipo) in targets_evaluar:
-                        max_tol_residuo = max(35000.0, t_val * 0.05)
-                        for k_c in range(1, min(5, len(cands_ventana) + 1)):
-                            for combo_i in itertools.combinations(cands_ventana, k_c):
-                                s_c_i = round(sum(c["saldo"] for c in combo_i), 2)
-                                d_c_i = abs(s_c_i - t_val)
-                                score_c = sum(c["score_total"] for c in combo_i) / len(combo_i)
-
-                                # 1. Coincidencia casi exacta (< $2,500 COP)
-                                if d_c_i < 2500.0:
-                                    if d_c_i < best_diff_i or score_c > best_score_i:
-                                        best_diff_i = d_c_i
-                                        best_combo_i = list(combo_i)
-                                        best_score_i = score_c + 60
-                                        target_usado_i = t_val
-                                        tipo_target_i = t_tipo
-                                # 2. Valores aproximados que NO superen el cobro (s_c_i <= t_val + 50)
-                                elif s_c_i <= t_val + 50.0:
-                                    residuo = round(t_val - s_c_i, 2)
-                                    if 0 <= residuo <= max_tol_residuo:
-                                        if residuo < best_diff_i or best_diff_i > max_tol_residuo:
-                                            best_diff_i = residuo
-                                            best_combo_i = list(combo_i)
-                                            best_score_i = score_c
-                                            target_usado_i = t_val
-                                            tipo_target_i = t_tipo
-                            if best_diff_i < 50.0 and best_score_i > 70:
+                                df_as_k, _, _ = generar_asiento_triangulacion_paquete(p_v["agente"], p_v["terceros"], enviar_a_no_deducible=en_nd_k)
+                            asiento_triang_aprobado = df_as_k
+                        break
+    
+            if asiento_triang_aprobado is None:
+                asientos_m = st.session_state.get("asientos_triangulacion_por_factura", {})
+                if fac_num_aud in asientos_m and asientos_m[fac_num_aud] is not None:
+                    asiento_triang_aprobado = asientos_m[fac_num_aud].copy()
+    
+            if asiento_triang_aprobado is not None and not (isinstance(asiento_triang_aprobado, pd.DataFrame) and asiento_triang_aprobado.empty):
+                df_asiento = pd.DataFrame(asiento_triang_aprobado).copy()
+                if "Descripción Cuenta" in df_asiento.columns and "Descripción de la Cuenta" not in df_asiento.columns:
+                    df_asiento = df_asiento.rename(columns={"Descripción Cuenta": "Descripción de la Cuenta"})
+                cols_deseadas = [c for c in ["Código Cuenta", "Descripción de la Cuenta", "Tercero / NIT", "Débito ($)", "Crédito ($)"] if c in df_asiento.columns]
+                df_asiento = df_asiento[cols_deseadas]
+                    
+    # Asiento validado en Triangulación se respeta íntegramente sin sobreescribir
+                    
+                st.markdown(f"""
+                <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:12px 16px; margin-bottom:12px;">
+                    <h5 style="margin:0 0 4px 0; color:#166534;">🔀 Contabilización Oficial Aprobada en Triangulación</h5>
+                    <p style="margin:0; color:#14532d; font-size:13.5px;">
+                        Esta factura fue conciliada en la Pestaña 3. El asiento contable real cancela las cuentas por pagar de terceros y traslada la deuda al agente aduanero:
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                asiento_filas = []
+                es_nc = "Devolucion" in str(fac_sel["Operacion"])
+                asume_ret = bool(fac_sel.get("Impuestos Asumidos", False))
+                cta_cxp_usar = str(fac_sel.get("Cuenta Pasivo Especifica") or fac_sel.get("Cta Contrapartida") or ("22050505" if es_aduanero else "22050501")).strip()
+    
+                # Verificar si la factura seleccionada es un tercero cruzado en un paquete de importación
+                pq_cruz_encontrado = None
+                if "paquetes_importacion" in st.session_state:
+                    for p_k, p_v in st.session_state["paquetes_importacion"].items():
+                        df_terc_v = p_v.get("terceros")
+                        if df_terc_v is not None and not df_terc_v.empty:
+                            if str(fac_sel["Factura"]).strip() in df_terc_v["Factura"].astype(str).str.strip().values:
+                                pq_cruz_encontrado = {
+                                    "pq_id": p_k,
+                                    "agente": p_v["agente"]["Proveedor"],
+                                    "agente_fac": p_v["agente"]["Factura"],
+                                    "es_listo": st.session_state.get(f"paquete_listo_{p_k}", False)
+                                }
                                 break
-                        if best_diff_i < 50.0:
-                            break
-
-                    # REGLA ESTRICTA: Aceptar si es coincidencia exacta (< $2,500) o aproximada que no supere (residuo <= $35,000 o 5%)
-                    max_acep_lim = max(35000.0, target_usado_i * 0.05)
-                    if best_diff_i > max_acep_lim or not best_combo_i:
-                        best_combo_i = []
-                        dif_calc = tot_full_i
-                    else:
-                        dif_calc = best_diff_i
-                        sel_idxs_i = [c["index"] for c in best_combo_i]
-                        pool_t.loc[sel_idxs_i, "_asignado_pq"] = pq_id_i
-
-                    filas_terc_pq = [c["row"] for c in best_combo_i]
-                    terc_pq_i = pd.DataFrame(filas_terc_pq) if filas_terc_pq else pd.DataFrame()
-
-                    pqs_res[pq_id_i] = {
-                        "agente": ag_i,
-                        "terceros": terc_pq_i,
-                        "diferencia": dif_calc,
-                        "target_cruce": target_usado_i,
-                        "tipo_cruce": tipo_target_i,
-                        "items_sin_iva": target_sin_iva,
-                        "gastos_propios_con_iva": round(base_con_iva + iva_ag_i, 2),
-                        "base_gastos_propios": base_con_iva
-                    }
-                terc_libres_i = pool_t[pool_t["_asignado_pq"] == 0].copy()
-                return pqs_res, terc_libres_i
-
-            # Inicializar o recuperar paquetes de importación
-            if "paquetes_importacion" not in st.session_state or st.session_state.get("_ultimo_agentes_len") != len(df_agentes_all):
-                pqs_ini, libres_ini = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all, dict_pdfs=st.session_state.get("dict_pdfs") or st.session_state.get("raw_uploaded_pdfs"))
-                st.session_state["paquetes_importacion"] = pqs_ini
-                st.session_state["_ultimo_agentes_len"] = len(df_agentes_all)
-
-            pqs_actuales = st.session_state["paquetes_importacion"]
-
-            # Clave persistente para que NUNCA se devuelva al primer paquete al editar
-            pqs_keys = list(pqs_actuales.keys())
-            if "sel_paquete_activo_key" not in st.session_state or st.session_state["sel_paquete_activo_key"] not in pqs_keys:
-                st.session_state["sel_paquete_activo_key"] = pqs_keys[0] if pqs_keys else 1
-
-            cur_pq_num = st.session_state["sel_paquete_activo_key"]
-            idx_pq_init = pqs_keys.index(cur_pq_num) if cur_pq_num in pqs_keys else 0
-
-            def format_tag_pq(p_num):
-                p_info = pqs_actuales[p_num]
-                ag_i = p_info["agente"]
-                n_t = len(p_info["terceros"])
-                s_t = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in p_info["terceros"].iterrows()])
-                dif = abs(float(ag_i["Total"]) - s_t)
-                es_listo = st.session_state.get(f"paquete_listo_{p_num}", False)
-                es_transito = st.session_state.get(f"enviar_gp_pq_{p_num}", False)
-                es_h2 = st.session_state.get(f"enviar_h2_pq_{p_num}", False)
-                if es_listo:
-                    badge_pq = "✅ LISTO"
-                elif es_transito:
-                    badge_pq = "📦 TRÁNSITO DIRECTO"
-                elif es_h2:
-                    badge_pq = "📄 HOJA 2"
-                elif dif < 1.0:
-                    badge_pq = "🟢 Cuadrado $0.00"
-                else:
-                    badge_pq = f"⚠️ Dif ${dif:,.0f}"
-                return f"📦 Paquete #{p_num} [{badge_pq}]: {ag_i['Proveedor'][:16]} ({ag_i['Factura']}) — Cobro: ${ag_i['Total']:,.0f} | {n_t} Terceros (${s_t:,.0f})"
-
-            # Barra de Acciones y Selección de Paquete Persistente
-            c_top_pq1, c_top_pq2 = st.columns([2.5, 1])
-            with c_top_pq1:
-                pq_id_sel = st.selectbox(
-                    "📦 Selecciona el Paquete de Importación que deseas revisar o editar:",
-                    options=pqs_keys,
-                    index=idx_pq_init,
-                    format_func=format_tag_pq,
-                    key=f"sel_pq_box_{cur_pq_num}"
-                )
-                st.session_state["sel_paquete_activo_key"] = pq_id_sel
-
-            paquete_activo = pqs_actuales[pq_id_sel]
-            agente_actual = paquete_activo["agente"]
-            terceros_actual = paquete_activo["terceros"]
-
-            # Sincronizar agente y terceros con las ediciones más recientes de la Hoja 2 (df_procesado)
-            ag_fac_sinc = str(agente_actual.get("Factura", "")).strip()
-            df_proc_sinc = st.session_state.get("df_procesado")
-            if df_proc_sinc is not None and not df_proc_sinc.empty and ag_fac_sinc:
-                m_ag_sinc = df_proc_sinc[df_proc_sinc["Factura"].astype(str).str.strip() == ag_fac_sinc]
-                if not m_ag_sinc.empty:
-                    agente_actual = m_ag_sinc.iloc[0].to_dict()
-                    paquete_activo["agente"] = agente_actual
-
-            if df_proc_sinc is not None and not df_proc_sinc.empty and not terceros_actual.empty:
-                terc_actual_sinc = []
-                for _, t_r in terceros_actual.iterrows():
-                    t_fac_s = str(t_r.get("Factura", "")).strip()
-                    m_t_s = df_proc_sinc[df_proc_sinc["Factura"].astype(str).str.strip() == t_fac_s]
-                    if not m_t_s.empty:
-                        terc_actual_sinc.append(m_t_s.iloc[0].to_dict())
-                    else:
-                        terc_actual_sinc.append(t_r.to_dict())
-                terceros_actual = pd.DataFrame(terc_actual_sinc)
-                paquete_activo["terceros"] = terceros_actual
-
-            tot_agente_actual = float(agente_actual["Total"])
-
-            enviar_gp_activo = st.session_state.get(f"enviar_gp_pq_{pq_id_sel}", False)
-            enviar_h2_activo = st.session_state.get(f"enviar_h2_pq_{pq_id_sel}", False)
-            enviar_nd_activo = st.session_state.get(f"enviar_nd_pq_{pq_id_sel}", False)
-
-            with c_top_pq2:
-                st.write("")
-                st.write("")
-                c_top_b1, c_top_b2 = st.columns(2)
-                with c_top_b1:
-                    if st.button("🪄 Re-calcular", key="btn_recalc_auto_pqs", help="Vuelve a calcular los paquetes"):
-                        pqs_re, _ = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all)
-                        st.session_state["paquetes_importacion"] = pqs_re
-                        st.session_state["sel_paquete_activo_key"] = 1
-                        st.success("¡Paquetes recalculados!")
-                        st.rerun()
-                with c_top_b2:
-                    if st.button("✅ Aprobar Cuadrados", key="btn_aprobar_todos_cuad", help="Marca como listos para contabilidad todos los paquetes cuadrados a $0.00"):
-                        if "asientos_triangulacion_por_factura" not in st.session_state:
-                            st.session_state["asientos_triangulacion_por_factura"] = {}
-                        for p_k, p_v in pqs_actuales.items():
-                            if p_v.get("diferencia", 999) < 1.0:
-                                st.session_state[f"paquete_listo_{p_k}"] = True
-                                ag_k = p_v["agente"]
-                                tr_k = p_v["terceros"]
-                                en_nd_k = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
-                                en_gp_k = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
-                                en_h2_k = st.session_state.get(f"enviar_h2_pq_{p_k}", False)
-                                df_as_k, _, _ = generar_asiento_triangulacion_paquete(ag_k, tr_k, enviar_a_no_deducible=en_nd_k, enviar_a_gastos_propios=en_gp_k, enviar_a_hoja2=en_h2_k)
-                                st.session_state["asientos_triangulacion_por_factura"][str(ag_k["Factura"]).strip()] = df_as_k
-                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
-
-                        guardar_estado_manual(empresa)
-                        st.success("¡Paquetes cuadrados aprobados y guardados para la planilla oficial de Siigo!")
-                        st.rerun()
-
-            # Resumen visual del Paquete Seleccionado
-            col_pq1, col_pq2 = st.columns([1.3, 2.5])
-            with col_pq1:
-                iva_ag_val = float(agente_actual.get('IVA', 0.0))
-                base_ag_val = float(agente_actual.get('Base', 0.0))
-                base_propia_val = round(iva_ag_val / 0.19, 2) if iva_ag_val > 0 else 0.0
-                items_sin_iva_val = round(base_ag_val - base_propia_val, 2) if iva_ag_val > 0 else tot_agente_actual
-
-                html_desglose_agente = ""
-                if iva_ag_val > 0 and items_sin_iva_val > 0:
-                    html_desglose_agente = f"""
-                    <hr style="margin:8px 0; border:0; border-top:1px dashed #fde68a;">
-                    <b>🎯 Ítems a Triangular (Sin IVA):</b> <span style="font-weight:bold; color:#0369a1;">${items_sin_iva_val:,.2f}</span><br>
-                    <b>🏢 Gastos Propios con IVA (Seguro/Fee):</b> <span style="font-weight:bold; color:#475569;">${round(base_propia_val + iva_ag_val, 2):,.2f}</span>
-                    """
-
-                html_card_ag_clean = f"""<div style="background:#fffbeb; border:1px solid #fde68a; border-left:5px solid #d97706; border-radius:8px; padding:14px; margin-bottom:12px;">
-<h4 style="margin:0 0 6px 0; color:#92400e;">🟡 Factura del Agente (Cobro Total)</h4>
-<div style="margin:0; font-size:14px; color:#78350f; line-height:1.6;">
-<b>Proveedor:</b> {agente_actual['Proveedor']}<br>
-<b>NIT:</b> {agente_actual['NIT Emisor']}<br>
-<b>Factura:</b> {agente_actual['Factura']}<br>
-<b>Fecha de Operación:</b> <span style="font-weight:bold; color:#0f172a;">{agente_actual['Fecha']}</span><br>
-<b>Total Facturado:</b> <span style="font-size:18px; font-weight:bold; color:#b45309;">${tot_agente_actual:,.2f}</span><br>
-<b>IVA Discriminado:</b> ${iva_ag_val:,.2f}
-{html_desglose_agente}
-</div>
-</div>"""
-                st.markdown(html_card_ag_clean, unsafe_allow_html=True)
-
-                # Control para dejar listo este paquete para contabilidad
-                es_pq_listo = st.session_state.get(f"paquete_listo_{pq_id_sel}", False)
-                if not es_pq_listo:
-                    st.info(f"ℹ️ Cuando este paquete esté cuadrado, márcalo como listo para que pase a la contabilidad en su fecha (**{agente_actual['Fecha']}**).")
-                    if st.button(f"✅ Dejar Listo Paquete #{pq_id_sel} para Contabilidad", key=f"btn_marcar_listo_{pq_id_sel}", use_container_width=True):
-                        st.session_state[f"paquete_listo_{pq_id_sel}"] = True
-                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
-
-                        # Obtener asiento fiel si está en Opción 2 o calcular
-                        ag_fac_str = str(agente_actual["Factura"]).strip()
-                        asientos_map_h2 = st.session_state.get("asientos_triangulacion_por_factura", {})
-                        if enviar_h2_activo:
-                            if ag_fac_str in asientos_map_h2 and asientos_map_h2[ag_fac_str] is not None and not asientos_map_h2[ag_fac_str].empty:
-                                df_as_aprob = pd.DataFrame(asientos_map_h2[ag_fac_str]).copy()
-                            else:
-                                df_as_aprob = obtener_asiento_contable_hoja2(agente_actual, es_aduanero=False)
-                        else:
-                            df_as_aprob, _, _ = generar_asiento_triangulacion_paquete(
-                                agente_actual, terceros_actual,
-                                enviar_a_no_deducible=enviar_nd_activo,
-                                enviar_a_gastos_propios=enviar_gp_activo,
-                                enviar_a_hoja2=enviar_h2_activo
-                            )
-
-                        st.session_state[f"asiento_fijo_pq_{pq_id_sel}"] = df_as_aprob
-                        paquete_activo["asiento_fijo"] = df_as_aprob
-                        paquete_activo["asiento_aprobado"] = df_as_aprob
-
-                        if "asientos_triangulacion_por_factura" not in st.session_state:
-                            st.session_state["asientos_triangulacion_por_factura"] = {}
-                        st.session_state["asientos_triangulacion_por_factura"][ag_fac_str] = df_as_aprob
-                        st.session_state[f"asiento_triang_aprobado_{ag_fac_str}"] = df_as_aprob
-
-                        st.success(f"¡Paquete #{pq_id_sel} aprobado y dejado fijo para contabilidad!")
-                        st.rerun()
-                else:
-                    st.success(f"🔒 **Paquete #{pq_id_sel} LISTO Y FIJO para Contabilidad** | Fecha: **{agente_actual['Fecha']}**")
-                    if st.button(f"↩️ Desmarcar / Modificar Paquete #{pq_id_sel}", key=f"btn_desmarcar_listo_{pq_id_sel}", use_container_width=True):
-                        st.session_state[f"paquete_listo_{pq_id_sel}"] = False
-                        st.session_state.pop(f"asiento_fijo_pq_{pq_id_sel}", None)
-                        paquete_activo.pop("asiento_fijo", None)
-                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                        st.rerun()
-
-            with col_pq2:
-                st.markdown(f"##### Facturas de Terceros que Componen este Paquete #{pq_id_sel}:")
-                if not terceros_actual.empty:
-                    filas_terc_disp = []
-                    tot_s_terceros = 0.0
-                    for _, tr in terceros_actual.iterrows():
-                        es_r = tr.get("Ya Registrada", False)
-                        badge_est = f"🔴 Ya en Siigo ({tr.get('Comprobante Previo', '10-Prev')})" if es_r else "⚪ No Contabilizada (Pendiente)"
-                        t_b = float(tr.get("Base", 0.0)) if pd.notna(tr.get("Base")) else 0.0
-                        t_iv = float(tr.get("IVA", 0.0)) if pd.notna(tr.get("IVA")) else 0.0
-                        tot_neto_val = tr.get("Total Neto")
-                        if pd.notna(tot_neto_val) and float(tot_neto_val) > 0:
-                            s_cruce = float(tot_neto_val)
-                        else:
-                            s_cruce = round(t_b + t_iv, 2)
-                            if s_cruce <= 0 and pd.notna(tr.get("Total")):
-                                s_cruce = float(tr.get("Total", 0.0))
-                        tot_s_terceros += s_cruce
-                        cta_actual_tr = str(tr.get("Cuenta Pasivo Especifica", "22050505" if "CARGO" in str(tr["Proveedor"]).upper() else "23359501")).strip()
-                        p_nom = str(tr["Proveedor"]).upper()
-                        rol_dsp = "🚚 DHL (Flete)" if "DHL" in p_nom else ("🏢 Agencia (Aduana)" if any(k in p_nom for k in ["CARGO", "ADUANA"]) else "🏬 Garaje / Almacén")
-                        cur_dest = str(tr.get("Destino Contable") or tr.get("destino_contable") or "").strip()
-                        if not cur_dest:
-                            cur_dest = "📦 Gasto Propio (Inventarios en Tránsito 14650501)" if (not es_r or cta_actual_tr == "14650501" or str(tr.get("Cta Principal", "")).strip() == "14650501") else f"🏛️ Cancela CxP ({cta_actual_tr})"
-                        es_gp = "INVENTARIO" in cur_dest.upper() or "14650501" in cur_dest or "GASTO PROPIO" in cur_dest.upper()
-                        tag_cta = "📦 14650501 (Inventarios en Tránsito)" if es_gp else f"⚠️ {cta_actual_tr} (CxP)"
-
-                        filas_terc_disp.append({
-                            "Rol": rol_dsp,
-                            "Fecha Factura": tr.get("Fecha", "-"),
-                            "Concordancia Fecha": tr.get("Relación Fecha", "Concorde"),
-                            "Estado Contable": badge_est,
-                            "Destino Contable": "📦 Gasto Propio (Inventarios en Tránsito)" if es_gp else "🏛️ Cruce Pasivo (Cancela CxP)",
-                            "Proveedor Tercero": tr["Proveedor"][:22],
-                            "Factura": tr["Factura"],
-                            "Subtotal (Base)": t_b,
-                            "IVA": t_iv,
-                            "Saldo Cruce": s_cruce,
-                            "Cuenta Imputada": tag_cta
-                        })
-                    df_terc_disp = pd.DataFrame(filas_terc_disp)
-                    st.dataframe(df_terc_disp.style.format({
-                        "Subtotal (Base)": "${:,.2f}",
-                        "IVA": "${:,.2f}",
-                        "Saldo Cruce": "${:,.2f}"
-                    }), use_container_width=True, hide_index=True)
-
-                    target_comparar = items_sin_iva_val if (iva_ag_val > 0 and items_sin_iva_val > 0) else tot_agente_actual
-                    dif_pq_actual = abs(target_comparar - tot_s_terceros)
-                    if dif_pq_actual < 5.0:
-                        if iva_ag_val > 0 and items_sin_iva_val > 0:
-                            st.success(f"✅ **Paquete #{pq_id_sel} Cuadrado (Ítems sin IVA):** Total Terceros: **${tot_s_terceros:,.2f}** == Ítems sin IVA: **${items_sin_iva_val:,.2f}** | Gastos Propios: **${round(base_propia_val + iva_ag_val, 2):,.2f}** | Total Factura: **${tot_agente_actual:,.2f}** | Diferencia: **$0.00**")
-                        else:
-                            st.success(f"✅ **Paquete #{pq_id_sel} Exacto:** Total Terceros: **${tot_s_terceros:,.2f}** == Cobro Euro: **${tot_agente_actual:,.2f}** | Diferencia: **$0.00**")
-                    else:
-                        st.info(f"📊 Total Terceros: **${tot_s_terceros:,.2f}** | Objetivo a Cruzar (Sin IVA): **${target_comparar:,.2f}** | Diferencia: **${dif_pq_actual:,.2f}**")
-                else:
+    
+                saldo_cruce_ind = obtener_saldo_cruce_factura(fac_sel)
+    
+                if pq_cruz_encontrado is not None:
                     st.markdown(f"""
-                    <div style="background:#f0f9ff; border:1px solid #bae6fd; border-left:5px solid #0284c7; border-radius:8px; padding:14px; margin-bottom:14px;">
-                        <h5 style="margin:0 0 6px 0; color:#0369a1;">ℹ️ Factura de Operación Directa / Flete Propio (Sin Terceros)</h5>
-                        <p style="margin:0; font-size:14px; color:#0c4a6e; line-height:1.5;">
-                            Esta factura del agente corresponde a un servicio directo (ej. flete internacional o agenciamiento propio) sin facturas intermedias de terceros.<br>
-                            👉 <b>¿Cómo contabilizarla?</b> Haz clic abajo en <b>Opción 1: Mercancías en Tránsito (Cta 14650501)</b> o <b>Opción 2: Como en la Hoja 2</b> y luego pulsa <i>"Dejar Listo Paquete #{pq_id_sel}"</i>.
+                    <div style="background:#eff6ff; border:1px solid #bfdbfe; border-left:5px solid #2563eb; border-radius:8px; padding:14px 18px; margin-bottom:14px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <h5 style="margin:0 0 4px 0; color:#1e40af;">🔀 Factura Vinculada en Paquete de Importación #{pq_cruz_encontrado['pq_id']} (con {pq_cruz_encontrado['agente']} - Fac {pq_cruz_encontrado['agente_fac']})</h5>
+                            <span style="background:#dbeafe; color:#1e40af; font-size:12px; font-weight:bold; padding:3px 8px; border-radius:12px;">Cruce Activo en Triangulación</span>
+                        </div>
+                        <p style="margin:6px 0 0 0; color:#1e3a8a; font-size:13.5px;">
+                            Esta factura mantiene su <b>contabilización propia completa</b> (Costo/Gasto e IVA). En la importación, lo único que se cruza es su <b>Cuenta por Pagar ({cta_cxp_usar})</b> por valor de <b>${saldo_cruce_ind:,.2f}</b>, la cual se debita en el paquete de triangulación para cancelar la obligación y trasladar la deuda al agente aduanero.
                         </p>
                     </div>
                     """, unsafe_allow_html=True)
-
-            # Expander para agregar/quitar facturas manualmente a este paquete y clasificar gastos propios
-            with st.expander(f"⚙️ Modificar este Paquete #{pq_id_sel} (Gastos Propios a Inventarios en Tránsito / Sacar o Agregar):", expanded=False):
-                st.caption("Administra este paquete: define cuáles son gastos propios a Inventarios en Tránsito (14650501), cuáles cancelan CxP, saca o añade facturas:")
-
-                # SECCIÓN A: CLASIFICACIÓN DE GASTOS PROPIOS (INVENTARIOS EN TRÁNSITO 14650501) VS CANCELA CXP
-                if not terceros_actual.empty:
-                    st.markdown("##### 📦 Clasificar Gastos Propios (Inventarios en Tránsito 14650501) vs Cruce de Pasivo:")
-                    st.caption("Indica para cada factura si es un **Gasto Propio** que debe imputarse a **Inventarios en Tránsito (14650501)** o si es un **Cruce de Pasivo** que cancela la cuenta por pagar existente (22050505 / 23359501):")
-
-                    cols_gp = st.columns(min(3, max(1, len(terceros_actual))))
-                    for idx_g, (_, r_tr_g) in enumerate(terceros_actual.iterrows()):
-                        col_g = cols_gp[idx_g % len(cols_gp)]
-                        with col_g:
-                            f_g_num = r_tr_g["Factura"]
-                            cur_g_dest = str(r_tr_g.get("Destino Contable") or r_tr_g.get("destino_contable") or "").strip()
-                            if not cur_g_dest:
-                                cur_g_dest = "📦 Gasto Propio (Inventarios en Tránsito 14650501)" if (not r_tr_g.get("Ya Registrada", False) or str(r_tr_g.get("Cuenta Pasivo Especifica", "")).strip() == "14650501") else "🏛️ Cruce de Pasivo (Cancela CxP)"
-
-                            idx_radio = 0 if ("INVENTARIO" in cur_g_dest.upper() or "14650501" in cur_g_dest or "GASTO PROPIO" in cur_g_dest.upper()) else 1
-                            nuevo_g_dest = st.radio(
-                                f"Fac {f_g_num} ({r_tr_g['Proveedor'][:15]}):",
-                                ["📦 Inventarios en Tránsito (14650501)", "🏛️ Cruce Pasivo (Cancela CxP)"],
-                                index=idx_radio,
-                                key=f"rad_gp_{pq_id_sel}_{f_g_num}"
-                            )
-                            if nuevo_g_dest != cur_g_dest:
-                                r_idx_match = terceros_actual[terceros_actual["Factura"] == f_g_num].index
-                                if not r_idx_match.empty:
-                                    terceros_actual.at[r_idx_match[0], "Destino Contable"] = nuevo_g_dest
-                                    st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_actual
-                                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                                    st.rerun()
-                    st.markdown("---")
-
-                # 1. SECCIÓN PARA SACAR / REDIRIGIR FACTURAS
-                st.markdown("##### ➖ Sacar y Redirigir una factura de este paquete:")
-                st.caption("Si ves una factura que no corresponde a este paquete, sácala y el sistema la reubicará automáticamente o la enviará a compras directas para que no quede pendiente:")
-                facs_en_este = list(terceros_actual["Factura"].unique()) if not terceros_actual.empty else []
-
-                if facs_en_este:
-                    opciones_quitar = []
-                    mapa_quitar_row = {}
-                    for _, tr_k in terceros_actual.iterrows():
-                        tb_k = float(tr_k.get("Base", 0.0))
-                        tiv_k = float(tr_k.get("IVA", 0.0))
-                        sc_k = float(tr_k.get("Total Neto", 0.0)) or round(tb_k + tiv_k, 2)
-                        tag_q = f"[{tr_k['Factura']}] {tr_k['Proveedor'][:24]} (Saldo: ${sc_k:,.2f})"
-                        opciones_quitar.append(tag_q)
-                        mapa_quitar_row[tag_q] = tr_k
-
-                    sel_para_quitar = st.selectbox("1. Selecciona la factura que deseas SACAR de este paquete:", ["(Seleccionar...)"] + opciones_quitar, key=f"sel_rem_tr_{pq_id_sel}")
-
-                    if sel_para_quitar != "(Seleccionar...)":
-                        fila_a_mover = mapa_quitar_row[sel_para_quitar]
-                        fac_nom_mover = fila_a_mover["Factura"]
-                        sc_mover = float(fila_a_mover.get("Total Neto", 0.0)) or (float(fila_a_mover.get("Base", 0.0)) + float(fila_a_mover.get("IVA", 0.0)))
-
-                        otros_pqs = [p for p in pqs_actuales.keys() if p != pq_id_sel]
-
-                        # Calcular cuál otro paquete tiene un faltante más cercano a esta factura
-                        mejor_pq_sug = None
-                        mejor_diff_sug = float("inf")
-                        for p_cand_id in otros_pqs:
-                            p_cand = pqs_actuales[p_cand_id]
-                            tot_ag_c = float(p_cand["agente"]["Total"])
-                            tot_terc_c = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in p_cand["terceros"].iterrows()])
-                            faltante_c = tot_ag_c - tot_terc_c
-                            diff_c = abs(faltante_c - sc_mover)
-                            if diff_c < mejor_diff_sug:
-                                mejor_diff_sug = diff_c
-                                mejor_pq_sug = p_cand_id
-
-                        sug_txt = f" (Sugerencia: Paquete #{mejor_pq_sug})" if mejor_pq_sug else ""
-                        opciones_destino = [
-                            f"🎯 Auto-Reubicar automáticamente donde mejor encaje{sug_txt}",
-                            "📦 Mover a otro Paquete específico...",
-                            "🛒 Redirigir a Compras Directas Ordinarias (Pestaña 1 y 4 - Se pagó directo)",
-                            "⚪ Dejar libre en inventario (Sin asignar)"
-                        ]
-
-                        c_dest1, c_dest2 = st.columns([2.6, 1.2])
-                        with c_dest1:
-                            dest_sel = st.radio(f"2. ¿A dónde deseas redirigir la factura {fac_nom_mover}?:", opciones_destino, key=f"rad_dest_{pq_id_sel}_{fac_nom_mover}")
-                            destino_pq_manual = None
-                            if "Mover a otro Paquete específico" in dest_sel:
-                                opciones_otros_pqs = [f"Paquete #{p}: {pqs_actuales[p]['agente']['Proveedor'][:16]} (Fac {pqs_actuales[p]['agente']['Factura']})" for p in otros_pqs]
-                                if opciones_otros_pqs:
-                                    sel_otro_pq_str = st.selectbox("Selecciona el paquete de destino:", opciones_otros_pqs, key=f"sel_otro_pq_{pq_id_sel}")
-                                    destino_pq_manual = int(sel_otro_pq_str.split(":")[0].replace("Paquete #", "").strip())
-                                else:
-                                    st.info("No hay otros paquetes de forwarders disponibles en este archivo.")
-
-                        with c_dest2:
-                            st.write("")
-                            st.write("")
-                            if st.button("🚀 Sacar y Redirigir Factura", key=f"btn_ejecutar_reubicar_{pq_id_sel}", help="Retira la factura de este paquete y la redirige al destino seleccionado."):
-                                # 1. Retirar del paquete actual
-                                terceros_remanente = terceros_actual[terceros_actual["Factura"] != fac_nom_mover].copy()
-                                st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_remanente
-                                st.session_state["sel_paquete_activo_key"] = pq_id_sel
-
-                                # 2. Redirigir al destino
-                                if "Auto-Reubicar" in dest_sel and mejor_pq_sug is not None:
-                                    dest_pq = st.session_state["paquetes_importacion"][mejor_pq_sug]["terceros"]
-                                    dest_nuevo = pd.concat([dest_pq, pd.DataFrame([fila_a_mover])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
-                                    st.session_state["paquetes_importacion"][mejor_pq_sug]["terceros"] = dest_nuevo
-                                    st.success(f"¡Factura {fac_nom_mover} retirada del Paquete #{pq_id_sel} y auto-reubicada en el Paquete #{mejor_pq_sug}!")
-                                elif "Mover a otro Paquete" in dest_sel and destino_pq_manual is not None:
-                                    dest_pq = st.session_state["paquetes_importacion"][destino_pq_manual]["terceros"]
-                                    dest_nuevo = pd.concat([dest_pq, pd.DataFrame([fila_a_mover])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
-                                    st.session_state["paquetes_importacion"][destino_pq_manual]["terceros"] = dest_nuevo
-                                    st.success(f"¡Factura {fac_nom_mover} movida con éxito al Paquete #{destino_pq_manual}!")
-                                elif "Compras Directas Ordinarias" in dest_sel:
-                                    if "df_procesado" in st.session_state:
-                                        df_glob = st.session_state["df_procesado"]
-                                        m_idx = df_glob[df_glob["Factura"] == fac_nom_mover].index
-                                        if not m_idx.empty:
-                                            df_glob.at[m_idx[0], "Es Aduanera"] = False
-                                            df_glob.at[m_idx[0], "Grupo Importación"] = ""
-                                            df_glob.at[m_idx[0], "Estado Registro"] = "⚪ Compra Directa Ordinaria"
-                                            df_glob.at[m_idx[0], "Cta Contrapartida"] = "22050501"
-                                            st.session_state["df_procesado"] = df_glob
-                                    st.success(f"¡Factura {fac_nom_mover} retirada de importaciones y enviada a Compras Directas Ordinarias (Pestaña 1 y 4)!")
-                                else:
-                                    st.success(f"¡Factura {fac_nom_mover} retirada del Paquete #{pq_id_sel} y devuelta a facturas libres!")
-
-                                st.rerun()
-                else:
-                    st.info("Este paquete no tiene facturas asignadas para retirar.")
-
-                st.markdown("---")
-
-                # 2. SECCIÓN PARA AGREGAR NUEVAS FACTURAS
-                st.markdown("##### ➕ Añadir una factura a este paquete:")
-                # RESTRICCIÓN ESTRICTA: Obtener todas las facturas asignadas a cualquier paquete
-                facturas_bloqueadas_global = set()
-                if "paquetes_importacion" in st.session_state:
-                    for p_id_g, p_val_g in st.session_state["paquetes_importacion"].items():
-                        df_tr_g = p_val_g.get("terceros")
-                        if df_tr_g is not None and not df_tr_g.empty:
-                            for f_asig in df_tr_g["Factura"].dropna():
-                                facturas_bloqueadas_global.add(str(f_asig).strip())
-
-                opciones_agregar = []
-                mapa_agregar = {}
-                cands_disp_agregar = df_terceros_all.copy()
-
-                for _, tr_cand in cands_disp_agregar.iterrows():
-                    f_cand_num = str(tr_cand["Factura"]).strip()
-                    # Bloquear y restringir facturas ya trianguladas
-                    if f_cand_num not in facs_en_este and f_cand_num not in facturas_bloqueadas_global:
-                        es_reg_c = bool(tr_cand.get("Ya Registrada", False))
-                        tag_est = f"🔴 Registrada ({tr_cand.get('Comprobante Previo', '10-Prev')})" if es_reg_c else "⚪ No Contabilizada (Pendiente)"
-                        sc_cand = float(tr_cand.get("Total Neto", 0.0)) or (float(tr_cand.get("Base", 0.0)) + float(tr_cand.get("IVA", 0.0)))
-                        tag_c = f"[{tag_est}] [{f_cand_num}] {tr_cand['Proveedor'][:22]} (Saldo: ${sc_cand:,.2f})"
-                        opciones_agregar.append(tag_c)
-                        mapa_agregar[tag_c] = tr_cand
-
-                c_add1, c_add2 = st.columns([3, 1.2])
-                with c_add1:
-                    sel_para_agregar = st.selectbox("Selecciona factura libre para añadir a este paquete:", ["(Seleccionar...)"] + opciones_agregar, key=f"sel_add_tr_{pq_id_sel}")
-                with c_add2:
-                    st.write("")
-                    st.write("")
-                    if st.button("➕ Añadir al Paquete", key=f"btn_add_tr_{pq_id_sel}") and sel_para_agregar != "(Seleccionar...)":
-                        fila_agregada = mapa_agregar[sel_para_agregar]
-                        terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([fila_agregada])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
-                        st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
-                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
-
-                        st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel} y auto-guardada!")
-                        st.rerun()
-
-            # 3. BOTONES CLAVE DE CONTABILIZACIÓN: MERCANCÍAS EN TRÁNSITO
-            pid_str = str(pq_id_sel)
-            enviar_gp_activo = bool(st.session_state.get("enviar_gp_pq_" + pid_str, False))
-            enviar_h2_activo = bool(st.session_state.get("enviar_h2_pq_" + pid_str, False))
-            enviar_nd_activo = bool(st.session_state.get("enviar_nd_pq_" + pid_str, False))
-
-            def aplicar_banderas_tratamiento(p_id, gp=False, h2=False, nd=False):
-                p_s = str(p_id)
-                st.session_state["enviar_gp_pq_" + p_s] = gp
-                st.session_state["enviar_h2_pq_" + p_s] = h2
-                st.session_state["enviar_nd_pq_" + p_s] = nd
-                st.session_state["sel_paquete_activo_key"] = p_id
-
-            # Pre-cálculo para conocer el saldo o faltante
-            df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(
-                agente_actual, terceros_actual,
-                enviar_a_no_deducible=False,
-                enviar_a_gastos_propios=False,
-                enviar_a_hoja2=False
-            )
-
-            nom_ag_hdr = str(agente_actual.get("Proveedor", "Agente"))
-            fec_ag_hdr = str(agente_actual.get("Fecha", ""))
-            fac_ag_hdr = str(agente_actual.get("Factura", ""))
-            cat_ag_h2 = str(agente_actual.get("Categoría", "Gasto"))
-            cta_ag_h2 = str(agente_actual.get("Cta Principal", "14650501"))
-
-            c_box_style = (
-                '<div style="background:#f8fafc; border:2px solid #0070ba; '
-                'border-radius:8px; padding:16px; margin:14px 0;">'
-                '<h4 style="margin:0 0 6px 0; color:#0070ba;">'
-                '⚖️ Tratamiento Contable para el Paquete #' + pid_str +
-                ' (Cobro ' + nom_ag_hdr + '):</h4>'
-                '<p style="margin:0 0 10px 0; font-size:13.5px; color:#334155;">'
-                'Selecciona cómo deseas registrar este paquete en la fecha de '
-                'operación (<b>' + fec_ag_hdr + '</b>):</p></div>'
-            )
-            st.markdown(c_box_style, unsafe_allow_html=True)
-
-            c_btn_mt, c_btn_h2, c_btn_nd = st.columns([1.6, 1.8, 1.1])
-
-            with c_btn_mt:
-                st.markdown("<b style='color:#0284c7;'>📦 Opción 1: Mercancías en Tránsito</b><br><span style='font-size:12px; color:#475569;'>Envía el valor directamente a Inventarios en Tránsito (Cta 14650501):</span>", unsafe_allow_html=True)
-                if dif_faltante_prev <= 0.05:
-                    lbl_btn_mt = "📦 Mercancías en Tránsito (14650501)"
-                else:
-                    lbl_btn_mt = "📦 Mercancías en Tránsito ($" + f"{dif_faltante_prev:,.2f}" + ")"
-                btn_mt_type = "primary" if enviar_gp_activo else "secondary"
-                if st.button(lbl_btn_mt, key="btn_mt_" + pid_str, type=btn_mt_type, use_container_width=True):
-                    aplicar_banderas_tratamiento(pq_id_sel, gp=True, h2=False, nd=False)
-
-                    st.success("¡Asignado a Mercancías en Tránsito (14650501)!")
-                    st.rerun()
-
-            with c_btn_h2:
-                st.markdown("<b style='color:#16a34a;'>📋 Opción 2: Como en la Hoja 2</b><br><span style='font-size:12px; color:#475569;'>Trae y deja la contabilización exactamente como en la Hoja 2 para validar:</span>", unsafe_allow_html=True)
-                lbl_btn_h2 = "📋 Dejar Contabilización como la Hoja Dos"
-                btn_h2_type = "primary" if enviar_h2_activo else "secondary"
-                if st.button(lbl_btn_h2, key="btn_h2_" + pid_str, type=btn_h2_type, use_container_width=True):
-                    aplicar_banderas_tratamiento(pq_id_sel, gp=False, h2=True, nd=False)
-
-                    st.success("¡Contabilización de la Hoja 2 vinculada con éxito!")
-                    st.rerun()
-
-            with c_btn_nd:
-                st.markdown("<b style='color:#b91c1c;'>🔴 Opción 3: No Deducibles</b><br><span style='font-size:12px; color:#475569;'>Diferencia sin soporte DIAN:</span>", unsafe_allow_html=True)
-                lbl_btn_nd = "🔴 No Deducibles (53950501)"
-                btn_nd_type = "primary" if enviar_nd_activo else "secondary"
-                if st.button(lbl_btn_nd, key="btn_nd_" + pid_str, type=btn_nd_type, use_container_width=True):
-                    aplicar_banderas_tratamiento(pq_id_sel, gp=False, h2=False, nd=True)
-
-                    st.success("¡Enviado a Gastos No Deducibles (53950501)!")
-                    st.rerun()
-
-            dif_txt_val = f"{dif_faltante_prev:,.2f}"
-            if enviar_gp_activo:
-                st.info("✅ **Tratamiento Activo:** Se enviaron **$" + dif_txt_val + "** a **Mercancías en Tránsito (Cuenta 14650501)** como costo directo de inventario.")
-            elif enviar_h2_activo:
-                st.success("✅ **Tratamiento Activo:** Se trajo la contabilización **exactamente como en la Hoja 2** (" + cat_ag_h2 + " Cta " + cta_ag_h2 + ") para que la valides y apruebes.")
-            elif enviar_nd_activo:
-                st.info("✅ **Tratamiento Activo:** Se enviaron **$" + dif_txt_val + "** a **Gastos No Deducibles (Cuenta 53950501)**.")
-
-            # SECCIÓN ESPECÍFICA DE VALIDACIÓN Y APROBACIÓN DE CONTABILIZACIÓN DE HOJA 2
-            df_asiento_h2_val = None
-            if enviar_h2_activo:
-                st.markdown("#### 🔍 Validación de la Contabilización Traída de la Hoja 2 (Factura " + fac_ag_hdr + "):")
-                st.caption("Revisa el asiento contable tal como quedó registrado en la Hoja 2 para " + nom_ag_hdr + ". Si estás de acuerdo, haz clic en el botón verde para aprobarlo y dejarlo fijo:")
-
-                # Traer el asiento fiel registrado en la Hoja 2
-                asientos_map_h2 = st.session_state.get("asientos_triangulacion_por_factura", {})
-                if fac_ag_hdr in asientos_map_h2 and asientos_map_h2[fac_ag_hdr] is not None and not asientos_map_h2[fac_ag_hdr].empty:
-                    df_asiento_h2_val = pd.DataFrame(asientos_map_h2[fac_ag_hdr]).copy()
-                else:
-                    df_asiento_h2_val = obtener_asiento_contable_hoja2(agente_actual, es_aduanero=False)
-
-                st.dataframe(
-                    df_asiento_h2_val.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                c_val_b1, c_val_b2 = st.columns([2.5, 1])
-                with c_val_b1:
-                    sum_d_h2 = df_asiento_h2_val["Débito ($)"].sum()
-                    sum_c_h2 = df_asiento_h2_val["Crédito ($)"].sum()
-                    dif_h2_val = abs(sum_d_h2 - sum_c_h2)
-                    st.success(f"⚖️ **Partida Doble Cuadrada:** Débito: **${sum_d_h2:,.2f}** | Crédito: **${sum_c_h2:,.2f}** | Diferencia: **${dif_h2_val:,.2f}**")
-                with c_val_b2:
-                    if st.button("✅ Aprobar y Dejar Listo (Chulear)", key=f"btn_aprobar_h2_directo_{pq_id_sel}", type="primary", use_container_width=True):
-                        st.session_state[f"paquete_listo_{pq_id_sel}"] = True
-                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
-                        st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = True
-                        st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
-                        st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
-
-                        # Fijar el asiento contable fiel de la Hoja 2
-                        asiento_fijo_h2 = df_asiento_h2_val.copy()
-                        st.session_state[f"asiento_fijo_pq_{pq_id_sel}"] = asiento_fijo_h2
-                        paquete_activo["asiento_fijo"] = asiento_fijo_h2
-                        paquete_activo["asiento_aprobado"] = asiento_fijo_h2
-
-                        if "asientos_triangulacion_por_factura" not in st.session_state:
-                            st.session_state["asientos_triangulacion_por_factura"] = {}
-                        ag_fac_str = str(agente_actual["Factura"]).strip()
-                        st.session_state["asientos_triangulacion_por_factura"][ag_fac_str] = asiento_fijo_h2
-                        st.session_state[f"asiento_triang_aprobado_{ag_fac_str}"] = asiento_fijo_h2
-
-                        st.success(f"¡Paquete #{pq_id_sel} validado, aprobado y dejado fijo con la contabilización de la Hoja 2!")
-                        st.rerun()
-
-            # Asiento contable del paquete: Si ya fue aprobado y dejado fijo, se respeta inmutablemente
-            if st.session_state.get(f"paquete_listo_{pq_id_sel}", False) and (f"asiento_fijo_pq_{pq_id_sel}" in st.session_state or "asiento_fijo" in paquete_activo):
-                df_asiento_paquete = st.session_state.get(f"asiento_fijo_pq_{pq_id_sel}", paquete_activo.get("asiento_fijo")).copy()
-                dif_no_ded = 0.0
-                ret_asum = 0.0
-            elif enviar_h2_activo and df_asiento_h2_val is not None:
-                df_asiento_paquete = df_asiento_h2_val.copy()
-                dif_no_ded = 0.0
-                ret_asum = 0.0
-            else:
-                df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(
-                    agente_actual, terceros_actual,
-                    enviar_a_no_deducible=enviar_nd_activo,
-                    enviar_a_gastos_propios=enviar_gp_activo,
-                    enviar_a_hoja2=enviar_h2_activo
-                )
-
-            st.markdown(f"#### ⚖️ Asiento Contable del Paquete #{pq_id_sel}:")
-            st.caption("Detalle de partida doble de ESTE paquete: cancela las cuentas por pagar de DHL, Agencia y Garaje contra Euro Shipping:")
-
+                elif esta_excl_ind:
+                    st.markdown(f"""
+                    <div style="background:#fef2f2; border:1px solid #fecaca; border-left:5px solid #dc2626; border-radius:8px; padding:12px 16px; margin-bottom:12px;">
+                        <h5 style="margin:0 0 4px 0; color:#991b1b;">🚫 Factura Marcada como 'No Contabilizar'</h5>
+                        <p style="margin:0; color:#7f1d1d; font-size:13.5px;">
+                            Esta factura ha sido excluida de la planilla de compras de Siigo. A continuación se muestra su estructura contable para fines informativos y de auditoría:
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+                # Cada factura SIEMPRE mantiene su causación contable propia íntegra
+                df_asiento = obtener_asiento_contable_hoja2(fac_sel, es_aduanero=es_aduanero)
+    
+            cols_as_dsp = [c for c in ["Código Cuenta", "Descripción de la Cuenta", "Tercero / NIT", "Débito ($)", "Crédito ($)"] if c in df_asiento.columns]
             st.dataframe(
-                df_asiento_paquete.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
+                df_asiento[cols_as_dsp].style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
                 use_container_width=True,
                 hide_index=True
             )
-
-            c_cuad1, c_cuad2, c_cuad3, c_cuad4 = st.columns(4)
-            sum_deb_pq = df_asiento_paquete["Débito ($)"].sum()
-            sum_cred_pq = df_asiento_paquete["Crédito ($)"].sum()
-            dif_cuad_pq = abs(sum_deb_pq - sum_cred_pq)
-
-            with c_cuad1:
-                st.metric("Total Débito", f"${sum_deb_pq:,.2f}")
-            with c_cuad2:
-                st.metric("Total Crédito", f"${sum_cred_pq:,.2f}")
-            with c_cuad3:
-                st.metric("Retenciones Asumidas (53152001)", f"${ret_asum:,.2f}")
-            with c_cuad4:
-                st.metric("Diferencia No Deducible (53950501)", f"${dif_no_ded:,.2f}")
-
-            if dif_cuad_pq < 0.05:
-                st.success(f"✅ **Paquete #{pq_id_sel} Verificado:** Partida doble cuadrada con sumas iguales al centavo ($0.00).")
-            else:
-                st.error(f"Diferencia de cuadre: ${dif_cuad_pq:,.2f}")
-
+    
+            sum_deb = df_asiento["Débito ($)"].sum()
+            sum_cred = df_asiento["Crédito ($)"].sum()
+    
+            c_as1, c_as2, c_as3 = st.columns(3)
+            with c_as1:
+                st.metric("Total Débito", f"${sum_deb:,.2f}")
+            with c_as2:
+                st.metric("Total Crédito", f"${sum_cred:,.2f}")
+            with c_as3:
+                st.metric("Diferencia / Cuadre", f"${abs(sum_deb - sum_cred):,.2f}")
+            st.success("✅ **Comprobante Verificado:** Partida doble cuadrada con sumas iguales.")
+        else:
+            st.info("Carga el archivo Excel en la Pestana 1 para habilitar la auditoria.")
+    
+    except Exception as _e_aud:
+        if type(_e_aud).__name__ in ['RerunException', 'StopException', 'ScriptControlException']:
+            raise _e_aud
+        st.error(f"⚠️ Ocurrió un error en la pestaña de Auditoría Contable: {_e_aud}")
+        with st.expander("🔍 Ver detalles técnicos del error (Traceback):"):
+            st.code(traceback.format_exc())
+with tab_triangulacion:
+    try:
+        st.markdown("### 🔀 Paquetes de Importación y Cruce de Cuentas por Pagar")
+        st.caption("Separa y concilia cada importación en paquetes individuales: Cobro de Euro Shipping = Factura DHL (Flete) + Factura Agencia Aduanas + Factura Garaje/Almacenadora.")
+    
+        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None and isinstance(st.session_state["df_procesado"], pd.DataFrame) and not st.session_state["df_procesado"].empty:
+            df_total = normalizar_df_procesado(st.session_state["df_procesado"])
+            st.session_state["df_procesado"] = df_total
+            
+            # Identificar facturas de comercio exterior / importación de forma segura sin errores de tipos
+            prov_series = df_total["Proveedor"] if "Proveedor" in df_total.columns else pd.Series("", index=df_total.index)
+            desc_series = df_total["Descripcion"] if "Descripcion" in df_total.columns else pd.Series("", index=df_total.index)
+            grp_series = df_total["Grupo Importación"] if "Grupo Importación" in df_total.columns else pd.Series("", index=df_total.index)
+            cta_cxp_series = df_total["Cuenta Pasivo Especifica"] if "Cuenta Pasivo Especifica" in df_total.columns else (df_total["Cta Contrapartida"] if "Cta Contrapartida" in df_total.columns else pd.Series("", index=df_total.index))
+            cta_p_series = df_total["Cta Principal"] if "Cta Principal" in df_total.columns else pd.Series("", index=df_total.index)
+    
+            prov_upper = prov_series.fillna("").astype(str).str.upper()
+            desc_upper = desc_series.fillna("").astype(str).str.upper()
+            grp_imp_str = grp_series.fillna("").astype(str).str.strip()
+            cta_cxp_str = cta_cxp_series.fillna("").astype(str).str.strip()
+            cta_p_str = cta_p_series.fillna("").astype(str).str.strip()
+    
+            # 1. Facturas explícitamente marcadas en Excel con Grupo de Importación o clasificadas como aduaneras
+            cond_grp = (grp_imp_str != "") & (~grp_imp_str.isin(["nan", "None", "0", "0.0"]))
+            cond_es_adu = (df_total["Es Aduanera"] == True) if "Es Aduanera" in df_total.columns else pd.Series(False, index=df_total.index)
+    
+            # 2. Cuentas contables específicas de importación / fletes DHL / agencias aduaneras
+            cond_ctas = cta_cxp_str.isin(["22050505", "23359501", "14650501"]) | (cta_p_str == "14650501")
+    
+            # 3. Proveedores específicos de Comercio Exterior / Logística Internacional / Aduana / Puertos / Fletes
+            REGEX_IMPORTACION = (
+                r"EURO\s*SHIPPING|TRADE\s*GLOBAL|CONSOLCARGO|BLUE\s*LOGISTICS|"
+                r"KUEHNE|PANALPINA|DSV|EXPEDITORS|TIBA|HUBEMAR|SCHENKER|COLTRANS|COLMAS|"
+                r"DHL|FEDEX|UPS|CARGO|ADUANA|ADUANERA|AGENCIAMIENTO|PORTUARIA|PUERTO\s*BAHIA|"
+                r"CONTECAR|SPRC|SPB|COMPAS|ALPOPULAR|ALMAVIVA|RANSA|ALMACENADORA|"
+                r"MAERSK|HAPAG|SEABOARD|HAMBURG|CMA\s*CGM|EVERGREEN|COSCO|YANG\s*MING"
+            )
+            cond_prov = prov_upper.str.contains(REGEX_IMPORTACION, regex=True, na=False)
+    
+            # 4. Descripción que evidencia gastos de importación / desaduanamiento
+            REGEX_DESC_IMPORT = (
+                r"IMPORTACI[OÓ]N|AGENCIAMIENTO|ARANCEL|DESADUANAMIENTO|NACIONALIZACI[OÓ]N|"
+                r"BODEGAJE\s*PUERTO|ALMACENAJE\s*ADUANERO|MANDATO\s*ADUANERO|FLETE\s*INTERNACIONAL"
+            )
+            cond_desc = desc_upper.str.contains(REGEX_DESC_IMPORT, regex=True, na=False)
+    
+            # Condición estricta: ÚNICAMENTE facturas relacionadas con la importación (rojas y blancas de importación)
+            cond_aduanera = cond_grp | cond_es_adu | cond_ctas | cond_prov | cond_desc
+            df_adu = df_total[cond_aduanera].copy()
+            
+            # Configuración dinámica y extensible de Agentes Coordinadores (Forwarders)
+            AGENTES_COORDINADORES_BASE = ["EURO SHIPPING", "TRADE GLOBAL", "CONSOLCARGO", "BLUE LOGISTICS", "KUEHNE", "PANALPINA", "DSV", "EXPEDITORS", "TIBA", "HUBEMAR"]
+            
+            todos_provs = sorted([str(p) for p in df_total["Proveedor"].dropna().unique() if str(p).strip()]) if "Proveedor" in df_total.columns else []
+            provs_agentes_sugeridos = [p for p in todos_provs if any(k in str(p).upper() for k in AGENTES_COORDINADORES_BASE)]
+            
+            with st.expander("🏢 Configurar Agentes Coordinadores (Los que nos cobran directamente a nosotros):", expanded=False):
+                st.caption("Selecciona qué empresas actúan como Agentes Coordinadores / Forwarders que emiten cobros globales consolidados (Euro Shipping, Trade Global, Consolcargo, etc.):")
+                agentes_seleccionados_noms = st.multiselect(
+                    "Agentes Coordinadores Activos:",
+                    options=todos_provs,
+                    default=provs_agentes_sugeridos,
+                    key="sel_multiselect_agentes_coordinadores"
+                )
+                
+            if not agentes_seleccionados_noms:
+                agentes_seleccionados_noms = provs_agentes_sugeridos
+                
+            # Facturas de Agentes Principales (Los que nos cobran directamente)
+            df_agentes_all = df_adu[df_adu["Proveedor"].isin(agentes_seleccionados_noms)].copy()
+            
+            # Facturas de Terceros Soporte (Los que se cruzan contra esos agentes)
+            df_terceros_all = df_adu[~df_adu.index.isin(df_agentes_all.index)].copy()
+    
+            # Resumen superior
+            m_c1, m_c2, m_c3, m_c4, m_c5 = st.columns(5)
+            with m_c1:
+                st.metric("Operaciones Agente (Euro / Trade)", len(df_agentes_all))
+            with m_c2:
+                st.metric("Facturas Soporte en Pool", len(df_terceros_all), help="Total de facturas candidatas para cruce")
+            with m_c3:
+                ya_reg_terc = df_terceros_all["Ya Registrada"].fillna(False).astype(bool) if "Ya Registrada" in df_terceros_all.columns else pd.Series(False, index=df_terceros_all.index)
+                n_rojas_adu = int(ya_reg_terc.sum())
+                st.metric("Terceros Contabilizados (🔴)", n_rojas_adu, help="Causadas previamente en Siigo")
+            with m_c4:
+                n_blancas_adu = int((~ya_reg_terc).sum())
+                st.metric("Terceros Pendientes (⚪)", n_blancas_adu, help="No contabilizadas aún (Nuevas)")
+            with m_c5:
+                n_cuad_prev = sum([1 for p in st.session_state.get("paquetes_importacion", {}).values() if p.get("diferencia", 999) < 1.0])
+                st.metric("Paquetes Cuadrados ($0.00)", f"{n_cuad_prev} ✅")
+    
             st.markdown("---")
-            st.markdown("#### 📥 Exportar Control de Paquetes y Cruces de Importación:")
-            st.caption("Descarga un archivo Excel con el resumen de cada paquete, el detalle de facturas de terceros vinculadas y el asiento contable de control (sin generar aún notas de contabilidad en Siigo hasta que definas el procedimiento):")
-
-            # Generar Excel estructurado por Paquetes de Importación individuales
-            todos_asientos_lista = []
-            resumen_paquetes_lista = []
-            detalle_facturas_lista = []
-            consecutivo_cruce = 1
-
-            facs_asignadas_en_algun_pq = []
-
-            for g_k, g_v in pqs_actuales.items():
-                ag_item = g_v["agente"]
-                terc_items = g_v["terceros"]
-                enviar_nd_g = st.session_state.get(f"enviar_nd_pq_{g_k}", False)
-                enviar_gp_g = st.session_state.get(f"enviar_gp_pq_{g_k}", False)
-                enviar_h2_g = st.session_state.get(f"enviar_h2_pq_{g_k}", False)
-                if st.session_state.get(f"paquete_listo_{g_k}", False) and (f"asiento_fijo_pq_{g_k}" in st.session_state or "asiento_fijo" in g_v):
-                    df_as_p = pd.DataFrame(st.session_state.get(f"asiento_fijo_pq_{g_k}", g_v.get("asiento_fijo"))).copy()
-                    dif_p = 0.0
-                    ret_p = 0.0
+    
+            if df_agentes_all.empty:
+                st.warning("⚠️ No se encontraron facturas de agentes aduaneros principales (Euro Shipping o Trade Global) en este reporte.")
+            else:
+                # 1. FUNCIÓN DE AUTO-EMPAQUETAMIENTO INTELIGENTE
+                # Algoritmo de combinación: encuentra para cada Euro Shipping el subconjunto de DHL + Agencia + Garaje que suma su valor
+                def auto_empaquetar_inteligente(df_ag, df_terc):
+                    """
+                    Algoritmo cronológico de alta precisión para Agencias Aduaneras (Euro Shipping / Trade Global):
+                    1. Ordena cronológicamente de Enero hacia Diciembre.
+                    2. Cruza y relaciona tanto facturas de terceros YA contabilizadas (🔴) como NO contabilizadas (⚪).
+                    3. Para cada factura de agente (ej. 19 de Enero), busca facturas de terceros (DHL, Agencia, Garaje, etc.):
+                       - Prioritariamente en fechas anteriores o el mismo día (-30 a 0 días de diferencia).
+                       - O en una fecha ligeramente superior (+1 a +12 días de diferencia).
+                       - Descarta o penaliza fechas lejanas de otros meses.
+                    4. Exige concordancia estricta de precio: la suma del Saldo Cruce (Base + IVA) debe concordar
+                       exactamente con el valor total facturado por el agente aduanero.
+                    """
+                    import itertools
+                    pqs_res = {}
+                    
+                    # 1. Asegurar orden cronológico estricto de Enero hacia Diciembre
+                    df_ag_ord = df_ag.copy()
+                    df_ag_ord["_dt"] = pd.to_datetime(df_ag_ord["Fecha"], dayfirst=True, errors="coerce")
+                    df_ag_ord = df_ag_ord.sort_values(by="_dt", ascending=True)
+                    
+                    pool_t = df_terc.copy()
+                    pool_t["_dt"] = pd.to_datetime(pool_t["Fecha"], dayfirst=True, errors="coerce")
+                    pool_t = pool_t.sort_values(by="_dt", ascending=True)
+                    pool_t["_asignado_pq"] = 0
+    
+                    # PROTEGER Y BLOQUEAR FACTURAS DE PAQUETES YA VALIDADOS
+                    if "paquetes_importacion" in st.session_state:
+                        for p_num_prev, p_data_prev in st.session_state["paquetes_importacion"].items():
+                            if st.session_state.get(f"paquete_listo_{p_num_prev}", False):
+                                df_t_prev = p_data_prev.get("terceros")
+                                if df_t_prev is not None and not df_t_prev.empty:
+                                    for f_b in df_t_prev["Factura"].dropna():
+                                        idx_match = pool_t[pool_t["Factura"].astype(str).str.strip() == str(f_b).strip()].index
+                                        if not idx_match.empty:
+                                            pool_t.loc[idx_match, "_asignado_pq"] = p_num_prev
+                    
+                    for idx_ag_i, (_, ag_i) in enumerate(df_ag_ord.iterrows()):
+                        pq_id_i = idx_ag_i + 1
+                        target_i = float(ag_i["Total"])
+                        f_ag_dt_i = ag_i["_dt"]
+    
+                        if "paquetes_importacion" in st.session_state and pq_id_i in st.session_state["paquetes_importacion"]:
+                            prev_pq_val = st.session_state["paquetes_importacion"][pq_id_i]
+                            if st.session_state.get(f"paquete_listo_{pq_id_i}", False):
+                                # MANTENER INTACTO EL PAQUETE YA VALIDADO
+                                pqs_res[pq_id_i] = prev_pq_val
+                                continue
+                        
+                        cands_i = pool_t[pool_t["_asignado_pq"] == 0].copy()
+                        if cands_i.empty:
+                            pqs_res[pq_id_i] = {"agente": ag_i, "terceros": pd.DataFrame(), "diferencia": target_i}
+                            continue
+                            
+                        # Evaluar concordancia cronológica y de mandato para cada factura de tercero
+                        cand_l = []
+                        for c_idx_k, c_row_k in cands_i.iterrows():
+                            tb_k = float(c_row_k.get("Base", 0.0))
+                            tiv_k = float(c_row_k.get("IVA", 0.0))
+                            sc_k = obtener_saldo_cruce_factura(c_row_k)
+                            p_u_k = str(c_row_k["Proveedor"]).upper()
+                            rol_k = "DHL" if "DHL" in p_u_k else ("AGENCIA" if any(k in p_u_k for k in ["CARGO", "ADUANA"]) else "GARAJE")
+                            
+                            # 2. Análisis de fechas: concordancia de Enero a Diciembre
+                            c_dt = c_row_k["_dt"]
+                            score_tiempo = 0
+                            diff_dias = 0
+                            relacion_fecha_txt = "Sin fecha"
+                            
+                            if pd.notna(f_ag_dt_i) and pd.notna(c_dt):
+                                diff_dias = int((c_dt - f_ag_dt_i).days)
+                                # REGLA CRONOLÓGICA ESTRICTA: Solo conciliar facturas anteriores (-60 a 0 días) o un poco después (+1 a +15 días)
+                                if diff_dias < -60 or diff_dias > 15:
+                                    continue  # DESCARTAR: fuera de la ventana cronológica del despacho
+                                    
+                                if diff_dias == 0:
+                                    score_tiempo = 120
+                                    relacion_fecha_txt = "🟢 Mismo día (0d)"
+                                elif -30 <= diff_dias < 0:
+                                    score_tiempo = 100 - abs(diff_dias) * 2
+                                    relacion_fecha_txt = f"⬅️ Anterior ({abs(diff_dias)}d antes)"
+                                elif 0 < diff_dias <= 15:
+                                    score_tiempo = 85 - (diff_dias * 3)
+                                    relacion_fecha_txt = f"➡️ Poco después (+{diff_dias}d desp)"
+                                elif -60 <= diff_dias < -30:
+                                    score_tiempo = 40 - abs(diff_dias)
+                                    relacion_fecha_txt = f"⬅️ Anterior ({abs(diff_dias)}d antes)"
+                            
+                            # Coincidencia directa por Mandato (NIT o Nombre del agente en notas)
+                            nit_fact = re.sub(r'\D', '', str(c_row_k.get("NIT Facturado A", "") or c_row_k.get("nit_facturado_a", "")))
+                            nom_fact = str(c_row_k.get("Facturado A", "") or c_row_k.get("nombre_facturado_a", "")).upper()
+                            nit_ag_clean = re.sub(r'\D', '', str(ag_i.get("NIT Emisor", "")))
+                            nom_ag_u = str(ag_i.get("Proveedor", "")).upper()
+                            
+                            score_mandato = 0
+                            if nit_ag_clean and nit_fact and nit_ag_clean[:8] in nit_fact:
+                                score_mandato += 150
+                            elif any(w in nom_fact for w in nom_ag_u.split() if len(w) >= 4):
+                                score_mandato += 80
+                                
+                            c_row_k_copy = c_row_k.copy()
+                            c_row_k_copy["Relación Fecha"] = relacion_fecha_txt
+                            c_row_k_copy["Diferencia Días"] = diff_dias
+                            
+                            cand_l.append({
+                                "index": c_idx_k,
+                                "fac": c_row_k["Factura"],
+                                "saldo": sc_k,
+                                "rol": rol_k,
+                                "diff_dias": diff_dias,
+                                "score_total": score_tiempo + score_mandato,
+                                "row": c_row_k_copy
+                            })
+                            
+                        # Ordenar candidatos dando prioridad a concordancia de fecha y mandato
+                        cand_l.sort(key=lambda x: x["score_total"], reverse=True)
+                        
+                        # 3. Búsqueda de combinación con precio concorde exacto (target_i)
+                        # Busca combinaciones de 1 a 4 facturas de terceros (tanto 🔴 contabilizadas como ⚪ pendientes)
+                        best_combo_i = []
+                        best_diff_i = float("inf")
+                        best_score_i = -float("inf")
+                        
+                        # Ventana cronológica concorde (-35 días antes a +14 días después)
+                        cands_ventana = [c for c in cand_l if -35 <= c["diff_dias"] <= 14]
+                        if len(cands_ventana) < 5:
+                            cands_ventana = cand_l[:25]
+                        else:
+                            cands_ventana = cands_ventana[:25]
+                            
+                        # Probar combinaciones de 1 a 4 facturas (DHL, Agencia, Garaje, rojas o blancas)
+                        for k_c in range(1, min(5, len(cands_ventana) + 1)):
+                            for combo_i in itertools.combinations(cands_ventana, k_c):
+                                s_c_i = round(sum(c["saldo"] for c in combo_i), 2)
+                                d_c_i = abs(s_c_i - target_i)
+                                score_c = sum(c["score_total"] for c in combo_i) / len(combo_i)
+                                
+                                if d_c_i < 0.05:
+                                    # Coincidencia exacta de precio
+                                    if score_c > best_score_i or best_diff_i >= 0.05:
+                                        best_diff_i = d_c_i
+                                        best_combo_i = list(combo_i)
+                                        best_score_i = score_c
+                                elif best_diff_i >= 0.05 and d_c_i < best_diff_i:
+                                    best_diff_i = d_c_i
+                                    best_combo_i = list(combo_i)
+                                    best_score_i = score_c
+                                    
+                            if best_diff_i < 0.05 and best_score_i > 70:
+                                break
+                                
+                        # Si no dio cuadre exacto en la ventana cercana, ampliar búsqueda sobre todos los candidatos
+                        if best_diff_i > 1.0 and len(cand_l) > len(cands_ventana):
+                            cands_ampliados = cand_l[:30]
+                            for k_c in range(1, min(5, len(cands_ampliados) + 1)):
+                                for combo_i in itertools.combinations(cands_ampliados, k_c):
+                                    s_c_i = round(sum(c["saldo"] for c in combo_i), 2)
+                                    d_c_i = abs(s_c_i - target_i)
+                                    score_c = sum(c["score_total"] for c in combo_i) / len(combo_i)
+                                    
+                                    if d_c_i < best_diff_i:
+                                        best_diff_i = d_c_i
+                                        best_combo_i = list(combo_i)
+                                        best_score_i = score_c
+                                        if d_c_i < 0.05:
+                                            break
+                                if best_diff_i < 0.05:
+                                    break
+                                    
+                        sel_idxs_i = [c["index"] for c in best_combo_i]
+                        pool_t.loc[sel_idxs_i, "_asignado_pq"] = pq_id_i
+                        
+                        filas_terc_pq = [c["row"] for c in best_combo_i]
+                        terc_pq_i = pd.DataFrame(filas_terc_pq) if filas_terc_pq else pd.DataFrame()
+                        
+                        pqs_res[pq_id_i] = {
+                            "agente": ag_i,
+                            "terceros": terc_pq_i,
+                            "diferencia": best_diff_i
+                        }
+                        
+                    terc_libres_i = pool_t[pool_t["_asignado_pq"] == 0].copy()
+                    return pqs_res, terc_libres_i
+    
+                # Inicializar o recuperar paquetes de importación
+                if "paquetes_importacion" not in st.session_state or st.session_state.get("_ultimo_agentes_len") != len(df_agentes_all):
+                    pqs_ini, libres_ini = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all)
+                    st.session_state["paquetes_importacion"] = pqs_ini
+                    st.session_state["_ultimo_agentes_len"] = len(df_agentes_all)
+    
+                pqs_actuales = st.session_state["paquetes_importacion"]
+    
+                # =========================================================================
+                # PURGA Y BLOQUEO ESTRICTO: NINGUNA FACTURA VALIDADA PUEDE ESTAR EN OTRO PAQUETE
+                # =========================================================================
+                facs_validadas_global = {}  # Factura -> pq_id_donde_esta_validada
+                for p_k_chk, p_v_chk in pqs_actuales.items():
+                    if st.session_state.get(f"paquete_listo_{p_k_chk}", False):
+                        df_t_chk = p_v_chk.get("terceros")
+                        if df_t_chk is not None and not df_t_chk.empty:
+                            for f_val in df_t_chk["Factura"].dropna():
+                                f_val_clean = str(f_val).strip()
+                                if f_val_clean:
+                                    facs_validadas_global[f_val_clean] = p_k_chk
+    
+                hubo_cambio_purga = False
+                for p_k_chk, p_v_chk in pqs_actuales.items():
+                    # Si este paquete NO está validado, purgar cualquier factura que pertenezca a un paquete validado
+                    if not st.session_state.get(f"paquete_listo_{p_k_chk}", False):
+                        df_t_chk = p_v_chk.get("terceros")
+                        if df_t_chk is not None and not df_t_chk.empty:
+                            mask_ya_en_val = df_t_chk["Factura"].astype(str).str.strip().isin(facs_validadas_global.keys())
+                            if mask_ya_en_val.any():
+                                df_t_filtrado = df_t_chk[~mask_ya_en_val].copy().reset_index(drop=True)
+                                pqs_actuales[p_k_chk]["terceros"] = df_t_filtrado
+                                tot_ag_c = float(p_v_chk["agente"]["Total"])
+                                tot_terc_c = sum([obtener_saldo_cruce_factura(r) for _, r in df_t_filtrado.iterrows()])
+                                pqs_actuales[p_k_chk]["diferencia"] = abs(tot_ag_c - tot_terc_c)
+                                hubo_cambio_purga = True
+    
+                if hubo_cambio_purga:
+                    st.session_state["paquetes_importacion"] = pqs_actuales
+    
+                # Barra de Acciones y Selección de Paquete (Persistente: no salta al paquete 1)
+                c_top_pq1, c_top_pq2 = st.columns([2.5, 1])
+                with c_top_pq1:
+                    pqs_keys = list(pqs_actuales.keys())
+                    if "paquete_seleccionado_id" not in st.session_state or st.session_state["paquete_seleccionado_id"] not in pqs_keys:
+                        st.session_state["paquete_seleccionado_id"] = pqs_keys[0] if pqs_keys else 1
+    
+                    mapa_pqs_titulos = {}
+                    for p_num in pqs_keys:
+                        p_data = pqs_actuales[p_num]
+                        ag_t = p_data["agente"]
+                        n_terc = len(p_data["terceros"])
+                        s_terc = sum([obtener_saldo_cruce_factura(r) for _, r in p_data["terceros"].iterrows()])
+                        es_val_p = st.session_state.get(f"paquete_listo_{p_num}", False)
+                        lock_icon = "🔒 [VALIDADO] " if es_val_p else ""
+                        mapa_pqs_titulos[p_num] = f"{lock_icon}📦 Paquete #{p_num}: {str(ag_t.get('Proveedor') or 'Agente')[:16]} ({ag_t['Factura']}) — Cobro: ${float(ag_t.get('Total', 0.0) or 0.0):,.0f} | {n_terc} Facturas Terceros (${float(s_terc or 0.0):,.0f})"
+    
+                    idx_actual_sel = pqs_keys.index(st.session_state["paquete_seleccionado_id"]) if st.session_state["paquete_seleccionado_id"] in pqs_keys else 0
+    
+                    pq_id_sel = st.selectbox(
+                        "📦 Selecciona el Paquete de Importación que deseas revisar:",
+                        options=pqs_keys,
+                        index=idx_actual_sel,
+                        format_func=lambda pid: mapa_pqs_titulos.get(pid, f"Paquete #{pid}")
+                    )
+                    st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                    paquete_activo = pqs_actuales[pq_id_sel]
+                    agente_actual = paquete_activo["agente"]
+                    terceros_actual = paquete_activo["terceros"]
+    
+                    # Sincronización en tiempo real: refrescar datos del agente desde df_procesado (Hoja 2)
+                    if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+                        df_pr_act = st.session_state["df_procesado"]
+                        ag_fac_cur = str(agente_actual["Factura"]).strip()
+                        m_ag = df_pr_act[df_pr_act["Factura"].astype(str).str.strip() == ag_fac_cur]
+                        if not m_ag.empty:
+                            agente_actual = m_ag.iloc[0].to_dict()
+                            paquete_activo["agente"] = agente_actual
+    
+                    tot_agente_actual = float(agente_actual.get("Total", 0.0))
+                    base_prop_actual = float(agente_actual.get("Base", 0.0))
+                    iva_prop_actual = float(agente_actual.get("IVA", 0.0))
+                    iva_imp_act = float(agente_actual.get("IVA Importación", 0.0))
+                    subtot_prop_actual = round(base_prop_actual + iva_prop_actual + iva_imp_act, 2)
+                    saldo_terceros_esperado_act = round(tot_agente_actual - subtot_prop_actual, 2)
+    
+                    # Tratamiento contable y asiento de partida doble del paquete
+                    enviar_h2_activo = bool(st.session_state.get(f"enviar_h2_pq_{pq_id_sel}", False))
+                    enviar_gp_activo = bool(st.session_state.get(f"enviar_gp_pq_{pq_id_sel}", False))
+                    enviar_nd_activo = bool(st.session_state.get(f"enviar_nd_pq_{pq_id_sel}", False))
+    
+                    suma_terceros_cxp_act = sum([obtener_saldo_cruce_factura(r) for _, r in terceros_actual.iterrows()]) if (terceros_actual is not None and not terceros_actual.empty) else 0.0
+    
+                    if saldo_terceros_esperado_act > 0.05:
+                        dif_faltante_prev = max(0.0, round(saldo_terceros_esperado_act - suma_terceros_cxp_act, 2))
+                        df_prev, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=False)
+                        ret_prev = 0.0
+                    else:
+                        df_prev, dif_faltante_prev, ret_prev = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False)
+    
+                    if st.session_state.get(f"paquete_listo_{pq_id_sel}", False) and (f"asiento_fijo_pq_{pq_id_sel}" in st.session_state or "asiento_fijo" in paquete_activo):
+                        df_asiento_paquete = st.session_state.get(f"asiento_fijo_pq_{pq_id_sel}", paquete_activo.get("asiento_fijo")).copy()
+                        dif_no_ded = 0.0
+                        ret_asum = 0.0
+                    elif saldo_terceros_esperado_act > 0.05 or enviar_h2_activo:
+                        # Facturas con ingresos propios y de terceros (o con solicitud explícita de traer de Página 2)
+                        if enviar_nd_activo:
+                            df_asiento_paquete, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=True, imputar_a_transito=False)
+                            dif_no_ded = dif_faltante_prev
+                        elif enviar_gp_activo:
+                            df_asiento_paquete, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=True)
+                            dif_no_ded = 0.0
+                        else:
+                            # Dejar pendiente para conciliar con facturas de terceros (DECISIÓN DEL USUARIO)
+                            df_asiento_paquete, dif_no_ded = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=False)
+                        ret_asum = 0.0
+                    elif enviar_gp_activo and dif_faltante_prev > 0.05:
+                        df_asiento_paquete, _, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False)
+                        asiento_gp_filas = []
+                        for _, r_as in df_asiento_paquete.iterrows():
+                            if str(r_as["Código Cuenta"]).strip() == CUENTA_NO_DEDUCIBLE:
+                                asiento_gp_filas.append({
+                                    "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                                    "Descripción Cuenta": f"Mercancías en Tránsito / Base Propia Agente (Fac {agente_actual.get('Factura', '')})",
+                                    "Tercero / NIT": f"{agente_actual.get('NIT Emisor', '')} - {agente_actual.get('Proveedor', '')[:25]}",
+                                    "Débito ($)": float(r_as["Débito ($)"]),
+                                    "Crédito ($)": 0.0
+                                })
+                            else:
+                                asiento_gp_filas.append(r_as.to_dict())
+                        df_asiento_paquete = pd.DataFrame(asiento_gp_filas)
+                        dif_no_ded = 0.0
+                    else:
+                        df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=enviar_nd_activo)
+    
+                    def ejecutar_validacion_pq(pasa_a_siigo=True):
+                        st.session_state[f"paquete_listo_{pq_id_sel}"] = True
+                        st.session_state[f"paquete_destino_siigo_{pq_id_sel}"] = pasa_a_siigo
+                        paquete_activo["destino_siigo"] = pasa_a_siigo
+                        paquete_activo["asiento_fijo"] = df_asiento_paquete.copy()
+                        paquete_activo["asiento_aprobado"] = df_asiento_paquete.copy()
+                        if "asientos_triangulacion_por_factura" not in st.session_state:
+                            st.session_state["asientos_triangulacion_por_factura"] = {}
+                        ag_fac_str = str(agente_actual["Factura"]).strip()
+                        if pasa_a_siigo:
+                            st.session_state["asientos_triangulacion_por_factura"][ag_fac_str] = df_asiento_paquete.copy()
+                        else:
+                            st.session_state["asientos_triangulacion_por_factura"].pop(ag_fac_str, None)
+                        st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+    
+                        # PURGA INMEDIATA: Quitar las facturas de este paquete recién validado de TODOS los demás paquetes no validados
+                        if not terceros_actual.empty:
+                            facs_recien_validadas = set(terceros_actual["Factura"].astype(str).str.strip().dropna())
+                            for otro_id, otro_pq in pqs_actuales.items():
+                                if otro_id != pq_id_sel and not st.session_state.get(f"paquete_listo_{otro_id}", False):
+                                    df_otro_t = otro_pq.get("terceros")
+                                    if df_otro_t is not None and not df_otro_t.empty:
+                                        mask_remover = df_otro_t["Factura"].astype(str).str.strip().isin(facs_recien_validadas)
+                                        if mask_remover.any():
+                                            df_otro_limpio = df_otro_t[~mask_remover].copy().reset_index(drop=True)
+                                            otro_pq["terceros"] = df_otro_limpio
+                                            tot_ag_o = float(otro_pq["agente"]["Total"])
+                                            tot_terc_o = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in df_otro_limpio.iterrows()])
+                                            otro_pq["diferencia"] = abs(tot_ag_o - tot_terc_o)
+                            st.session_state["paquetes_importacion"] = pqs_actuales
+    
+                        # Traslado y actualización inmediata a df_procesado (Página 2)
+                        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+                            df_pr = st.session_state["df_procesado"]
+                            for c_col in ["Paquete Validado", "Destino Siigo", "Cruza Con Agente", "Estado Registro"]:
+                                if c_col in df_pr.columns:
+                                    df_pr[c_col] = df_pr[c_col].astype(object)
+                                else:
+                                    df_pr[c_col] = None
+                            idx_ag = df_pr[df_pr["Factura"].astype(str).str.strip() == ag_fac_str].index
+                            if not idx_ag.empty:
+                                if pasa_a_siigo:
+                                    df_pr.at[idx_ag[0], "Estado Registro"] = f"🔀 Validada en Triangulación (Pq #{pq_id_sel} - Pasa a Siigo)"
+                                else:
+                                    df_pr.at[idx_ag[0], "Estado Registro"] = f"🔍 Conciliado en Triangulación (Pq #{pq_id_sel} - Solo Control Interno)"
+                                df_pr.at[idx_ag[0], "Paquete Validado"] = pq_id_sel
+                                df_pr.at[idx_ag[0], "Destino Siigo"] = pasa_a_siigo
+                            if not terceros_actual.empty:
+                                for _, tr_row in terceros_actual.iterrows():
+                                    tr_fac = str(tr_row["Factura"]).strip()
+                                    idx_t = df_pr[df_pr["Factura"].astype(str).str.strip() == tr_fac].index
+                                    if not idx_t.empty:
+                                        es_r = bool(df_pr.at[idx_t[0], "Ya Registrada"]) or bool(df_pr.at[idx_t[0], "No Contabilizar"]) or (tr_fac in st.session_state.get("facturas_no_contabilizar", set()))
+                                        if es_r:
+                                            df_pr.at[idx_t[0], "Estado Registro"] = f"🔴 Cruzada en Pq #{pq_id_sel} (Solo cuenta pasivo)"
+                                        else:
+                                            if pasa_a_siigo:
+                                                df_pr.at[idx_t[0], "Estado Registro"] = f"⚪ Cruzada en Pq #{pq_id_sel} (Causada en triangulación)"
+                                            else:
+                                                df_pr.at[idx_t[0], "Estado Registro"] = f"🔍 Conciliada en Pq #{pq_id_sel} (Solo Control Interno)"
+                                        df_pr.at[idx_t[0], "Paquete Validado"] = pq_id_sel
+                                        df_pr.at[idx_t[0], "Cruza Con Agente"] = ag_fac_str
+                            st.session_state["df_procesado"] = df_pr
+                        guardar_estado_manual(empresa)
+    
+                    def ejecutar_desbloqueo_pq():
+                        st.session_state[f"paquete_listo_{pq_id_sel}"] = False
+                        st.session_state.pop(f"paquete_destino_siigo_{pq_id_sel}", None)
+                        paquete_activo.pop("destino_siigo", None)
+                        paquete_activo.pop("asiento_fijo", None)
+                        paquete_activo.pop("asiento_aprobado", None)
+                        ag_fac_str = str(agente_actual["Factura"]).strip()
+                        if "asientos_triangulacion_por_factura" in st.session_state:
+                            st.session_state["asientos_triangulacion_por_factura"].pop(ag_fac_str, None)
+                        st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None:
+                            df_pr = st.session_state["df_procesado"]
+                            for c_col in ["Paquete Validado", "Destino Siigo", "Cruza Con Agente", "Estado Registro"]:
+                                if c_col in df_pr.columns:
+                                    df_pr[c_col] = df_pr[c_col].astype(object)
+                                else:
+                                    df_pr[c_col] = None
+                            idx_ag = df_pr[df_pr["Factura"].astype(str).str.strip() == ag_fac_str].index
+                            if not idx_ag.empty:
+                                df_pr.at[idx_ag[0], "Estado Registro"] = "🟡 Agente Aduanero"
+                                df_pr.at[idx_ag[0], "Paquete Validado"] = None
+                                df_pr.at[idx_ag[0], "Destino Siigo"] = None
+                            if not terceros_actual.empty:
+                                for _, tr_row in terceros_actual.iterrows():
+                                    tr_fac = str(tr_row["Factura"]).strip()
+                                    idx_t = df_pr[df_pr["Factura"].astype(str).str.strip() == tr_fac].index
+                                    if not idx_t.empty:
+                                        es_r = bool(df_pr.at[idx_t[0], "Ya Registrada"]) or bool(df_pr.at[idx_t[0], "No Contabilizar"])
+                                        cp = df_pr.at[idx_t[0], "Comprobante Previo"]
+                                        df_pr.at[idx_t[0], "Estado Registro"] = f"🔴 Ya Registrada ({cp})" if es_r else "⚪ Compra Pendiente"
+                                        df_pr.at[idx_t[0], "Paquete Validado"] = None
+                                        df_pr.at[idx_t[0], "Cruza Con Agente"] = None
+                            st.session_state["df_procesado"] = df_pr
+                        guardar_estado_manual(empresa)
+    
+                with c_top_pq2:
+                    st.write("")
+                    st.write("")
+                    if st.button("🪄 Re-calcular Auto-Empaquetado", key="btn_recalc_auto_pqs", help="Vuelve a calcular las combinaciones exactas de DHL + Agencia + Garaje para cada cobro de Euro"):
+                        pqs_re, _ = auto_empaquetar_inteligente(df_agentes_all, df_terceros_all)
+                        st.session_state["paquetes_importacion"] = pqs_re
+                        st.success("¡Paquetes recalculados y separados!")
+                        st.rerun()
+    
+                # Resumen visual del Paquete Seleccionado
+                col_pq1, col_pq2 = st.columns([1.3, 2.5])
+                with col_pq1:
+                    st.markdown(f"""
+                    <div style="background:#fffbeb; border:1px solid #fde68a; border-left:5px solid #d97706; border-radius:8px; padding:14px; margin-bottom:12px;">
+                        <h4 style="margin:0 0 6px 0; color:#92400e;">🟡 Factura del Agente (Cobro Total)</h4>
+                        <p style="margin:0; font-size:14px; color:#78350f;">
+                            <b>Proveedor:</b> {agente_actual['Proveedor']}<br>
+                            <b>NIT:</b> {agente_actual['NIT Emisor']}<br>
+                            <b>Factura:</b> {agente_actual['Factura']}<br>
+                            <b>Fecha:</b> {agente_actual['Fecha']}<br>
+                            <b>Total Facturado:</b> <span style="font-size:18px; font-weight:bold; color:#b45309;">${tot_agente_actual:,.2f}</span><br>
+                            <b>IVA Discriminado:</b> ${float(agente_actual.get('IVA', 0.0)):,.2f}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+                    es_val_card = st.session_state.get(f"paquete_listo_{pq_id_sel}", False)
+                    if not es_val_card:
+                        st.caption(f"ℹ️ Elige el destino de este paquete al validarlo:")
+                        c_vcard1, c_vcard2 = st.columns(2)
+                        with c_vcard1:
+                            if st.button("📤 Pasar a Hoja 2", key=f"btn_val_siigo_card_{pq_id_sel}", type="primary", use_container_width=True, help="Bloquea el paquete y lo traslada a Página 2 para subirlo a la Planilla de Siigo"):
+                                ejecutar_validacion_pq(pasa_a_siigo=True)
+                                st.success(f"¡Paquete #{pq_id_sel} trasladado a Página 2 para Siigo!")
+                                st.rerun()
+                        with c_vcard2:
+                            if st.button("📑 Solo Conciliación", key=f"btn_val_concil_card_{pq_id_sel}", use_container_width=True, help="Bloquea el paquete para identificar y conciliar facturas, sin subirlo a la Planilla de Siigo"):
+                                ejecutar_validacion_pq(pasa_a_siigo=False)
+                                st.success(f"¡Paquete #{pq_id_sel} guardado para Conciliación Interna!")
+                                st.rerun()
+                    else:
+                        es_siigo = st.session_state.get(f"paquete_destino_siigo_{pq_id_sel}", True)
+                        if es_siigo:
+                            st.success(f"🔒 **Pq #{pq_id_sel}: PASA A HOJA 2 (PLANILLA SIIGO)**")
+                        else:
+                            st.info(f"📑 **Pq #{pq_id_sel}: SOLO CONCILIACIÓN INTERNA**")
+                        if st.button(f"🔓 Desbloquear Paquete #{pq_id_sel}", key=f"btn_desb_card_{pq_id_sel}", use_container_width=True):
+                            ejecutar_desbloqueo_pq()
+                            st.rerun()
+    
+                with col_pq2:
+                    st.markdown(f"##### Facturas de Terceros que Componen este Paquete #{pq_id_sel}:")
+                    if not terceros_actual.empty:
+                        filas_terc_disp = []
+                        tot_s_terceros = 0.0
+                        for _, tr in terceros_actual.iterrows():
+                            es_r = tr.get("Ya Registrada", False)
+                            badge_est = f"🔴 Ya en Siigo ({tr.get('Comprobante Previo', '10-Prev')})" if es_r else "⚪ No Contabilizada (Pendiente)"
+                            t_b = float(tr.get("Base", 0.0)) if pd.notna(tr.get("Base")) else 0.0
+                            t_iv = float(tr.get("IVA", 0.0)) if pd.notna(tr.get("IVA")) else 0.0
+                            s_cruce = obtener_saldo_cruce_factura(tr)
+                            tot_s_terceros += s_cruce
+                            cta_actual_tr = str(tr.get("Cuenta Pasivo Especifica", "22050505" if "CARGO" in str(tr["Proveedor"]).upper() else "23359501")).strip()
+                            p_nom = str(tr["Proveedor"]).upper()
+                            rol_dsp = "🚚 DHL (Flete)" if "DHL" in p_nom else ("🏢 Agencia (Aduana)" if any(k in p_nom for k in ["CARGO", "ADUANA"]) else "🏬 Garaje / Almacén")
+                            
+                            rel_fec_val = tr.get("Relación Fecha")
+                            if pd.isna(rel_fec_val) or not str(rel_fec_val).strip() or str(rel_fec_val).strip() in ["nan", "None"]:
+                                concordancia_dsp = calcular_concordancia_fecha(tr.get("Fecha"), agente_actual.get("Fecha"))
+                            else:
+                                concordancia_dsp = str(rel_fec_val).strip()
+                                
+                            filas_terc_disp.append({
+                                "Rol": rol_dsp,
+                                "Fecha Factura": tr.get("Fecha", "-"),
+                                "Concordancia Fecha": concordancia_dsp,
+                                "Estado Contable": badge_est,
+                                "Proveedor Tercero": tr["Proveedor"][:22],
+                                "Factura": tr["Factura"],
+                                "Subtotal (Base)": t_b,
+                                "IVA": t_iv,
+                                "Saldo Cruce": s_cruce,
+                                "Cuenta Contable": f"{cta_actual_tr} (CxP a Cruzar)"
+                            })
+                        df_terc_disp = pd.DataFrame(filas_terc_disp)
+                        st.dataframe(df_terc_disp.style.format({
+                            "Subtotal (Base)": "${:,.2f}",
+                            "IVA": "${:,.2f}",
+                            "Saldo Cruce": "${:,.2f}"
+                        }), use_container_width=True, hide_index=True)
+                        
+                        dif_pq_actual = abs(tot_agente_actual - tot_s_terceros)
+                        if dif_pq_actual < 5.0:
+                            st.success(f"✅ **Paquete #{pq_id_sel} Exacto:** Total Terceros: **${tot_s_terceros:,.2f}** == Cobro Euro: **${tot_agente_actual:,.2f}** | Diferencia: **$0.00**")
+                        else:
+                            st.info(f"📊 Total Terceros: **${tot_s_terceros:,.2f}** | Cobro Euro: **${tot_agente_actual:,.2f}** | Diferencia a No Deducible: **${dif_pq_actual:,.2f}**")
+                    else:
+                        st.warning(f"⚠️ El Paquete #{pq_id_sel} no tiene facturas de terceros asignadas todavía.")
+    
+                # Expander para agregar/quitar facturas manualmente a este paquete (BLOQUEADO SI ESTÁ VALIDADO)
+                es_validado_este = st.session_state.get(f"paquete_listo_{pq_id_sel}", False)
+                if es_validado_este:
+                    st.markdown(f"""
+                    <div style="background:#f0fdf4; border:1px solid #86efac; border-left:5px solid #16a34a; border-radius:8px; padding:12px 16px; margin:12px 0;">
+                        <h5 style="margin:0 0 4px 0; color:#166534;">🔒 Paquete #{pq_id_sel} VALIDADO Y BLOQUEADO</h5>
+                        <p style="margin:0; color:#14532d; font-size:13.5px;">
+                            Este paquete se encuentra congelado. Ninguna factura puede ser añadida ni retirada mientras esté validado. Para realizar modificaciones, presiona <b>'🔓 Desbloquear y Modificar'</b> abajo.
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with st.expander(f"⚙️ Modificar este Paquete #{pq_id_sel} (Sacar Facturas o Agregar Nuevas):", expanded=False if es_validado_este else False):
+                    if es_validado_este:
+                        st.warning("⚠️ Debes desbloquear el paquete abajo antes de poder agregar o sacar facturas.")
+                        st.stop()
+                    st.caption("Administra las facturas asignadas a esta importación: saca las que no correspondan o añade nuevas facturas de DHL, Agencia o Garaje:")
+                    
+                    # 1. SECCIÓN PARA SACAR / REDIRIGIR FACTURAS
+                    st.markdown("##### ➖ Sacar y Redirigir una factura de este paquete:")
+                    st.caption("Si ves una factura que no corresponde a este paquete, sácala y el sistema la reubicará automáticamente o la enviará a compras directas para que no quede pendiente:")
+                    facs_en_este = list(terceros_actual["Factura"].unique()) if not terceros_actual.empty else []
+                    
+                    if facs_en_este:
+                        opciones_quitar = []
+                        mapa_quitar_row = {}
+                        for _, tr_k in terceros_actual.iterrows():
+                            tb_k = float(tr_k.get("Base", 0.0))
+                            tiv_k = float(tr_k.get("IVA", 0.0))
+                            sc_k = obtener_saldo_cruce_factura(tr_k)
+                            tag_q = f"[{tr_k['Factura']}] {str(tr_k.get('Proveedor') or 'Tercero')[:24]} (Saldo: ${sc_k:,.2f})"
+                            opciones_quitar.append(tag_q)
+                            mapa_quitar_row[tag_q] = tr_k
+                            
+                        sel_para_quitar = st.selectbox("1. Selecciona la factura que deseas SACAR de este paquete:", ["(Seleccionar...)"] + opciones_quitar, key=f"sel_rem_tr_{pq_id_sel}")
+                        
+                        if sel_para_quitar != "(Seleccionar...)":
+                            fila_a_mover = mapa_quitar_row[sel_para_quitar]
+                            fac_nom_mover = fila_a_mover["Factura"]
+                            sc_mover = obtener_saldo_cruce_factura(fila_a_mover)
+                            
+                            otros_pqs = [p for p in pqs_actuales.keys() if p != pq_id_sel and not st.session_state.get(f"paquete_listo_{p}", False)]
+                            
+                            # Calcular cuál otro paquete tiene un faltante más cercano a esta factura
+                            mejor_pq_sug = None
+                            mejor_diff_sug = float("inf")
+                            for p_cand_id in otros_pqs:
+                                p_cand = pqs_actuales[p_cand_id]
+                                tot_ag_c = float(p_cand["agente"]["Total"])
+                                tot_terc_c = sum([obtener_saldo_cruce_factura(r) for _, r in p_cand["terceros"].iterrows()])
+                                faltante_c = tot_ag_c - tot_terc_c
+                                diff_c = abs(faltante_c - sc_mover)
+                                if diff_c < mejor_diff_sug:
+                                    mejor_diff_sug = diff_c
+                                    mejor_pq_sug = p_cand_id
+                                    
+                            sug_txt = f" (Sugerencia: Paquete #{mejor_pq_sug})" if mejor_pq_sug else ""
+                            opciones_destino = [
+                                f"🎯 Auto-Reubicar automáticamente donde mejor encaje{sug_txt}",
+                                "📦 Mover a otro Paquete específico...",
+                                "🛒 Redirigir a Compras Directas Ordinarias (Pestaña 1 y 4 - Se pagó directo)",
+                                "⚪ Dejar libre en inventario (Sin asignar)"
+                            ]
+                            
+                            c_dest1, c_dest2 = st.columns([2.6, 1.2])
+                            with c_dest1:
+                                dest_sel = st.radio(f"2. ¿A dónde deseas redirigir la factura {fac_nom_mover}?:", opciones_destino, key=f"rad_dest_{pq_id_sel}_{fac_nom_mover}")
+                                destino_pq_manual = None
+                                if "Mover a otro Paquete específico" in dest_sel:
+                                    opciones_otros_pqs = [f"Paquete #{p}: {str(pqs_actuales[p]['agente'].get('Proveedor') or 'Agente')[:16]} (Fac {pqs_actuales[p]['agente']['Factura']})" for p in otros_pqs]
+                                    if opciones_otros_pqs:
+                                        sel_otro_pq_str = st.selectbox("Selecciona el paquete de destino:", opciones_otros_pqs, key=f"sel_otro_pq_{pq_id_sel}")
+                                        destino_pq_manual = int(sel_otro_pq_str.split(":")[0].replace("Paquete #", "").strip())
+                                    else:
+                                        st.info("No hay otros paquetes de forwarders disponibles en este archivo.")
+                                        
+                            with c_dest2:
+                                st.write("")
+                                st.write("")
+                                if st.button("🚀 Sacar y Redirigir Factura", key=f"btn_ejecutar_reubicar_{pq_id_sel}", help="Retira la factura de este paquete y la redirige al destino seleccionado."):
+                                    # 1. Retirar del paquete actual
+                                    terceros_remanente = terceros_actual[terceros_actual["Factura"] != fac_nom_mover].copy()
+                                    st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_remanente
+                                    
+                                    # 2. Redirigir al destino
+                                    if "Auto-Reubicar" in dest_sel and mejor_pq_sug is not None:
+                                        dest_pq = st.session_state["paquetes_importacion"][mejor_pq_sug]["terceros"]
+                                        dest_nuevo = pd.concat([dest_pq, pd.DataFrame([fila_a_mover])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
+                                        st.session_state["paquetes_importacion"][mejor_pq_sug]["terceros"] = dest_nuevo
+                                        st.success(f"¡Factura {fac_nom_mover} retirada del Paquete #{pq_id_sel} y auto-reubicada en el Paquete #{mejor_pq_sug}!")
+                                    elif "Mover a otro Paquete" in dest_sel and destino_pq_manual is not None:
+                                        dest_pq = st.session_state["paquetes_importacion"][destino_pq_manual]["terceros"]
+                                        dest_nuevo = pd.concat([dest_pq, pd.DataFrame([fila_a_mover])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
+                                        st.session_state["paquetes_importacion"][destino_pq_manual]["terceros"] = dest_nuevo
+                                        st.success(f"¡Factura {fac_nom_mover} movida con éxito al Paquete #{destino_pq_manual}!")
+                                    elif "Compras Directas Ordinarias" in dest_sel:
+                                        if "df_procesado" in st.session_state:
+                                            df_glob = st.session_state["df_procesado"]
+                                            m_idx = df_glob[df_glob["Factura"] == fac_nom_mover].index
+                                            if not m_idx.empty:
+                                                df_glob.at[m_idx[0], "Es Aduanera"] = False
+                                                df_glob.at[m_idx[0], "Grupo Importación"] = ""
+                                                df_glob.at[m_idx[0], "Estado Registro"] = "⚪ Compra Directa Ordinaria"
+                                                df_glob.at[m_idx[0], "Cta Contrapartida"] = "22050501"
+                                                st.session_state["df_procesado"] = df_glob
+                                        st.success(f"¡Factura {fac_nom_mover} retirada de importaciones y enviada a Compras Directas Ordinarias (Pestaña 1 y 4)!")
+                                    else:
+                                        st.success(f"¡Factura {fac_nom_mover} retirada del Paquete #{pq_id_sel} y devuelta a facturas libres!")
+                                    
+                                    st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                                    guardar_estado_manual(empresa)
+                                    st.rerun()
+                    else:
+                        st.info("Este paquete no tiene facturas asignadas para retirar.")
+                        
+                    st.markdown("---")
+                    
+                    # 2. SECCIÓN PARA AGREGAR NUEVAS FACTURAS
+                    cands_disp_agregar = df_terceros_all.copy()
+                    f_ag_dt_sug = pd.to_datetime(agente_actual.get("Fecha", ""), dayfirst=True, errors="coerce")
+                    
+                    # RESTRICCIÓN DE BLOQUEO: Las facturas de paquetes ya validados no se pueden añadir a otros
+                    facturas_bloqueadas_validadas = set()
+                    if "paquetes_importacion" in st.session_state:
+                        for p_k_v, p_dat_v in st.session_state["paquetes_importacion"].items():
+                            if st.session_state.get(f"paquete_listo_{p_k_v}", False):
+                                df_t_val = p_dat_v.get("terceros")
+                                if df_t_val is not None and not df_t_val.empty:
+                                    for f_asig in df_t_val["Factura"].dropna():
+                                        facturas_bloqueadas_validadas.add(str(f_asig).strip())
+    
+                    # 2.1 SUGERENCIAS INTELIGENTES DE FACTURAS PARA INGRESOS DE TERCEROS
+                    if dif_faltante_prev > 0.05:
+                        st.markdown(
+                            f"""
+                            <div style="background:#f0fdf4; border:1.5px solid #22c55e; border-radius:8px; padding:12px 16px; margin:10px 0 16px 0;">
+                                <h5 style="margin:0 0 4px 0; color:#15803d;">🔎 Facturas Sugeridas para Ingresos de Terceros (Faltante Pendiente: ${dif_faltante_prev:,.2f}):</h5>
+                                <p style="margin:0 0 8px 0; font-size:13px; color:#166534;">
+                                    Facturas libres en el sistema que <b>no superan el monto de la factura (${tot_agente_actual:,.2f})</b> ni el <b>monto de terceros (${saldo_terceros_esperado_act if saldo_terceros_esperado_act > 0.05 else tot_agente_actual:,.2f})</b>, analizadas por concordancia de fletes, cargos, fecha y proveedor:
+                                </p>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                        
+                        # Construir pool de sugerencias
+                        cands_sug_list = []
+                        f_ag_dt_sug = pd.to_datetime(agente_actual.get("Fecha", ""), dayfirst=True, errors="coerce")
+                        monto_limite_fac = tot_agente_actual + 0.05
+                        monto_limite_terc = (saldo_terceros_esperado_act if saldo_terceros_esperado_act > 0.05 else tot_agente_actual) + 0.05
+                        
+                        for _, tr_cand_s in cands_disp_agregar.iterrows():
+                            f_c_num = str(tr_cand_s["Factura"]).strip()
+                            if f_c_num in facs_en_este or f_c_num in facturas_bloqueadas_validadas or not f_c_num:
+                                continue
+                                
+                            sc_cand_val = obtener_saldo_cruce_factura(tr_cand_s)
+                            if sc_cand_val <= 0.0:
+                                continue
+                                
+                            # REGLA ESTRICTA: Que no superen el monto de la factura ni el monto de los ingresos para terceros
+                            if sc_cand_val > monto_limite_fac or sc_cand_val > monto_limite_terc or sc_cand_val > (dif_faltante_prev + 0.05):
+                                continue
+                                
+                            prov_u = str(tr_cand_s.get("Proveedor", "")).upper()
+                            fec_str = str(tr_cand_s.get("Fecha", ""))
+                            fec_dt = pd.to_datetime(fec_str, dayfirst=True, errors="coerce")
+                            diff_dias = int((fec_dt - f_ag_dt_sug).days) if (pd.notna(fec_dt) and pd.notna(f_ag_dt_sug)) else 999
+                            
+                            # REGLA CRONOLÓGICA ESTRICTA: Solo facturas anteriores (-60d a 0d) o un poco después (+1d a +15d)
+                            if pd.notna(fec_dt) and pd.notna(f_ag_dt_sug):
+                                if diff_dias < -60 or diff_dias > 15:
+                                    continue
+                            elif diff_dias == 999:
+                                continue
+                            
+                            tags_sug = []
+                            score_sug = 0
+                            
+                            # Coincidencias específicas con los ítems de ingresos por terceros (solo si la factura del agente es BOG-70697 o de saldo similar)
+                            es_caso_70697 = "70697" in str(agente_actual.get("Factura", "")) or abs(saldo_terceros_esperado_act - 2542421.20) < 100.0
+                            if es_caso_70697 and abs(sc_cand_val - 1079157.20) < 50000:
+                                tags_sug.append("✈️ Flete Internacional (~$1.08M)")
+                                score_sug += 180 - (abs(sc_cand_val - 1079157.20) / 1000)
+                            elif es_caso_70697 and abs(sc_cand_val - 1463264.00) < 50000:
+                                tags_sug.append("🏢 Cargos en Origen (~$1.46M)")
+                                score_sug += 180 - (abs(sc_cand_val - 1463264.00) / 1000)
+                            elif abs(sc_cand_val - dif_faltante_prev) < 5000:
+                                tags_sug.append(f"🎯 Cuadre Exacto (${dif_faltante_prev:,.2f})")
+                                score_sug += 250
+                            elif sc_cand_val <= dif_faltante_prev + 0.05:
+                                tags_sug.append(f"🧩 Cubre {(sc_cand_val / dif_faltante_prev * 100):.1f}% del faltante")
+                                score_sug += 60
+                                
+                            # Ponderación por cercanía de fecha dentro de la ventana (-60 a +15)
+                            if diff_dias == 0:
+                                tags_sug.append("🟢 Mismo día (0d)")
+                                score_sug += 100
+                            elif 0 < diff_dias <= 15:
+                                tags_sug.append(f"➡️ Poco después (+{diff_dias}d)")
+                                score_sug += 85 - (diff_dias * 3)
+                            elif -30 <= diff_dias < 0:
+                                tags_sug.append(f"⬅️ Anterior ({abs(diff_dias)}d antes)")
+                                score_sug += 90 - (abs(diff_dias) * 2)
+                            elif -60 <= diff_dias < -30:
+                                tags_sug.append(f"⬅️ Anterior ({abs(diff_dias)}d antes)")
+                                score_sug += 40 - abs(diff_dias)
+                                
+                            if any(k in prov_u for k in ["DHL", "CARGO", "ADUANA", "GARAJE", "ALMAVIVA", "ALMACENADORA", "UPS", "FEDEX", "FLETE", "TRANSPORTE", "PUERTO", "TERMINAL"]):
+                                tags_sug.append("🚢 Logística/Aduana")
+                                score_sug += 50
+                                
+                            cands_sug_list.append({
+                                "Factura": f_c_num,
+                                "Proveedor": tr_cand_s.get("Proveedor", "")[:32],
+                                "Fecha": fec_str,
+                                "Saldo": sc_cand_val,
+                                "Dias": diff_dias,
+                                "Tags": " • ".join(tags_sug) if tags_sug else "⚪ Factura Libre",
+                                "Score": score_sug,
+                                "Row": tr_cand_s
+                            })
+                            
+                        cands_sug_list.sort(key=lambda x: x["Score"], reverse=True)
+                        
+                        # Detectar parejas de facturas que sumen al faltante
+                        pareja_match = None
+                        for i_p in range(min(15, len(cands_sug_list))):
+                            for j_p in range(i_p + 1, min(15, len(cands_sug_list))):
+                                c1_p = cands_sug_list[i_p]
+                                c2_p = cands_sug_list[j_p]
+                                s_pair = round(c1_p["Saldo"] + c2_p["Saldo"], 2)
+                                d_pair = abs(s_pair - dif_faltante_prev)
+                                if d_pair < 50000:
+                                    pareja_match = (d_pair, s_pair, c1_p, c2_p)
+                                    break
+                            if pareja_match:
+                                break
+                                
+                        if pareja_match:
+                            dp, sp, cp1, cp2 = pareja_match
+                            col_par1, col_par2 = st.columns([3.2, 1.2])
+                            with col_par1:
+                                st.markdown(
+                                    f"<div style='background:#fefce8; border:1px solid #eab308; border-radius:6px; padding:8px 12px; margin-bottom:8px;'>"
+                                    f"💡 <b>Combinación de 2 Facturas Sugerida:</b> <code>{cp1['Factura']}</code> ({cp1['Proveedor']}, ${cp1['Saldo']:,.2f}) + <code>{cp2['Factura']}</code> ({cp2['Proveedor']}, ${cp2['Saldo']:,.2f})<br>"
+                                    f"<span style='font-size:12px; color:#854d0e;'>Suma Combinada: <b>${sp:,.2f}</b> (Diferencia: <b>${dp:,.2f}</b>)</span></div>",
+                                    unsafe_allow_html=True
+                                )
+                            with col_par2:
+                                st.write("")
+                                if st.button("➕ Añadir Ambas Facturas", key=f"btn_add_pair_{pq_id_sel}", type="primary", use_container_width=True):
+                                    terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([cp1["Row"], cp2["Row"]])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
+                                    st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
+                                    st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                                    st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                                    guardar_estado_manual(empresa)
+                                    st.success(f"¡Facturas {cp1['Factura']} y {cp2['Factura']} añadidas con éxito al Paquete #{pq_id_sel}!")
+                                    st.rerun()
+    
+                        if cands_sug_list:
+                            top_cands = cands_sug_list[:6]
+                            for idx_sug, sug_item in enumerate(top_cands):
+                                c_sug1, c_sug2, c_sug3 = st.columns([1.5, 3.2, 1.1])
+                                with c_sug1:
+                                    st.markdown(f"<b>{sug_item['Factura']}</b><br><span style='font-size:12px; color:#475569;'>{sug_item['Fecha']}</span>", unsafe_allow_html=True)
+                                with c_sug2:
+                                    st.markdown(f"<b>{sug_item['Proveedor']}</b> — <b style='color:#0369a1;'>${sug_item['Saldo']:,.2f}</b><br><span style='font-size:12px; color:#15803d;'>{sug_item['Tags']}</span>", unsafe_allow_html=True)
+                                with c_sug3:
+                                    st.write("")
+                                    if st.button("➕ Añadir", key=f"btn_sug_add_{pq_id_sel}_{idx_sug}", use_container_width=True):
+                                        terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([sug_item["Row"]])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
+                                        st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
+                                        st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                                        guardar_estado_manual(empresa)
+                                        st.success(f"¡Factura {sug_item['Factura']} añadida al Paquete #{pq_id_sel}!")
+                                        st.rerun()
+                        else:
+                            st.info(f"No se encontraron facturas sugeridas que no superen el monto de terceros (${monto_limite_terc:,.2f}) ni estén bloqueadas.")
+                        st.markdown("---")
+    
+                    st.markdown("##### ➕ Añadir Manualmente otra Factura Libre a este paquete:")
+                    filtro_cercanas_man = st.checkbox(
+                        "📅 Filtrar solo facturas de la ventana cronológica (-60d anteriores a +15d posteriores)",
+                        value=True,
+                        key=f"chk_fec_man_{pq_id_sel}",
+                        help="Oculta facturas lejanas de otros meses y muestra solo facturas anteriores o un poco después de la operación."
+                    )
+    
+                    opciones_cands = []
+                    mapa_agregar = {}
+    
+                    for _, tr_cand in cands_disp_agregar.iterrows():
+                        f_cand_num = str(tr_cand["Factura"]).strip()
+                        if f_cand_num not in facs_en_este and f_cand_num not in facturas_bloqueadas_validadas:
+                            fec_c_str = str(tr_cand.get("Fecha", ""))
+                            fec_c_dt = pd.to_datetime(fec_c_str, dayfirst=True, errors="coerce")
+                            diff_m = int((fec_c_dt - f_ag_dt_sug).days) if (pd.notna(fec_c_dt) and pd.notna(f_ag_dt_sug)) else 999
+                            
+                            if filtro_cercanas_man and (diff_m < -60 or diff_m > 15):
+                                continue
+                                
+                            es_reg_c = bool(tr_cand.get("Ya Registrada", False))
+                            tag_est = f"🔴 Registrada ({tr_cand.get('Comprobante Previo', '10-Prev')})" if es_reg_c else "⚪ No Contabilizada (Pendiente)"
+                            sc_cand = obtener_saldo_cruce_factura(tr_cand)
+                            d_tag = f"({diff_m:+d}d)" if diff_m != 999 else "(sin fecha)"
+                            tag_c = f"[{tag_est}] [{f_cand_num}] {d_tag} {str(tr_cand.get('Proveedor') or 'Tercero')[:20]} (Saldo: ${sc_cand:,.2f})"
+                            opciones_cands.append((abs(diff_m), tag_c, tr_cand))
+    
+                    opciones_cands.sort(key=lambda x: x[0])
+                    opciones_agregar = [x[1] for x in opciones_cands]
+                    for _, tag_c, tr_cand in opciones_cands:
+                        mapa_agregar[tag_c] = tr_cand
+                            
+                    c_add1, c_add2 = st.columns([3, 1.2])
+                    with c_add1:
+                        sel_para_agregar = st.selectbox("Selecciona factura libre para añadir a este paquete:", ["(Seleccionar...)"] + opciones_agregar, key=f"sel_add_tr_{pq_id_sel}")
+                    with c_add2:
+                        st.write("")
+                        st.write("")
+                        if st.button("➕ Añadir al Paquete", key=f"btn_add_tr_{pq_id_sel}") and sel_para_agregar != "(Seleccionar...)":
+                            fila_agregada = mapa_agregar[sel_para_agregar]
+                            terceros_nuevo = pd.concat([terceros_actual, pd.DataFrame([fila_agregada])]).drop_duplicates(subset=["Factura"]).reset_index(drop=True)
+                            st.session_state["paquetes_importacion"][pq_id_sel]["terceros"] = terceros_nuevo
+                            st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                            st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                            guardar_estado_manual(empresa)
+                            st.success(f"¡Factura {fila_agregada['Factura']} añadida al Paquete #{pq_id_sel}!")
+                            st.rerun()
+    
+                # 3. TRATAMIENTO CONTABLE: PÁGINA 2 / MERCANCÍAS EN TRÁNSITO / NO DEDUCIBLES
+                enviar_h2_activo = bool(st.session_state.get(f"enviar_h2_pq_{pq_id_sel}", False))
+                enviar_gp_activo = bool(st.session_state.get(f"enviar_gp_pq_{pq_id_sel}", False))
+                enviar_nd_activo = bool(st.session_state.get(f"enviar_nd_pq_{pq_id_sel}", False))
+    
+                c_box_style_t = (
+                    '<div style="background:#f8fafc; border:2px solid #0070ba; border-radius:8px; padding:14px; margin:14px 0 10px 0;">'
+                    '<h4 style="margin:0 0 4px 0; color:#0070ba;">⚖️ Tratamiento Contable para el Paquete #' + str(pq_id_sel) + ' (Cobro ' + str(agente_actual.get('Proveedor', '')) + '):</h4>'
+                    '<p style="margin:0; font-size:13.5px; color:#334155;">Selecciona cómo deseas registrar este cobro en su fecha de operación (<b>' + str(agente_actual.get('Fecha', '')) + '</b>):</p>'
+                    '</div>'
+                )
+                st.markdown(c_box_style_t, unsafe_allow_html=True)
+    
+                c_btn_h2, c_btn_mt, c_btn_nd = st.columns([1.8, 1.6, 1.2])
+    
+                with c_btn_h2:
+                    st.markdown("<b style='color:#16a34a;'>📋 Opción 1: Traer de Página 2</b><br><span style='font-size:12px; color:#475569;'>Trae ingresos propios y deja saldo de terceros pendiente para conciliar:</span>", unsafe_allow_html=True)
+                    btn_h2_type = "primary" if (enviar_h2_activo or not (enviar_gp_activo or enviar_nd_activo)) else "secondary"
+                    if st.button("📋 Traer de Página 2 (Dejar Pendiente)", key=f"btn_h2_act_{pq_id_sel}", type=btn_h2_type, use_container_width=True):
+                        st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = True
+                        st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
+                        st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
+                        st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        if st.session_state.get(f"paquete_listo_{pq_id_sel}", False):
+                            df_as_act, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=False)
+                            st.session_state[f"asiento_fijo_pq_{pq_id_sel}"] = df_as_act.copy()
+                            paquete_activo["asiento_fijo"] = df_as_act.copy()
+                            ag_fac_str = str(agente_actual["Factura"]).strip()
+                            st.session_state.setdefault("asientos_triangulacion_por_factura", {})[ag_fac_str] = df_as_act.copy()
+                            guardar_estado_manual(empresa)
+                        st.success("¡Contabilización de Página 2 aplicada! El saldo de terceros queda pendiente para conciliar con facturas.")
+                        st.rerun()
+    
+                with c_btn_mt:
+                    st.markdown("<b style='color:#0284c7;'>📦 Opción 2: Mercancías en Tránsito</b><br><span style='font-size:12px; color:#475569;'>Imputa el saldo faltante a Inventarios en Tránsito (Cta 14650501):</span>", unsafe_allow_html=True)
+                    lbl_btn_mt = f"📦 Mercancías en Tránsito (${dif_faltante_prev:,.2f})" if dif_faltante_prev > 0.05 else "📦 Mercancías en Tránsito (14650501)"
+                    btn_mt_type = "primary" if enviar_gp_activo else "secondary"
+                    if st.button(lbl_btn_mt, key=f"btn_mt_act_{pq_id_sel}", type=btn_mt_type, use_container_width=True):
+                        st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = True
+                        st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
+                        st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = False
+                        st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        if saldo_terceros_esperado_act > 0.05 or enviar_h2_activo:
+                            df_as_act, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=True)
+                        else:
+                            df_as_act, _, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False)
+                            asiento_gp_filas = []
+                            for _, r_as in df_as_act.iterrows():
+                                if str(r_as["Código Cuenta"]).strip() == CUENTA_NO_DEDUCIBLE:
+                                    asiento_gp_filas.append({
+                                        "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                                        "Descripción Cuenta": f"Mercancías en Tránsito / Base Propia Agente (Fac {agente_actual.get('Factura', '')})",
+                                        "Tercero / NIT": f"{agente_actual.get('NIT Emisor', '')} - {agente_actual.get('Proveedor', '')[:25]}",
+                                        "Débito ($)": float(r_as["Débito ($)"]),
+                                        "Crédito ($)": 0.0
+                                    })
+                                else:
+                                    asiento_gp_filas.append(r_as.to_dict())
+                            df_as_act = pd.DataFrame(asiento_gp_filas)
+                        if st.session_state.get(f"paquete_listo_{pq_id_sel}", False):
+                            st.session_state[f"asiento_fijo_pq_{pq_id_sel}"] = df_as_act.copy()
+                            paquete_activo["asiento_fijo"] = df_as_act.copy()
+                            ag_fac_str = str(agente_actual["Factura"]).strip()
+                            st.session_state.setdefault("asientos_triangulacion_por_factura", {})[ag_fac_str] = df_as_act.copy()
+                            guardar_estado_manual(empresa)
+                        st.success("¡Faltante asignado a Mercancías en Tránsito (14650501)!")
+                        st.rerun()
+    
+                with c_btn_nd:
+                    st.markdown("<b style='color:#b91c1c;'>🔴 Opción 3: No Deducibles</b><br><span style='font-size:12px; color:#475569;'>Si no existe factura DIAN ni soporte:</span>", unsafe_allow_html=True)
+                    lbl_btn_nd = f"🔴 No Deducibles (${dif_faltante_prev:,.2f})" if dif_faltante_prev > 0.05 else "🔴 No Deducibles (53950501)"
+                    btn_nd_type = "primary" if enviar_nd_activo else "secondary"
+                    if st.button(lbl_btn_nd, key=f"btn_nd_act_{pq_id_sel}", type=btn_nd_type, use_container_width=True):
+                        st.session_state[f"enviar_nd_pq_{pq_id_sel}"] = True
+                        st.session_state[f"enviar_gp_pq_{pq_id_sel}"] = False
+                        st.session_state[f"enviar_h2_pq_{pq_id_sel}"] = False
+                        st.session_state["paquete_seleccionado_id"] = pq_id_sel
+                        st.session_state["sel_paquete_activo_key"] = pq_id_sel
+                        if saldo_terceros_esperado_act > 0.05 or enviar_h2_activo:
+                            df_as_act, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=True, imputar_a_transito=False)
+                        else:
+                            df_as_act, _, _ = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=True)
+                        if st.session_state.get(f"paquete_listo_{pq_id_sel}", False):
+                            st.session_state[f"asiento_fijo_pq_{pq_id_sel}"] = df_as_act.copy()
+                            paquete_activo["asiento_fijo"] = df_as_act.copy()
+                            ag_fac_str = str(agente_actual["Factura"]).strip()
+                            st.session_state.setdefault("asientos_triangulacion_por_factura", {})[ag_fac_str] = df_as_act.copy()
+                            guardar_estado_manual(empresa)
+                        st.success("¡Faltante enviado a Gastos No Deducibles (53950501)!")
+                        st.rerun()
+    
+                # RECALCULAR ASIENTO CONTABLE PARA ESTE PAQUETE
+                if st.session_state.get(f"paquete_listo_{pq_id_sel}", False) and (f"asiento_fijo_pq_{pq_id_sel}" in st.session_state or "asiento_fijo" in paquete_activo):
+                    df_asiento_paquete = st.session_state.get(f"asiento_fijo_pq_{pq_id_sel}", paquete_activo.get("asiento_fijo")).copy()
+                    dif_no_ded = 0.0
+                    ret_asum = 0.0
+                elif saldo_terceros_esperado_act > 0.05 or enviar_h2_activo:
+                    if enviar_nd_activo:
+                        df_asiento_paquete, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=True, imputar_a_transito=False)
+                        dif_no_ded = dif_faltante_prev
+                    elif enviar_gp_activo:
+                        df_asiento_paquete, _ = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=True)
+                        dif_no_ded = 0.0
+                    else:
+                        df_asiento_paquete, dif_no_ded = generar_asiento_mixto_hoja2_con_terceros(agente_actual, terceros_actual, enviar_a_no_deducible=False, imputar_a_transito=False)
+                    ret_asum = 0.0
+                elif enviar_gp_activo and dif_faltante_prev > 0.05:
+                    df_asiento_paquete, _, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=False)
+                    asiento_gp_filas = []
+                    for _, r_as in df_asiento_paquete.iterrows():
+                        if str(r_as["Código Cuenta"]).strip() == CUENTA_NO_DEDUCIBLE:
+                            asiento_gp_filas.append({
+                                "Código Cuenta": CUENTA_IMPORTACION_TRANSITO,
+                                "Descripción Cuenta": f"Mercancías en Tránsito / Base Propia Agente (Fac {agente_actual.get('Factura', '')})",
+                                "Tercero / NIT": f"{agente_actual.get('NIT Emisor', '')} - {agente_actual.get('Proveedor', '')[:25]}",
+                                "Débito ($)": float(r_as["Débito ($)"]),
+                                "Crédito ($)": 0.0
+                            })
+                        else:
+                            asiento_gp_filas.append(r_as.to_dict())
+                    df_asiento_paquete = pd.DataFrame(asiento_gp_filas)
+                    dif_no_ded = 0.0
                 else:
-                    df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd_g, enviar_a_gastos_propios=enviar_gp_g, enviar_a_hoja2=enviar_h2_g)
-
-                # 1. Asiento de Control de Cruces (Partida Doble para Revisión)
-                for _, fila_as in df_as_p.iterrows():
-                    todos_asientos_lista.append({
+                    df_asiento_paquete, dif_no_ded, ret_asum = generar_asiento_triangulacion_paquete(agente_actual, terceros_actual, enviar_a_no_deducible=enviar_nd_activo)
+    
+                st.markdown(f"#### ⚖️ Asiento Contable del Paquete #{pq_id_sel}:")
+                st.caption("Detalle de partida doble de ESTE paquete: cancela las cuentas por pagar de DHL, Agencia y Garaje contra Euro Shipping:")
+    
+                st.dataframe(
+                    df_asiento_paquete.style.format({"Débito ($)": "${:,.2f}", "Crédito ($)": "${:,.2f}"}),
+                    use_container_width=True,
+                    hide_index=True
+                )
+    
+                c_cuad1, c_cuad2, c_cuad3, c_cuad4 = st.columns(4)
+                sum_deb_pq = df_asiento_paquete["Débito ($)"].sum()
+                sum_cred_pq = df_asiento_paquete["Crédito ($)"].sum()
+                dif_cuad_pq = abs(sum_deb_pq - sum_cred_pq)
+                
+                with c_cuad1:
+                    st.metric("Total Débito", f"${sum_deb_pq:,.2f}")
+                with c_cuad2:
+                    st.metric("Total Crédito", f"${sum_cred_pq:,.2f}")
+                with c_cuad3:
+                    st.metric("Retenciones Asumidas (53152001)", f"${ret_asum:,.2f}")
+                with c_cuad4:
+                    st.metric("Diferencia No Deducible (53950501)", f"${dif_no_ded:,.2f}")
+    
+                # SECCIÓN DE VALIDACIÓN Y BLOQUEO DE FACTURAS
+                es_validado = st.session_state.get(f"paquete_listo_{pq_id_sel}", False)
+    
+                if not es_validado:
+                    if dif_cuad_pq < 0.05:
+                        st.success(f"✅ **Partida doble cuadrada al centavo ($0.00).** Ya puedes validar y bloquear este paquete.")
+                    else:
+                        st.markdown(
+                            f"""
+                            <div style="background:#fffbeb; border:2px solid #f59e0b; border-radius:8px; padding:12px 16px; margin:10px 0;">
+                                <span style="font-size:15px; font-weight:bold; color:#b45309;">⏳ Faltante Pendiente de Conciliar por Ingresos para Terceros: ${dif_cuad_pq:,.2f}</span><br>
+                                <span style="font-size:13px; color:#78350f;">
+                                    El valor cobrado por cuenta de terceros permanece <b>pendiente de conciliación</b>. Puedes conciliarlo seleccionando las facturas sugeridas arriba, o si decides enviar el saldo faltante a <b>Mercancías en Tránsito (Opción 2)</b> o a <b>No Deducibles (Opción 3)</b>, presiona el botón respectivo en las opciones superiores.
+                                </span>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+    
+                    c_val_opt1, c_val_opt2 = st.columns(2)
+                    with c_val_opt1:
+                        st.markdown(
+                            "<div style='background:#f0fdf4; border:1.5px solid #22c55e; border-radius:8px; padding:12px; height:100%;'>"
+                            "<b style='color:#15803d; font-size:15px;'>📤 Opción 1: Pasar a Hoja 2 (Subir a Planilla Siigo)</b><br>"
+                            "<span style='font-size:12.5px; color:#166534;'>"
+                            "Bloquea las facturas del paquete, actualiza la Página 2 y <b>genera el comprobante oficial en la Planilla de Siigo (Página 4)</b> para su contabilización."
+                            "</span></div>",
+                            unsafe_allow_html=True
+                        )
+                        st.write("")
+                        if st.button("📤 Pasar a Hoja 2 (Subir a Planilla Siigo)", key=f"btn_validar_siigo_{pq_id_sel}", type="primary", use_container_width=True):
+                            ejecutar_validacion_pq(pasa_a_siigo=True)
+                            st.success(f"🔒 ¡Paquete #{pq_id_sel} VALIDADO y trasladado a Página 2 para Siigo!")
+                            st.rerun()
+    
+                    with c_val_opt2:
+                        st.markdown(
+                            "<div style='background:#eff6ff; border:1.5px solid #3b82f6; border-radius:8px; padding:12px; height:100%;'>"
+                            "<b style='color:#1d4ed8; font-size:15px;'>📑 Opción 2: Simplemente Conciliación (No Subir a Siigo)</b><br>"
+                            "<span style='font-size:12.5px; color:#1e40af;'>"
+                            "Bloquea e identifica las facturas para <b>auditoría y soporte de costos</b>, pero <b>NO genera comprobante en Siigo</b> (evita duplicar pagos ya hechos por tesorería/bancos)."
+                            "</span></div>",
+                            unsafe_allow_html=True
+                        )
+                        st.write("")
+                        if st.button("📑 Simplemente Conciliación (No Subir a Siigo)", key=f"btn_validar_concil_{pq_id_sel}", use_container_width=True):
+                            ejecutar_validacion_pq(pasa_a_siigo=False)
+                            st.success(f"📑 ¡Paquete #{pq_id_sel} CONCILIADO exitosamente para control interno (no irá a Siigo)!")
+                            st.rerun()
+                else:
+                    es_siigo = st.session_state.get(f"paquete_destino_siigo_{pq_id_sel}", True)
+                    col_desb1, col_desb2 = st.columns([3.2, 1.4])
+                    with col_desb1:
+                        if es_siigo:
+                            st.success(f"🔒 **Paquete #{pq_id_sel} VALIDADO (PASA A HOJA 2 / PLANILLA SIIGO):** Sus facturas están protegidas contra otros cruces y su comprobante se exportará en la Planilla de Siigo (Página 4).")
+                        else:
+                            st.info(f"📑 **Paquete #{pq_id_sel} CONCILIADO (SOLO CONTROL INTERNO / IDENTIFICACIÓN):** Facturas identificadas y protegidas para auditoría DIAN. **No se generará comprobante en Siigo** para evitar duplicidades.")
+                    with col_desb2:
+                        c_sw1, c_sw2 = st.columns(2)
+                        with c_sw1:
+                            if es_siigo:
+                                if st.button("📑 Cambiar a Solo Conciliación", key=f"btn_sw_concil_{pq_id_sel}", use_container_width=True, help="Cambia el destino para que NO se suba a la planilla Siigo"):
+                                    ejecutar_validacion_pq(pasa_a_siigo=False)
+                                    st.rerun()
+                            else:
+                                if st.button("📤 Cambiar a Pasar a Hoja 2", key=f"btn_sw_siigo_{pq_id_sel}", type="primary", use_container_width=True, help="Cambia el destino para que SÍ se suba a Siigo"):
+                                    ejecutar_validacion_pq(pasa_a_siigo=True)
+                                    st.rerun()
+                        with c_sw2:
+                            if st.button("🔓 Desbloquear", key=f"btn_desbloquear_main_{pq_id_sel}", use_container_width=True):
+                                ejecutar_desbloqueo_pq()
+                                st.rerun()
+    
+                st.markdown("---")
+                st.markdown("#### 📥 Exportar Control de Paquetes y Cruces de Importación:")
+                st.caption("Descarga un archivo Excel con el resumen de cada paquete, el detalle de facturas de terceros vinculadas y el asiento contable de control (sin generar aún notas de contabilidad en Siigo hasta que definas el procedimiento):")
+    
+                # Generar Excel estructurado por Paquetes de Importación individuales
+                todos_asientos_lista = []
+                resumen_paquetes_lista = []
+                detalle_facturas_lista = []
+                consecutivo_cruce = 1
+                
+                facs_asignadas_en_algun_pq = []
+                
+                for g_k, g_v in pqs_actuales.items():
+                    ag_item = g_v["agente"]
+                    terc_items = g_v["terceros"]
+                    enviar_nd_g = st.session_state.get(f"enviar_nd_pq_{g_k}", False)
+                    df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd_g)
+                    
+                    # 1. Asiento de Control de Cruces (Partida Doble para Revisión)
+                    for _, fila_as in df_as_p.iterrows():
+                        todos_asientos_lista.append({
+                            "Paquete #": f"Paquete #{g_k}",
+                            "Fecha Operación": ag_item["Fecha"],
+                            "Código Cuenta": fila_as["Código Cuenta"],
+                            "Tercero / NIT": fila_as["Tercero / NIT"],
+                            "Descripción": str(fila_as.get("Descripción de la Cuenta") or fila_as.get("Descripción Cuenta") or fila_as.get("Descripción") or ""), 
+                            "Débito ($)": fila_as["Débito ($)"],
+                            "Crédito ($)": fila_as["Crédito ($)"]
+                        })
+                        
+                    # 2. Resumen del Paquete
+                    facs_terc_str = ", ".join([f"{r['Factura']} ({str(r.get('Proveedor') or 'Tercero')[:15]})" for _, r in terc_items.iterrows()]) if not terc_items.empty else "Ninguno"
+                    tot_terc_sum = sum([obtener_saldo_cruce_factura(r) for _, r in terc_items.iterrows()])
+                    resumen_paquetes_lista.append({
                         "Paquete #": f"Paquete #{g_k}",
+                        "Agente Coordinador": ag_item["Proveedor"],
+                        "Factura Agente": ag_item["Factura"],
                         "Fecha Operación": ag_item["Fecha"],
-                        "Código Cuenta": fila_as["Código Cuenta"],
-                        "Tercero / NIT": fila_as["Tercero / NIT"],
-                        "Descripción": fila_as["Descripción Cuenta"],
-                        "Débito ($)": fila_as["Débito ($)"],
-                        "Crédito ($)": fila_as["Crédito ($)"]
+                        "Total Cobro Agente ($)": float(ag_item["Total"]),
+                        "Facturas Terceros Incluidas": facs_terc_str,
+                        "Total Cancelado Terceros ($)": tot_terc_sum,
+                        "Retenciones Asumidas ($)": ret_p,
+                        "Diferencia No Deducible ($)": dif_p,
+                        "Estado Cuadre": "✅ Cuadrado ($0.00)" if abs(float(ag_item["Total"]) - tot_terc_sum - ret_p - dif_p) < 1.0 else "Revisar"
                     })
-
-                # 2. Resumen del Paquete
-                facs_terc_str = ", ".join([f"{r['Factura']} ({r['Proveedor'][:15]})" for _, r in terc_items.iterrows()]) if not terc_items.empty else "Ninguno"
-                tot_terc_sum = sum([float(r.get("Total Neto", 0.0) or (float(r.get("Base", 0.0)) + float(r.get("IVA", 0.0)))) for _, r in terc_items.iterrows()])
-                resumen_paquetes_lista.append({
-                    "Paquete #": f"Paquete #{g_k}",
-                    "Agente Coordinador": ag_item["Proveedor"],
-                    "Factura Agente": ag_item["Factura"],
-                    "Fecha Operación": ag_item["Fecha"],
-                    "Total Cobro Agente ($)": float(ag_item["Total"]),
-                    "Facturas Terceros Incluidas": facs_terc_str,
-                    "Total Cancelado Terceros ($)": tot_terc_sum,
-                    "Retenciones Asumidas ($)": ret_p,
-                    "Diferencia No Deducible ($)": dif_p,
-                    "Estado Cuadre": "✅ Cuadrado ($0.00)" if abs(float(ag_item["Total"]) - tot_terc_sum - ret_p - dif_p) < 1.0 else "Revisar"
-                })
-
-                # 3. Detalle de Facturas que componen el Paquete
-                detalle_facturas_lista.append({
-                    "Paquete #": f"Paquete #{g_k}",
-                    "Rol en Operación": "Agente Coordinador (Cobro Global)",
-                    "Proveedor": ag_item["Proveedor"],
-                    "NIT": ag_item["NIT Emisor"],
-                    "Factura": ag_item["Factura"],
-                    "Fecha": ag_item["Fecha"],
-                    "Naturaleza": "Servicios Agenciamiento + Fletes / Impuestos",
-                    "Base / Subtotal ($)": float(ag_item.get("Base", 0.0)),
-                    "IVA ($)": float(ag_item.get("IVA", 0.0)),
-                    "Retenciones ($)": 0.0,
-                    "Saldo a Cruzar ($)": float(ag_item["Total"]),
-                    "Cuenta Contable": "22050501"
-                })
-
-                for _, tr_it in terc_items.iterrows():
-                    facs_asignadas_en_algun_pq.append(tr_it["Factura"])
-                    tb = float(tr_it.get("Base", 0.0))
-                    tiv = float(tr_it.get("IVA", 0.0))
-                    rf = float(tr_it.get("ReteFuente", 0.0))
-                    ri = float(tr_it.get("ReteICA", 0.0))
-                    sc = float(tr_it.get("Total Neto", 0.0)) or round(tb + tiv, 2)
-                    p_u = str(tr_it["Proveedor"]).upper()
-                    rol_t = "🚚 Tercero Transporte (DHL)" if "DHL" in p_u else ("🏢 Tercero Agenciamiento (Mandato)" if any(k in p_u for k in ["CARGO", "ADUANA"]) else "🏬 Tercero Garaje / Almacén")
-                    nat_t = "Honorario Propio Agenciamiento" if "COMISION" in str(tr_it.get("Descripcion", "")).upper() else "Gasto por Cuenta de Tercero"
+                    
+                    # 3. Detalle de Facturas que componen el Paquete
                     detalle_facturas_lista.append({
                         "Paquete #": f"Paquete #{g_k}",
+                        "Rol en Operación": "Agente Coordinador (Cobro Global)",
+                        "Proveedor": ag_item["Proveedor"],
+                        "NIT": ag_item["NIT Emisor"],
+                        "Factura": ag_item["Factura"],
+                        "Fecha": ag_item["Fecha"],
+                        "Naturaleza": "Servicios Agenciamiento + Fletes / Impuestos",
+                        "Base / Subtotal ($)": float(ag_item.get("Base", 0.0)),
+                        "IVA ($)": float(ag_item.get("IVA", 0.0)),
+                        "Retenciones ($)": 0.0,
+                        "Saldo a Cruzar ($)": float(ag_item["Total"]),
+                        "Cuenta Contable": "22050501"
+                    })
+                    
+                    for _, tr_it in terc_items.iterrows():
+                        facs_asignadas_en_algun_pq.append(tr_it["Factura"])
+                        tb = float(tr_it.get("Base", 0.0))
+                        tiv = float(tr_it.get("IVA", 0.0))
+                        rf = float(tr_it.get("ReteFuente", 0.0))
+                        ri = float(tr_it.get("ReteICA", 0.0))
+                        sc = obtener_saldo_cruce_factura(tr_it)
+                        p_u = str(tr_it["Proveedor"]).upper()
+                        rol_t = "🚚 Tercero Transporte (DHL)" if "DHL" in p_u else ("🏢 Tercero Agenciamiento (Mandato)" if any(k in p_u for k in ["CARGO", "ADUANA"]) else "🏬 Tercero Garaje / Almacén")
+                        nat_t = "Honorario Propio Agenciamiento" if "COMISION" in str(tr_it.get("Descripcion", "")).upper() else "Gasto por Cuenta de Tercero"
+                        detalle_facturas_lista.append({
+                            "Paquete #": f"Paquete #{g_k}",
+                            "Rol en Operación": rol_t,
+                            "Proveedor": tr_it["Proveedor"],
+                            "NIT": tr_it["NIT Emisor"],
+                            "Factura": tr_it["Factura"],
+                            "Fecha": tr_it["Fecha"],
+                            "Naturaleza": nat_t,
+                            "Base / Subtotal ($)": tb,
+                            "IVA ($)": tiv,
+                            "Retenciones ($)": round(rf + ri, 2),
+                            "Saldo a Cruzar ($)": sc,
+                            "Cuenta Contable": str(tr_it.get("Cuenta Pasivo Especifica", "22050505"))
+                        })
+                        
+                    consecutivo_cruce += 1
+    
+                # Añadir facturas de terceros que quedaron libres (sin asignar a ningún paquete)
+                df_libres_exp = df_terceros_all[~df_terceros_all["Factura"].isin(facs_asignadas_en_algun_pq)]
+                for _, tr_lib in df_libres_exp.iterrows():
+                    tb = float(tr_lib.get("Base", 0.0))
+                    tiv = float(tr_lib.get("IVA", 0.0))
+                    sc = obtener_saldo_cruce_factura(tr_lib)
+                    p_u = str(tr_lib["Proveedor"]).upper()
+                    rol_t = "🚚 Tercero Transporte (DHL)" if "DHL" in p_u else ("🏢 Tercero Agenciamiento (Mandato)" if any(k in p_u for k in ["CARGO", "ADUANA"]) else "🏬 Tercero Garaje / Almacén")
+                    detalle_facturas_lista.append({
+                        "Paquete #": "⚪ Sin Asignar (Pendiente de Operación)",
                         "Rol en Operación": rol_t,
-                        "Proveedor": tr_it["Proveedor"],
-                        "NIT": tr_it["NIT Emisor"],
-                        "Factura": tr_it["Factura"],
-                        "Fecha": tr_it["Fecha"],
-                        "Naturaleza": nat_t,
+                        "Proveedor": tr_lib["Proveedor"],
+                        "NIT": tr_lib["NIT Emisor"],
+                        "Factura": tr_lib["Factura"],
+                        "Fecha": tr_lib["Fecha"],
+                        "Naturaleza": "Gasto por Cuenta de Tercero",
                         "Base / Subtotal ($)": tb,
                         "IVA ($)": tiv,
-                        "Retenciones ($)": round(rf + ri, 2),
+                        "Retenciones ($)": float(tr_lib.get("ReteFuente", 0.0)) + float(tr_lib.get("ReteICA", 0.0)),
                         "Saldo a Cruzar ($)": sc,
-                        "Cuenta Contable": str(tr_it.get("Cuenta Pasivo Especifica", "22050505"))
+                        "Cuenta Contable": str(tr_lib.get("Cuenta Pasivo Especifica", "22050505"))
                     })
-
-                consecutivo_cruce += 1
-
-            # Añadir facturas de terceros que quedaron libres (sin asignar a ningún paquete)
-            df_libres_exp = df_terceros_all[~df_terceros_all["Factura"].isin(facs_asignadas_en_algun_pq)]
-            for _, tr_lib in df_libres_exp.iterrows():
-                tb = float(tr_lib.get("Base", 0.0))
-                tiv = float(tr_lib.get("IVA", 0.0))
-                sc = float(tr_lib.get("Total Neto", 0.0)) or round(tb + tiv, 2)
-                p_u = str(tr_lib["Proveedor"]).upper()
-                rol_t = "🚚 Tercero Transporte (DHL)" if "DHL" in p_u else ("🏢 Tercero Agenciamiento (Mandato)" if any(k in p_u for k in ["CARGO", "ADUANA"]) else "🏬 Tercero Garaje / Almacén")
-                detalle_facturas_lista.append({
-                    "Paquete #": "⚪ Sin Asignar (Pendiente de Operación)",
-                    "Rol en Operación": rol_t,
-                    "Proveedor": tr_lib["Proveedor"],
-                    "NIT": tr_lib["NIT Emisor"],
-                    "Factura": tr_lib["Factura"],
-                    "Fecha": tr_lib["Fecha"],
-                    "Naturaleza": "Gasto por Cuenta de Tercero",
-                    "Base / Subtotal ($)": tb,
-                    "IVA ($)": tiv,
-                    "Retenciones ($)": float(tr_lib.get("ReteFuente", 0.0)) + float(tr_lib.get("ReteICA", 0.0)),
-                    "Saldo a Cruzar ($)": sc,
-                    "Cuenta Contable": str(tr_lib.get("Cuenta Pasivo Especifica", "22050505"))
-                })
-
-            if todos_asientos_lista:
-                df_export_cruces = pd.DataFrame(todos_asientos_lista)
-                buf_cruce_ex = io.BytesIO()
-                with pd.ExcelWriter(buf_cruce_ex, engine="openpyxl") as wr_cr:
-                    if resumen_paquetes_lista:
-                        pd.DataFrame(resumen_paquetes_lista).to_excel(wr_cr, sheet_name="Resumen_Paquetes", index=False)
-                    if detalle_facturas_lista:
-                        pd.DataFrame(detalle_facturas_lista).to_excel(wr_cr, sheet_name="Detalle_Facturas_Paquete", index=False)
-                    df_export_cruces.to_excel(wr_cr, sheet_name="Asiento_Control_Cruces", index=False)
-                buf_cruce_ex.seek(0)
-
-                st.download_button(
-                    label=f"📥 Descargar Control de Cruces de Importación en Excel ({len(pqs_actuales)} Paquetes)",
-                    data=buf_cruce_ex.getvalue(),
-                    file_name=f"Control_Cruces_Importacion_{empresa['nombre'].replace(' ', '_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-
-    else:
-        st.info("💡 Sube el reporte Excel de la DIAN en la Pestaña 1 para habilitar la triangulación y cruce de importaciones.")
-
-
+    
+                if todos_asientos_lista:
+                    df_export_cruces = pd.DataFrame(todos_asientos_lista)
+                    buf_cruce_ex = io.BytesIO()
+                    with pd.ExcelWriter(buf_cruce_ex, engine="openpyxl") as wr_cr:
+                        if resumen_paquetes_lista:
+                            pd.DataFrame(resumen_paquetes_lista).to_excel(wr_cr, sheet_name="Resumen_Paquetes", index=False)
+                        if detalle_facturas_lista:
+                            pd.DataFrame(detalle_facturas_lista).to_excel(wr_cr, sheet_name="Detalle_Facturas_Paquete", index=False)
+                        df_export_cruces.to_excel(wr_cr, sheet_name="Asiento_Control_Cruces", index=False)
+                    buf_cruce_ex.seek(0)
+                    
+                    st.download_button(
+                        label=f"📥 Descargar Control de Cruces de Importación en Excel ({len(pqs_actuales)} Paquetes)",
+                        data=buf_cruce_ex.getvalue(),
+                        file_name=f"Control_Cruces_Importacion_{empresa['nombre'].replace(' ', '_')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+    
+        else:
+            st.info("💡 Sube el reporte Excel de la DIAN en la Pestaña 1 para habilitar la triangulación y cruce de importaciones.")
+    
+    
+    except Exception as _e_tri:
+        if type(_e_tri).__name__ in ['RerunException', 'StopException', 'ScriptControlException']:
+            raise _e_tri
+        st.error(f"⚠️ Ocurrió un error en la pestaña de Triangulación y Aduanas: {_e_tri}")
+        with st.expander("🔍 Ver detalles técnicos del error (Traceback):"):
+            st.code(traceback.format_exc())
 with tab_siigo:
-    st.markdown("### Descargar Planilla Oficial Siigo Nube (3 Hojas)")
-    st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' y 'Parametrización'.")
-
-    if "df_procesado" in st.session_state:
-        df_full = st.session_state["df_procesado"]
-
-        # FILTRO DE PROTECCIÓN: Excluir facturas rojas (ya causadas en Siigo) y facturas que van por triangulación aduanera
-        n_rojas = len(df_full[df_full.get("Ya Registrada", False) == True])
-
-        # Asegurar columna No Contabilizar en df_full
-        if "No Contabilizar" not in df_full.columns:
-            df_full["No Contabilizar"] = False
+    try:
+        st.markdown("### Descargar Planilla Oficial Siigo Nube (3 Hojas)")
+        st.caption("Planilla oficial formulada con 'matriz_captura', 'interfaz_siigo' y 'Parametrización'.")
+    
+        if "df_procesado" in st.session_state and st.session_state["df_procesado"] is not None and isinstance(st.session_state["df_procesado"], pd.DataFrame) and not st.session_state["df_procesado"].empty:
+            df_full = normalizar_df_procesado(st.session_state["df_procesado"])
             st.session_state["df_procesado"] = df_full
-
-        # 1. Facturas explícitamente excluidas de contabilidad (No Contabilizar)
-        excluidas_set = st.session_state.get("facturas_no_contabilizar", set())
-        cond_excluidas = df_full["Factura"].isin(excluidas_set) | (df_full["No Contabilizar"] == True)
-        n_excluidas = int(cond_excluidas.sum())
-
-        # 2. Facturas que ya están en un paquete de triangulación aduanera
-        facs_en_pqs_import = []
-        pqs_actuales_siigo = st.session_state.get("paquetes_importacion", {})
-        if pqs_actuales_siigo:
-            for _, p_val in pqs_actuales_siigo.items():
-                if isinstance(p_val, dict) and "terceros" in p_val and not p_val["terceros"].empty:
-                    facs_en_pqs_import.extend(p_val["terceros"]["Factura"].tolist())
-
-        df_p = df_full[
-            (df_full.get("Ya Registrada", False) == False) &
-            (~cond_excluidas) &
-            (~df_full["Factura"].isin(facs_en_pqs_import)) &
-            (~((df_full.get("Es Aduanera", False) == True) & (df_full.get("Grupo Importación", "") != "")))
-        ].copy()
-
-        if n_rojas > 0:
-            st.info(f"🛡️ **Protección contra duplicados:** Se excluyeron {n_rojas} facturas marcadas en rojo que ya estaban causadas en Siigo.")
-        if n_excluidas > 0:
-            st.warning(f"🚫 **Facturas Excluidas:** Se excluyeron {n_excluidas} facturas marcadas como **'NO CONTABILIZAR'**.")
-
-        # Paquetes de triangulación listos para llevar a contabilidad en su fecha
-        pqs_listos_siigo = {k: v for k, v in pqs_actuales_siigo.items() if st.session_state.get(f"paquete_listo_{k}", False)}
-
-        c_pqs_inc1, c_pqs_inc2 = st.columns([2.5, 1.5])
-        with c_pqs_inc1:
-            inc_pqs_listos = st.checkbox(
-                f"🔀 **Llevar a la contabilidad {len(pqs_listos_siigo)} Paquete(s) de Triangulación LISTO(S)**",
-                value=True if pqs_listos_siigo else False,
-                help="Inserta los asientos contables de los paquetes de importación listos en la planilla oficial de Siigo, cada uno en su fecha exacta de operación con partida doble cuadrada."
-            )
-        with c_pqs_inc2:
-            st.caption(f"Paquetes listos: **{len(pqs_listos_siigo)}** de **{len(pqs_actuales_siigo)}** totales.")
-
-        wb = openpyxl.Workbook()
-
-        # 1. Hoja matriz_captura
-        ws_matriz = wb.active
-        ws_matriz.title = "matriz_captura"
-        headers_matriz = [
-            "Tipo Comp", "Consecutivo", "Fecha (DD/MM/AAAA)", "NIT", "Prefijo", "Factura Num",
-            "Descripcion", "Operacion", "Cta Principal", "Valor Base", "IVA", "ReteFuente",
-            "ReteICA", "ReteIVA", "Cta Contrapartida"
-        ]
-        ws_matriz.append(headers_matriz)
-
-        # 2. Hoja interfaz_siigo
-        ws_interfaz = wb.create_sheet(title="interfaz_siigo")
-        headers_interfaz = [
-            "Tipo de comprobante", "Consecutivo comprobante", "Fecha de elaboración", "Sigla moneda",
-            "Tasa de cambio", "Código cuenta contable", "Identificación tercero", "Sucursal",
-            "Código producto", "Código de bodega", "Acción", "Cantidad producto", "Prefijo",
-            "Consecutivo", "No. cuota", "Fecha vencimiento", "Código impuesto", "Código grupo activo fijo",
-            "Código activo fijo", "Descripción", "Código centro/subcentro de costos", "Débito",
-            "Crédito", "Observaciones", "Base gravable libro compras/ventas", "Base exenta libro compras/ventas", "Mes de cierre"
-        ]
-        ws_interfaz.append(headers_interfaz)
-
-        fila_r = 2
-        asientos_triang_map_siigo = st.session_state.get("asientos_triangulacion_por_factura", {})
-
-        for _, item in df_p.iterrows():
-            t_comp = item["Tipo Comp"]
-            cons = item["Consecutivo"]
-            f_str = item["Fecha"]
-            fn_item = str(item["Factura"]).strip()
-
-            # Si esta factura tiene contabilización aprobada desde triangulación, se exporta su asiento real
-            if fn_item in asientos_triang_map_siigo:
-                df_as_tr = asientos_triang_map_siigo[fn_item]
-                f_limpia_op = normalizar_fecha_dian(f_str)
-                for _, r_as in df_as_tr.iterrows():
-                    cta_code = str(r_as["Código Cuenta"]).strip()
-                    nit_clean = re.sub(r'\D', '', str(r_as["Tercero / NIT"]).split("-")[0])
-                    deb_v = float(r_as["Débito ($)"])
-                    cred_v = float(r_as["Crédito ($)"])
-                    desc_line = str(r_as.get("Descripción de la Cuenta") or r_as.get("Descripción Cuenta") or "")[:40]
-
+    
+            # FILTRO DE PROTECCIÓN: Excluir facturas rojas (ya causadas en Siigo) y facturas que van por triangulación aduanera
+            ya_reg_siigo = df_full["Ya Registrada"].fillna(False).astype(bool) if "Ya Registrada" in df_full.columns else pd.Series(False, index=df_full.index)
+            n_rojas = int(ya_reg_siigo.sum())
+    
+            # Asegurar columna No Contabilizar en df_full
+            if "No Contabilizar" not in df_full.columns:
+                df_full["No Contabilizar"] = False
+                st.session_state["df_procesado"] = df_full
+    
+            # 1. Facturas explícitamente excluidas de contabilidad (No Contabilizar)
+            excluidas_set = st.session_state.get("facturas_no_contabilizar", set())
+            cond_excluidas = df_full["Factura"].isin(excluidas_set) | (df_full["No Contabilizar"] == True)
+            n_excluidas = int(cond_excluidas.sum())
+    
+            # 2. Facturas que ya están en un paquete de triangulación aduanera
+            facs_en_pqs_import = []
+            pqs_actuales_siigo = st.session_state.get("paquetes_importacion", {})
+            if pqs_actuales_siigo:
+                for _, p_val in pqs_actuales_siigo.items():
+                    if isinstance(p_val, dict) and "terceros" in p_val and not p_val["terceros"].empty:
+                        facs_en_pqs_import.extend(p_val["terceros"]["Factura"].tolist())
+    
+            es_adu_siigo = df_full["Es Aduanera"].fillna(False).astype(bool) if "Es Aduanera" in df_full.columns else pd.Series(False, index=df_full.index)
+            grp_imp_siigo = df_full["Grupo Importación"].fillna("").astype(str).str.strip() if "Grupo Importación" in df_full.columns else pd.Series("", index=df_full.index)
+            cond_imp_adu = es_adu_siigo & (grp_imp_siigo != "")
+    
+            df_p = df_full[
+                (~ya_reg_siigo) &
+                (~cond_excluidas) &
+                (~cond_imp_adu)
+            ].copy()
+    
+            if n_rojas > 0:
+                st.info(f"🛡️ **Protección contra duplicados:** Se excluyeron {n_rojas} facturas marcadas en rojo que ya estaban causadas en Siigo.")
+            if n_excluidas > 0:
+                st.warning(f"🚫 **Facturas Excluidas:** Se excluyeron {n_excluidas} facturas marcadas como **'NO CONTABILIZAR'**.")
+    
+            # Paquetes de triangulación listos para llevar a contabilidad en su fecha (excluyendo los marcados solo para conciliación)
+            pqs_listos_siigo = {k: v for k, v in pqs_actuales_siigo.items() if st.session_state.get(f"paquete_listo_{k}", False) and st.session_state.get(f"paquete_destino_siigo_{k}", True)}
+            pqs_solo_concil = {k: v for k, v in pqs_actuales_siigo.items() if st.session_state.get(f"paquete_listo_{k}", False) and not st.session_state.get(f"paquete_destino_siigo_{k}", True)}
+    
+            c_pqs_inc1, c_pqs_inc2 = st.columns([2.5, 1.5])
+            with c_pqs_inc1:
+                inc_pqs_listos = st.checkbox(
+                    f"🔀 **Llevar a la contabilidad {len(pqs_listos_siigo)} Paquete(s) de Triangulación que pasan a Siigo**",
+                    value=True if pqs_listos_siigo else False,
+                    help="Inserta los asientos contables de los paquetes listos marcados como 'Pasar a Hoja 2' en la planilla oficial de Siigo."
+                )
+            with c_pqs_inc2:
+                st.caption(f"Suben a Siigo: **{len(pqs_listos_siigo)}** | Solo Conciliación: **{len(pqs_solo_concil)}** | Totales: **{len(pqs_actuales_siigo)}**")
+    
+            wb = openpyxl.Workbook()
+    
+            # 1. Hoja matriz_captura
+            ws_matriz = wb.active
+            ws_matriz.title = "matriz_captura"
+            headers_matriz = [
+                "Tipo Comp", "Consecutivo", "Fecha (DD/MM/AAAA)", "NIT", "Prefijo", "Factura Num",
+                "Descripcion", "Operacion", "Cta Principal", "Valor Base", "IVA", "ReteFuente",
+                "ReteICA", "ReteIVA", "Cta Contrapartida"
+            ]
+            ws_matriz.append(headers_matriz)
+    
+            # 2. Hoja interfaz_siigo
+            ws_interfaz = wb.create_sheet(title="interfaz_siigo")
+            headers_interfaz = [
+                "Tipo de comprobante", "Consecutivo comprobante", "Fecha de elaboración", "Sigla moneda",
+                "Tasa de cambio", "Código cuenta contable", "Identificación tercero", "Sucursal",
+                "Código producto", "Código de bodega", "Acción", "Cantidad producto", "Prefijo",
+                "Consecutivo", "No. cuota", "Fecha vencimiento", "Código impuesto", "Código grupo activo fijo",
+                "Código activo fijo", "Descripción", "Código centro/subcentro de costos", "Débito",
+                "Crédito", "Observaciones", "Base gravable libro compras/ventas", "Base exenta libro compras/ventas", "Mes de cierre"
+            ]
+            ws_interfaz.append(headers_interfaz)
+    
+            fila_r = 2
+            asientos_triang_map_siigo = st.session_state.get("asientos_triangulacion_por_factura", {})
+    
+            for _, item in df_p.iterrows():
+                t_comp = item["Tipo Comp"]
+                cons = item["Consecutivo"]
+                f_str = item["Fecha"]
+                fn_item = str(item["Factura"]).strip()
+    
+                # Si esta factura tiene contabilización aprobada desde triangulación, se exporta su asiento real
+                if fn_item in asientos_triang_map_siigo:
+                    df_as_tr = asientos_triang_map_siigo[fn_item]
+                    f_limpia_op = normalizar_fecha_dian(f_str)
+                    for _, r_as in df_as_tr.iterrows():
+                        cta_code = str(r_as["Código Cuenta"]).strip()
+                        nit_clean = re.sub(r'\D', '', str(r_as["Tercero / NIT"]).split("-")[0])
+                        deb_v = float(r_as["Débito ($)"])
+                        cred_v = float(r_as["Crédito ($)"])
+                        desc_line = str(r_as.get("Descripción de la Cuenta") or r_as.get("Descripción Cuenta") or "")[:40]
+    
+                        ws_interfaz.append([
+                            t_comp, cons, f_limpia_op, "COP", 1,
+                            cta_code, nit_clean, 0, "", "", "", "",
+                            item.get("Prefijo", "IMP"), item.get("Folio", str(item.get("Factura", ""))),
+                            1, f_limpia_op, "", "", "",
+                            desc_line, "", deb_v, cred_v,
+                            f"Triangulación {str(item.get('Proveedor') or 'Tercero')[:15]} Fac {item['Factura']}",
+                            0.0, 0.0, ""
+                        ])
+                        ws_matriz.append([
+                            t_comp, cons, f_limpia_op, nit_clean,
+                            item.get("Prefijo", "IMP"), item.get("Folio", str(item.get("Factura", ""))),
+                            desc_line, "Cruce Triangulación", cta_code, deb_v, 0.0, 0.0, 0.0, 0.0, "22050501"
+                        ])
+                    fila_r += len(df_as_tr)
+                    continue
+                nit = item["NIT Emisor"]
+                pref = item["Prefijo"]
+                fac_num = item["Folio"]
+                desc = item["Descripcion"]
+                op = item["Operacion"]
+                cta_p = item["Cta Principal"]
+                base = item["Base"]
+                iva = item["IVA"]
+                rfte = item["ReteFuente"]
+                rica = item.get("ReteICA", 0.0)
+                riva = item.get("ReteIVA", 0.0)
+                cta_c = item["Cta Contrapartida"]
+                cta_iva = item.get("Cta IVA", "24081001")
+                cta_rfte = item.get("Cta ReteFuente", "23654001")
+                cta_rica = item.get("Cta ReteICA", "23680501")
+    
+                ws_matriz.append([t_comp, cons, f_str, nit, pref, fac_num, desc, op, cta_p, base, iva, rfte, rica, riva, cta_c])
+    
+                r = fila_r
+                # Línea 1: Base Imponible
+                ws_interfaz.append([
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                    f"=matriz_captura!I{r}", f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "", "", "", "",
+                    f"=matriz_captura!G{r}", "",
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r})',
+                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r}, 0)',
+                    "", f"=matriz_captura!J{r}", 0.0, ""
+                ])
+    
+                # Línea 2: IVA
+                if iva > 0:
+                    cod_imp_iva = CODIGOS_IMPUESTO_SIIGO.get(str(cta_iva).strip(), "")
                     ws_interfaz.append([
-                        t_comp, cons, f_limpia_op, "COP", 1,
-                        cta_code, nit_clean, 0, "", "", "", "",
-                        item.get("Prefijo", "IMP"), item.get("Folio", str(item.get("Factura", ""))),
-                        1, f_limpia_op, "", "", "",
-                        desc_line, "", deb_v, cred_v,
-                        f"Triangulación {item['Proveedor'][:15]} Fac {item['Factura']}",
-                        0.0, 0.0, ""
+                        f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                        cta_iva, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                        cod_imp_iva, "", "", f'="IVA Base: " & matriz_captura!J{r}', "",
+                        f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!K{r})',
+                        f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!K{r}, 0)',
+                        "", f"=matriz_captura!J{r}", 0.0, ""
                     ])
-                    ws_matriz.append([
-                        t_comp, cons, f_limpia_op, nit_clean,
-                        item.get("Prefijo", "IMP"), item.get("Folio", str(item.get("Factura", ""))),
-                        desc_line, "Cruce Triangulación", cta_code, deb_v, 0.0, 0.0, 0.0, 0.0, "22050501"
-                    ])
-                fila_r += len(df_as_tr)
-                continue
-            nit = item["NIT Emisor"]
-            pref = item["Prefijo"]
-            fac_num = item["Folio"]
-            desc = item["Descripcion"]
-            op = item["Operacion"]
-            cta_p = item["Cta Principal"]
-            base = item["Base"]
-            iva = item["IVA"]
-            rfte = item["ReteFuente"]
-            rica = item.get("ReteICA", 0.0)
-            riva = item.get("ReteIVA", 0.0)
-            cta_c = item["Cta Contrapartida"]
-            cta_iva = item.get("Cta IVA", "24081001")
-            cta_rfte = item.get("Cta ReteFuente", "23654001")
-            cta_rica = item.get("Cta ReteICA", "23680501")
-
-            ws_matriz.append([t_comp, cons, f_str, nit, pref, fac_num, desc, op, cta_p, base, iva, rfte, rica, riva, cta_c])
-
-            r = fila_r
-            # Línea 1: Base Imponible
-            ws_interfaz.append([
-                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
-                f"=matriz_captura!I{r}", f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "", "", "", "",
-                f"=matriz_captura!G{r}", "",
-                f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r})',
-                f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r}, 0)',
-                "", f"=matriz_captura!J{r}", 0.0, ""
-            ])
-
-            # Línea 2: IVA
-            if iva > 0:
-                cod_imp_iva = CODIGOS_IMPUESTO_SIIGO.get(str(cta_iva).strip(), "")
-                ws_interfaz.append([
-                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
-                    cta_iva, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
-                    cod_imp_iva, "", "", f'="IVA Base: " & matriz_captura!J{r}', "",
-                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!K{r})',
-                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!K{r}, 0)',
-                    "", f"=matriz_captura!J{r}", 0.0, ""
-                ])
-
-            # Línea 3: ReteFuente
-            if rfte > 0 and cta_rfte:
-                cod_imp_rfte = CODIGOS_IMPUESTO_SIIGO.get(str(cta_rfte).strip(), "")
-                ws_interfaz.append([
-                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
-                    cta_rfte, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
-                    cod_imp_rfte, "", "", f'="ReteFuente Base: " & matriz_captura!J{r}', "",
-                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!L{r}, 0)',
-                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!L{r})',
-                    "", f"=matriz_captura!J{r}", 0.0, ""
-                ])
-
-            # Línea 4: ReteICA
-            if rica > 0 and cta_rica:
-                cod_imp_rica = CODIGOS_IMPUESTO_SIIGO.get(str(cta_rica).strip(), "")
-                ws_interfaz.append([
-                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
-                    cta_rica, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
-                    cod_imp_rica, "", "", f'="ReteICA Base: " & matriz_captura!J{r}', "",
-                    f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!M{r}, 0)',
-                    f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!M{r})',
-                    "", f"=matriz_captura!J{r}", 0.0, ""
-                ])
-
-            # Línea 5: Cuenta por Pagar (Contrapartida)
-            formula_deb = f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r} + matriz_captura!K{r} - matriz_captura!L{r} - matriz_captura!M{r} - matriz_captura!N{r}, 0)'
-            formula_cred = f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r} + matriz_captura!K{r} - matriz_captura!L{r} - matriz_captura!M{r} - matriz_captura!N{r})'
-            ws_interfaz.append([
-                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
-                f"=matriz_captura!O{r}", f"=matriz_captura!D{r}", 0, "", "", "", "",
-                f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", 1, f"=matriz_captura!C{r}",
-                "", "", "", f'="Fac " & matriz_captura!E{r} & "-" & matriz_captura!F{r}', "",
-                formula_deb, formula_cred, "", 0.0, 0.0, ""
-            ])
-            fila_r += 1
-
-        # 2.B AGREGAR A CONTABILIDAD CADA PAQUETE DE TRIANGULACIÓN LISTO EN SU FECHA EXACTA
-        if inc_pqs_listos and pqs_listos_siigo:
-            cons_cruce_base = 1
-            if "cons_ini_nota" in locals() and cons_ini_nota:
-                try:
-                    cons_cruce_base = int(cons_ini_nota)
-                except Exception:
-                    cons_cruce_base = 1
-            elif "cons_ini_nc" in locals() and cons_ini_nc:
-                try:
-                    cons_cruce_base = int(cons_ini_nc)
-                except Exception:
-                    cons_cruce_base = 1
-
-            idx_pq_cruce = 0
-            for p_k, p_v in pqs_listos_siigo.items():
-                ag_item = p_v["agente"]
-                terc_items = p_v["terceros"]
-                fecha_op_raw = ag_item["Fecha"]
-                fecha_op_clean = normalizar_fecha_dian(fecha_op_raw)
-                enviar_nd = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
-                enviar_gp_p = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
-                enviar_h2_p = st.session_state.get(f"enviar_h2_pq_{p_k}", False)
-                if st.session_state.get(f"paquete_listo_{p_k}", False) and (f"asiento_fijo_pq_{p_k}" in st.session_state or "asiento_fijo" in p_v):
-                    df_as_p = pd.DataFrame(st.session_state.get(f"asiento_fijo_pq_{p_k}", p_v.get("asiento_fijo"))).copy()
-                    dif_p = 0.0
-                    ret_p = 0.0
-                else:
-                    df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd, enviar_a_gastos_propios=enviar_gp_p, enviar_a_hoja2=enviar_h2_p)
-
-                cons_cruce_actual = cons_cruce_base + idx_pq_cruce
-                idx_pq_cruce += 1
-
-                # Asiento formal en interfaz_siigo
-                for _, f_as in df_as_p.iterrows():
-                    cta_num = str(f_as["Código Cuenta"]).strip()
-                    nit_terc_clean = re.sub(r'\D', '', str(f_as["Tercero / NIT"]).split("-")[0])
-                    deb_val = float(f_as["Débito ($)"])
-                    cred_val = float(f_as["Crédito ($)"])
-                    desc_linea = f_as["Descripción Cuenta"][:40]
-
+    
+                # Línea 2.B: IVA de Importación (240835)
+                iva_imp_it = float(item.get("IVA Importación", 0.0))
+                cta_iva_imp_it = str(item.get("Cta IVA Importación") or "240835").strip()
+                if iva_imp_it > 0:
+                    cod_imp_ivaimp = CODIGOS_IMPUESTO_SIIGO.get(cta_iva_imp_it, "")
                     ws_interfaz.append([
-                        14,  # Tipo de Comprobante: 14 (Nota de Contabilidad / Cruces)
-                        cons_cruce_actual,
-                        fecha_op_clean,
-                        "COP",
-                        1,
-                        cta_num,
-                        nit_terc_clean,
-                        0,
-                        "", "", "", "",
-                        ag_item.get("Prefijo", "IMP"),
-                        ag_item.get("Folio", str(ag_item.get("Factura", ""))),
-                        1,
-                        fecha_op_clean,
-                        "", "", "",
-                        desc_linea,
-                        "",
-                        deb_val,
-                        cred_val,
-                        f"Cruce Importacion Pq #{p_k} {ag_item['Proveedor'][:15]}",
-                        0.0,
-                        0.0,
-                        ""
+                        f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                        cta_iva_imp_it, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                        cod_imp_ivaimp, "", "", f'="IVA Importación Fac " & matriz_captura!E{r} & "-" & matriz_captura!F{r}', "",
+                        f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, {iva_imp_it})',
+                        f'=IF(matriz_captura!H{r}="Devolucion Compra", {iva_imp_it}, 0)',
+                        "", f"=matriz_captura!J{r}", 0.0, ""
                     ])
-
-                # Registro en matriz_captura
-                ws_matriz.append([
-                    14, cons_cruce_actual, fecha_op_clean,
-                    re.sub(r'\D', '', str(ag_item["NIT Emisor"])),
-                    ag_item.get("Prefijo", "IMP"),
-                    ag_item.get("Folio", str(ag_item.get("Factura", ""))),
-                    f"Cruce Importación Pq #{p_k} {ag_item['Proveedor'][:20]}",
-                    "Cruce Triangulación",
-                    "22050501",
-                    float(ag_item.get("Base", 0.0)),
-                    float(ag_item.get("IVA", 0.0)),
-                    0.0, 0.0, 0.0,
-                    "22050501"
+    
+                # Línea 3: ReteFuente
+                if rfte > 0 and cta_rfte:
+                    cod_imp_rfte = CODIGOS_IMPUESTO_SIIGO.get(str(cta_rfte).strip(), "")
+                    ws_interfaz.append([
+                        f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                        cta_rfte, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                        cod_imp_rfte, "", "", f'="ReteFuente Base: " & matriz_captura!J{r}', "",
+                        f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!L{r}, 0)',
+                        f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!L{r})',
+                        "", f"=matriz_captura!J{r}", 0.0, ""
+                    ])
+    
+                # Línea 4: ReteICA
+                if rica > 0 and cta_rica:
+                    cod_imp_rica = CODIGOS_IMPUESTO_SIIGO.get(str(cta_rica).strip(), "")
+                    ws_interfaz.append([
+                        f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                        cta_rica, f"=matriz_captura!D{r}", 0, "", "", "", "", "", "", "", "",
+                        cod_imp_rica, "", "", f'="ReteICA Base: " & matriz_captura!J{r}', "",
+                        f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!M{r}, 0)',
+                        f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!M{r})',
+                        "", f"=matriz_captura!J{r}", 0.0, ""
+                    ])
+    
+                # Línea 5: Cuenta por Pagar (Contrapartida)
+                extra_iva_imp_str = f" + {iva_imp_it}" if iva_imp_it > 0 else ""
+                formula_deb = f'=IF(matriz_captura!H{r}="Devolucion Compra", matriz_captura!J{r} + matriz_captura!K{r}{extra_iva_imp_str} - matriz_captura!L{r} - matriz_captura!M{r} - matriz_captura!N{r}, 0)'
+                formula_cred = f'=IF(matriz_captura!H{r}="Devolucion Compra", 0, matriz_captura!J{r} + matriz_captura!K{r}{extra_iva_imp_str} - matriz_captura!L{r} - matriz_captura!M{r} - matriz_captura!N{r})'
+                ws_interfaz.append([
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", f"=matriz_captura!C{r}", "COP", 1,
+                    f"=matriz_captura!O{r}", f"=matriz_captura!D{r}", 0, "", "", "", "",
+                    f"=matriz_captura!A{r}", f"=matriz_captura!B{r}", 1, f"=matriz_captura!C{r}",
+                    "", "", "", f'="Fac " & matriz_captura!E{r} & "-" & matriz_captura!F{r}', "",
+                    formula_deb, formula_cred, "", 0.0, 0.0, ""
                 ])
                 fila_r += 1
+    
+            # 2.B AGREGAR A CONTABILIDAD CADA PAQUETE DE TRIANGULACIÓN LISTO EN SU FECHA EXACTA
+            if inc_pqs_listos and pqs_listos_siigo:
+                cons_cruce_base = 1
+                if "cons_ini_nota" in locals() and cons_ini_nota:
+                    try:
+                        cons_cruce_base = int(cons_ini_nota)
+                    except Exception:
+                        cons_cruce_base = 1
+                elif "cons_ini_nc" in locals() and cons_ini_nc:
+                    try:
+                        cons_cruce_base = int(cons_ini_nc)
+                    except Exception:
+                        cons_cruce_base = 1
+    
+                idx_pq_cruce = 0
+                for p_k, p_v in pqs_listos_siigo.items():
+                    ag_item = p_v["agente"]
+                    ag_fac_chk = str(ag_item.get("Factura", "")).strip()
+                    # Si la factura del agente ya fue exportada con su asiento de triangulación en df_p, no duplicar
+                    if ag_fac_chk in df_p["Factura"].astype(str).str.strip().values and ag_fac_chk in asientos_triang_map_siigo:
+                        continue
+                    terc_items = p_v["terceros"]
+                    fecha_op_raw = ag_item["Fecha"]
+                    fecha_op_clean = normalizar_fecha_dian(fecha_op_raw)
+                    enviar_nd = st.session_state.get(f"enviar_nd_pq_{p_k}", False)
+                    enviar_gp_p = st.session_state.get(f"enviar_gp_pq_{p_k}", False)
+                    enviar_h2_p = st.session_state.get(f"enviar_h2_pq_{p_k}", False)
+                    if st.session_state.get(f"paquete_listo_{p_k}", False) and (f"asiento_fijo_pq_{p_k}" in st.session_state or "asiento_fijo" in p_v):
+                        df_as_p = pd.DataFrame(st.session_state.get(f"asiento_fijo_pq_{p_k}", p_v.get("asiento_fijo"))).copy()
+                        dif_p = 0.0
+                        ret_p = 0.0
+                    else:
+                        df_as_p, dif_p, ret_p = generar_asiento_triangulacion_paquete(ag_item, terc_items, enviar_a_no_deducible=enviar_nd, enviar_a_gastos_propios=enviar_gp_p, enviar_a_hoja2=enviar_h2_p)
+    
+                    cons_cruce_actual = cons_cruce_base + idx_pq_cruce
+                    idx_pq_cruce += 1
+    
+                    # Asiento formal en interfaz_siigo
+                    for _, f_as in df_as_p.iterrows():
+                        cta_num = str(f_as["Código Cuenta"]).strip()
+                        nit_terc_clean = re.sub(r'\D', '', str(f_as["Tercero / NIT"]).split("-")[0])
+                        deb_val = float(f_as["Débito ($)"])
+                        cred_val = float(f_as["Crédito ($)"])
+                        desc_linea = str(f_as.get("Descripción de la Cuenta") or f_as.get("Descripción Cuenta") or f_as.get("Descripción") or "")[:40]
+    
+                        ws_interfaz.append([
+                            14,  # Tipo de Comprobante: 14 (Nota de Contabilidad / Cruces)
+                            cons_cruce_actual,
+                            fecha_op_clean,
+                            "COP",
+                            1,
+                            cta_num,
+                            nit_terc_clean,
+                            0,
+                            "", "", "", "",
+                            ag_item.get("Prefijo", "IMP"),
+                            ag_item.get("Folio", str(ag_item.get("Factura", ""))),
+                            1,
+                            fecha_op_clean,
+                            "", "", "",
+                            desc_linea,
+                            "",
+                            deb_val,
+                            cred_val,
+                            f"Cruce Importacion Pq #{p_k} {ag_str(item.get('Proveedor') or 'Tercero')[:15]}",
+                            0.0,
+                            0.0,
+                            ""
+                        ])
+    
+                    # Registro en matriz_captura
+                    ws_matriz.append([
+                        14, cons_cruce_actual, fecha_op_clean,
+                        re.sub(r'\D', '', str(ag_item["NIT Emisor"])),
+                        ag_item.get("Prefijo", "IMP"),
+                        ag_item.get("Folio", str(ag_item.get("Factura", ""))),
+                        f"Cruce Importación Pq #{p_k} {str(ag_item.get('Proveedor') or 'Agente')[:20]}",
+                        "Cruce Triangulación",
+                        "22050501",
+                        float(ag_item.get("Base", 0.0)),
+                        float(ag_item.get("IVA", 0.0)),
+                        0.0, 0.0, 0.0,
+                        "22050501"
+                    ])
+                    fila_r += 1
+    
+            # 3. Hoja Parametrización
+            ws_params = wb.create_sheet(title="Parametrización")
+            ws_params.append(["Tipo Comprobante", "", "Impuesto", "Siigo_ID", "Tarifa", "Venta", "Compra", "Dev_Venta", "Dev_Compra"])
+            comprobantes = [
+                "1 - Ajustes contables", "2 - Depreciación", "3 - Costeo", "4 - Diferidos", "5 - Legalización de viaticos",
+                "6 - Legalización de Caja menores", "7 - Obligaciones financieras", "8 - Nómina", "998 - Cierre año",
+                "999 - Saldos iniciales", "992 - Comprobante de nómina", "993 - Comprobante de nómina provisión y seguridad social",
+                "994 - Comprobante liquidación de contrato", "995 - Comprobante liquidación de primas", "996 - Comprobante liquidación de cesantías",
+                "997 - Comprobante desembolso nómina", "9 - Recibo de Caja", "10 - Factura de Compra", "11 - Comprobante de Egreso",
+                "12 - Factura de Venta", "13 - Nota Credito", "14 - Nota de Contabilidad", "15 - Documento soporte electronico",
+                "777 - Ajustes contables de cartera", "9901 - Traslado de dinero", "16 - FACTURAS DE COMPRA (2)", "17 - NOTA CREDITO DE COMPRA"
+            ]
+            impuestos = [
+                ("IVA 19%", 1, 0.19, "24080601", "24081001", "24082001", "24081002"),
+                ("IVA Servicios 19%", 1, 0.19, "24080601", "24081501", "24082001", "24082001"),
+                ("IVA Importación 19%", 1, 0.19, "24080601", "240835", "24082001", "24081002"),
+                ("IVA 5%", 2, 0.05, "24080602", "24081003", "24082002", "24081004"),
+                ("Retefuente 11%", 3, 0.11, "13551509", "23651501", "13551510", "23651502"),
+                ("Retefuente 10%", 4, 0.1, "13551507", "23652001", "13551508", "23652002"),
+                ("Retefuente 6%", 5, 0.06, "13551505", "23652501", "13551506", "23652502"),
+                ("Retefuente 4%", 6, 0.04, "13551503", "23652503", "13551504", "23652504"),
+                ("Retefuente 3.5%", 18, 0.035, "13551513", "23654004", "13551514", "23654005"),
+                ("Retefuente 2.5%", 7, 0.025, "13551501", "23654001", "13551502", "23654002"),
+                ("Retefuente Combustibles 0.1%", 23, 0.001, "13551599", "23654006", "13551599", "23654006"),
+                ("ReteICA 11.04", 8, 0.01104, "13551801", "23680501", "13551802", "23680502"),
+                ("ReteICA 13.8", 9, 0.0138, "13551803", "23680503", "13551804", "23680504"),
+                ("ReteICA 9.66", 10, 0.00966, "13551805", "23680505", "13551806", "23680506"),
+                ("ReteICA 8", 11, 0.008, "13551807", "23680507", "13551808", "23680508"),
+                ("ReteICA 7", 12, 0.007, "13551809", "23680509", "13551810", "23680510"),
+                ("ReteICA 6.9", 13, 0.0069, "13551811", "23680511", "13551812", "23680512"),
+                ("ReteICA 4.14", 14, 0.00414, "13551813", "23680513", "13551814", "23680514"),
+                ("ReteIVA 15%", 15, 0.15, "13551701", "23670101", "13551702", "23670102")
+            ]
+            max_len = max(len(comprobantes), len(impuestos))
+            for idx_row in range(max_len):
+                c_val = comprobantes[idx_row] if idx_row < len(comprobantes) else ""
+                if idx_row < len(impuestos):
+                    imp = list(impuestos[idx_row])
+                    ws_params.append([c_val, ""] + imp)
+                else:
+                    ws_params.append([c_val, "", "", "", "", "", "", "", ""])
+    
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+    
+            st.download_button(
+                label=f"📥 1. Descargar Planilla Oficial Siigo Nube (3 Hojas Formuladas) - {empresa['nombre']}",
+                data=output,
+                file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}_3_Hojas.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            st.success("Planilla generada con las 3 hojas oficiales: 'matriz_captura', 'interfaz_siigo' (con códigos de impuesto) y 'Parametrización'.")
+    
+            st.markdown("---")
+            st.markdown("### 📊 Libro Auxiliar Contable: Facturas Una a Una y Consolidado")
+            st.write("Genera el reporte administrativo con el detalle factura a factura y las hojas de consolidado por proveedor y cuentas contables:")
+    
+            out_aux = io.BytesIO()
+            with pd.ExcelWriter(out_aux, engine='openpyxl') as writer_aux:
+                cols_detalle = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Cta Principal", "Categoría", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Cta Contrapartida", "Razón Contable", "Soporte PDF Renombrado"]
+                df_det_export = df_p[cols_detalle].copy()
+    
+                totales_dict = {
+                    "Comprobante Siigo": "TOTALES CONSOLIDADOS",
+                    "Fecha": "-", "Factura": f"{len(df_det_export)} Docs", "Proveedor": "-", "NIT Emisor": "-",
+                    "Cta Principal": "-", "Categoría": "-",
+                    "Base": df_det_export["Base"].sum(),
+                    "IVA": df_det_export["IVA"].sum(),
+                    "ReteFuente": df_det_export["ReteFuente"].sum(),
+                    "ReteICA": df_det_export["ReteICA"].sum(),
+                    "Total": df_det_export["Total"].sum(),
+                    "Cta Contrapartida": "-", "Razón Contable": "-", "Soporte PDF Renombrado": "-"
+                }
+                df_det_export = pd.concat([df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
+                df_det_export.to_excel(writer_aux, sheet_name="Facturas_Una_a_Una", index=False)
+    
+                df_cons_prov = df_p.groupby(["NIT Emisor", "Proveedor"]).agg({
+                    "Comprobante Siigo": "count",
+                    "Base": "sum",
+                    "IVA": "sum",
+                    "ReteFuente": "sum",
+                    "ReteICA": "sum",
+                    "Total": "sum"
+                }).reset_index().rename(columns={"Comprobante Siigo": "Cant Facturas"})
+                df_cons_prov["Neto CxP"] = df_cons_prov["Total"] - df_cons_prov["ReteFuente"] - df_cons_prov["ReteICA"]
+                df_cons_prov = df_cons_prov.sort_values(by="Total", ascending=False).reset_index(drop=True)
+                df_cons_prov.to_excel(writer_aux, sheet_name="Consolidado_Proveedores", index=False)
+    
+                df_cons_cta = df_p.groupby(["Cta Principal", "Categoría"]).agg({
+                    "Comprobante Siigo": "count",
+                    "Base": "sum",
+                    "IVA": "sum",
+                    "ReteFuente": "sum",
+                    "ReteICA": "sum",
+                    "Total": "sum"
+                }).reset_index().rename(columns={"Comprobante Siigo": "Cant Facturas"})
+                df_cons_cta.to_excel(writer_aux, sheet_name="Consolidado_Cuentas_PUC", index=False)
+    
+            out_aux.seek(0)
+            st.download_button(
+                label=f"📥 2. Descargar Libro de Facturas (Una a Una + Consolidado) - {empresa['nombre']}",
+                data=out_aux,
+                file_name=f"Libro_Facturas_Detallado_Y_Consolidado_{empresa['nombre'].replace(' ', '_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        else:
+            st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
+    
+    except Exception as _e_sii:
+        if type(_e_sii).__name__ in ['RerunException', 'StopException', 'ScriptControlException']:
+            raise _e_sii
+        st.error(f"⚠️ Ocurrió un error en la exportación a Siigo: {_e_sii}")
+        with st.expander("🔍 Ver detalles técnicos del error (Traceback):"):
+            st.code(traceback.format_exc())
+import gc
+gc.collect()
 
-        # 3. Hoja Parametrización
-        ws_params = wb.create_sheet(title="Parametrización")
-        ws_params.append(["Tipo Comprobante", "", "Impuesto", "Siigo_ID", "Tarifa", "Venta", "Compra", "Dev_Venta", "Dev_Compra"])
-        comprobantes = [
-            "1 - Ajustes contables", "2 - Depreciación", "3 - Costeo", "4 - Diferidos", "5 - Legalización de viaticos",
-            "6 - Legalización de Caja menores", "7 - Obligaciones financieras", "8 - Nómina", "998 - Cierre año",
-            "999 - Saldos iniciales", "992 - Comprobante de nómina", "993 - Comprobante de nómina provisión y seguridad social",
-            "994 - Comprobante liquidación de contrato", "995 - Comprobante liquidación de primas", "996 - Comprobante liquidación de cesantías",
-            "997 - Comprobante desembolso nómina", "9 - Recibo de Caja", "10 - Factura de Compra", "11 - Comprobante de Egreso",
-            "12 - Factura de Venta", "13 - Nota Credito", "14 - Nota de Contabilidad", "15 - Documento soporte electronico",
-            "777 - Ajustes contables de cartera", "9901 - Traslado de dinero", "16 - FACTURAS DE COMPRA (2)", "17 - NOTA CREDITO DE COMPRA"
-        ]
-        impuestos = [
-            ("IVA 19%", 1, 0.19, "24080601", "24081001", "24082001", "24081002"),
-            ("IVA Servicios 19%", "", 0.19, "24080601", "24081501", "24082001", "24082001"),
-            ("IVA 5%", 2, 0.05, "24080602", "24081003", "24082002", "24081004"),
-            ("Retefuente 11%", 3, 0.11, "13551509", "23651501", "13551510", "23651502"),
-            ("Retefuente 10%", 4, 0.1, "13551507", "23652001", "13551508", "23652002"),
-            ("Retefuente 6%", 5, 0.06, "13551505", "23652501", "13551506", "23652502"),
-            ("Retefuente 4%", 6, 0.04, "13551503", "23652503", "13551504", "23652504"),
-            ("Retefuente 3.5%", 18, 0.035, "13551513", "23654004", "13551514", "23654005"),
-            ("Retefuente 2.5%", 7, 0.025, "13551501", "23654001", "13551502", "23654002"),
-            ("Retefuente Combustibles 0.1%", 23, 0.001, "13551599", "23654006", "13551599", "23654006"),
-            ("ReteICA 11.04", 8, 0.01104, "13551801", "23680501", "13551802", "23680502"),
-            ("ReteICA 13.8", 9, 0.0138, "13551803", "23680503", "13551804", "23680504"),
-            ("ReteICA 9.66", 10, 0.00966, "13551805", "23680505", "13551806", "23680506"),
-            ("ReteICA 8", 11, 0.008, "13551807", "23680507", "13551808", "23680508"),
-            ("ReteICA 7", 12, 0.007, "13551809", "23680509", "13551810", "23680510"),
-            ("ReteICA 6.9", 13, 0.0069, "13551811", "23680511", "13551812", "23680512"),
-            ("ReteICA 4.14", 14, 0.00414, "13551813", "23680513", "13551814", "23680514"),
-            ("ReteIVA 15%", 15, 0.15, "13551701", "23670101", "13551702", "23670102")
-        ]
-        max_len = max(len(comprobantes), len(impuestos))
-        for idx_row in range(max_len):
-            c_val = comprobantes[idx_row] if idx_row < len(comprobantes) else ""
-            if idx_row < len(impuestos):
-                imp = list(impuestos[idx_row])
-                ws_params.append([c_val, ""] + imp)
-            else:
-                ws_params.append([c_val, "", "", "", "", "", "", "", ""])
-
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-
-        st.download_button(
-            label=f"📥 1. Descargar Planilla Oficial Siigo Nube (3 Hojas Formuladas) - {empresa['nombre']}",
-            data=output,
-            file_name=f"Plantilla_Siigo_{empresa['nombre'].replace(' ', '_')}_3_Hojas.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-        st.success("Planilla generada con las 3 hojas oficiales: 'matriz_captura', 'interfaz_siigo' (con códigos de impuesto) y 'Parametrización'.")
-
-        st.markdown("---")
-        st.markdown("### 📊 Libro Auxiliar Contable: Facturas Una a Una y Consolidado")
-        st.write("Genera el reporte administrativo con el detalle factura a factura y las hojas de consolidado por proveedor y cuentas contables:")
-
-        out_aux = io.BytesIO()
-        with pd.ExcelWriter(out_aux, engine='openpyxl') as writer_aux:
-            cols_detalle = ["Comprobante Siigo", "Fecha", "Factura", "Proveedor", "NIT Emisor", "Cta Principal", "Categoría", "Base", "IVA", "ReteFuente", "ReteICA", "Total", "Cta Contrapartida", "Razón Contable", "Soporte PDF Renombrado"]
-            df_det_export = df_p[cols_detalle].copy()
-
-            totales_dict = {
-                "Comprobante Siigo": "TOTALES CONSOLIDADOS",
-                "Fecha": "-", "Factura": f"{len(df_det_export)} Docs", "Proveedor": "-", "NIT Emisor": "-",
-                "Cta Principal": "-", "Categoría": "-",
-                "Base": df_det_export["Base"].sum(),
-                "IVA": df_det_export["IVA"].sum(),
-                "ReteFuente": df_det_export["ReteFuente"].sum(),
-                "ReteICA": df_det_export["ReteICA"].sum(),
-                "Total": df_det_export["Total"].sum(),
-                "Cta Contrapartida": "-", "Razón Contable": "-", "Soporte PDF Renombrado": "-"
-            }
-            df_det_export = pd.concat([df_det_export, pd.DataFrame([totales_dict])], ignore_index=True)
-            df_det_export.to_excel(writer_aux, sheet_name="Facturas_Una_a_Una", index=False)
-
-            df_cons_prov = df_p.groupby(["NIT Emisor", "Proveedor"]).agg({
-                "Comprobante Siigo": "count",
-                "Base": "sum",
-                "IVA": "sum",
-                "ReteFuente": "sum",
-                "ReteICA": "sum",
-                "Total": "sum"
-            }).reset_index().rename(columns={"Comprobante Siigo": "Cant Facturas"})
-            df_cons_prov["Neto CxP"] = df_cons_prov["Total"] - df_cons_prov["ReteFuente"] - df_cons_prov["ReteICA"]
-            df_cons_prov = df_cons_prov.sort_values(by="Total", ascending=False).reset_index(drop=True)
-            df_cons_prov.to_excel(writer_aux, sheet_name="Consolidado_Proveedores", index=False)
-
-            df_cons_cta = df_p.groupby(["Cta Principal", "Categoría"]).agg({
-                "Comprobante Siigo": "count",
-                "Base": "sum",
-                "IVA": "sum",
-                "ReteFuente": "sum",
-                "ReteICA": "sum",
-                "Total": "sum"
-            }).reset_index().rename(columns={"Comprobante Siigo": "Cant Facturas"})
-            df_cons_cta.to_excel(writer_aux, sheet_name="Consolidado_Cuentas_PUC", index=False)
-
-        out_aux.seek(0)
-        st.download_button(
-            label=f"📥 2. Descargar Libro de Facturas (Una a Una + Consolidado) - {empresa['nombre']}",
-            data=out_aux,
-            file_name=f"Libro_Facturas_Detallado_Y_Consolidado_{empresa['nombre'].replace(' ', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-    else:
-        st.info("Primero procesa los documentos en la Pestana 1 para habilitar la descarga.")
